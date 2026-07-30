@@ -1,0 +1,236 @@
+import AppKit
+import Combine
+import TimesliceCore
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var store: IntervalStore!
+    private var engine: TimerEngine!
+    private var appState: AppState!
+    private var privacy: PrivacyController!
+    private let settings = Settings()
+    private var statusBar: StatusBarController!
+    private var mainWindowController: MainWindowController?
+    private var hotkeys: GlobalHotkeyManager!
+    private let hud = SwitchHUD()
+    private let quickAdd = QuickAddPanel()
+    private var autoPause: AutoPauseController?
+    private var cancellables: Set<AnyCancellable> = []
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        do {
+            if DemoData.isRequested {
+                // Screenshot mode: use a separate demo DB and populate it with sample history.
+                store = try IntervalStore(databaseURL: DemoData.databaseURL)
+                try store.migrateIfNeeded()
+                DemoData.seed(into: store)
+            } else {
+                store = try IntervalStore()
+                try store.migrateIfNeeded()
+                try seedProjectsIfEmpty()
+            }
+        } catch {
+            presentFatal(error)
+            return
+        }
+
+        engine = TimerEngine(store: store)
+        privacy = PrivacyController()
+        // In screenshot mode, disable capture exclusion so `screencapture` can image the window
+        // (normally windows use sharingType = .none and appear blank to any capture).
+        if DemoData.isRequested { privacy.setWindowExclusion(false) }
+        appState = AppState(store: store, engine: engine)
+        appState.reload()
+        engine.restore()
+
+        let autoPause = AutoPauseController(engine: engine, appState: appState, settings: settings)
+        autoPause.openMainWindow = { [weak self] in self?.showMainWindow() }
+        self.autoPause = autoPause
+
+        statusBar = StatusBarController(appState: appState, engine: engine, privacy: privacy, autoPause: autoPause)
+
+        installMainMenu()
+        setupHotkeys()
+
+        NotificationCenter.default.publisher(for: .openMainWindow)
+            .sink { [weak self] _ in self?.showMainWindow() }
+            .store(in: &cancellables)
+
+        if DemoData.isRequested {
+            // Start a live timer so the running/paused UI shows, and open the window for capture.
+            if let first = appState.projects.first { engine.switchTo(projectID: first.id) }
+            appState.reload()
+            showMainWindow()
+        }
+    }
+
+    /// Build a minimal main menu so standard shortcuts (⌘Q quit, ⌘W close, ⌘M minimize) work.
+    /// Without an app menu, ⌘Q does nothing.
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About Timeslice", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide Timeslice", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit Timeslice", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenuItem.submenu = appMenu
+
+        let windowMenuItem = NSMenuItem()
+        mainMenu.addItem(windowMenuItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenuItem.submenu = windowMenu
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    // MARK: - Global hotkey handling (fn+⌘+⇧ task switcher)
+
+    /// The task selected when the switcher chord was pressed — so we can tell if the user
+    /// actually cycled to a different task before releasing.
+    private var switcherStartID: Int64?
+
+    /// When privacy hides the task name (icon-only), suppress the switcher HUD + its shortcuts
+    /// entirely, so nothing task-revealing pops up while you're sharing your screen.
+    private var switcherSuppressed: Bool { privacy.level == .iconOnly }
+
+    private func setupHotkeys() {
+        hotkeys = GlobalHotkeyManager()
+
+        hotkeys.onActivate = { [weak self] in
+            guard let self, !self.switcherSuppressed else { return }
+            let selectable = self.appState.selectableProjects
+            // Begin cycling from the running task if it's still selectable; otherwise ensure the
+            // selection lands on a selectable (unfinished) task so the HUD highlights something.
+            if let running = self.engine.runningProjectID, selectable.contains(where: { $0.id == running }) {
+                self.appState.selectedProjectID = running
+            } else if !selectable.contains(where: { $0.id == self.appState.selectedProjectID }) {
+                self.appState.selectedProjectID = selectable.first?.id
+            }
+            self.switcherStartID = self.appState.selectedProjectID
+            self.hud.showSwitcher(tasks: selectable, selectedID: self.appState.selectedProjectID, todaySeconds: self.appState.todaySecondsByID, runningID: self.engine.runningProjectID, clock: self.engine.clock)
+        }
+
+        hotkeys.onCycle = { [weak self] delta in
+            guard let self, !self.switcherSuppressed else { return }
+            self.appState.moveSelection(by: delta)   // \ forward (+1), ] reverse (-1)
+            self.hud.showSwitcher(tasks: self.appState.selectableProjects, selectedID: self.appState.selectedProjectID, todaySeconds: self.appState.todaySecondsByID, runningID: self.engine.runningProjectID, clock: self.engine.clock)
+        }
+
+        hotkeys.onCommit = { [weak self] in
+            guard let self, !self.switcherSuppressed else { return }
+            guard let selected = self.appState.selectedProjectID else { return }
+            // Quick press+release on the already-running task → pause it (stays the current
+            // task, so the menu bar keeps showing it). Otherwise switch to the selected task.
+            if selected == self.switcherStartID && self.engine.runningProjectID == selected {
+                self.engine.pause()
+            } else {
+                self.engine.switchTo(projectID: selected)  // pauses previous, starts selected
+            }
+            self.switcherStartID = nil
+            self.showHUDForRunning()
+        }
+
+        hotkeys.onPrivacy = { [weak self] in self?.privacy.cycleLevel() }
+
+        hotkeys.onQuickAdd = { [weak self] in
+            guard let self, !self.switcherSuppressed else { return }   // don't reveal input while sharing
+            self.showMainWindow()        // open the full app right away, behind the input
+            self.quickAdd.show { [weak self] name in
+                self?.appState.addAndStart(name: name)
+                self?.showHUDForRunning()
+            }
+        }
+
+        // Requires Accessibility permission. If not yet granted, guide the user, then poll.
+        if !hotkeys.register() {
+            promptForAccessibility()
+            pollForAccessibility()
+        }
+    }
+
+    /// Explain why the permission is needed and offer to open the right Settings pane.
+    /// We do NOT call the system prompt (`prompt: true`) — that would stack macOS's own dialog on
+    /// top of this one (a confusing double prompt). Our alert + a button to the settings pane is
+    /// clearer and sufficient.
+    private func promptForAccessibility() {
+        let alert = NSAlert()
+        alert.messageText = "Turn on Timeslice’s quick task switcher"
+        alert.informativeText = """
+        The switcher lets you hold fn+⌘+⇧ and tap \\ or ] to flip through tasks — like ⌘-Tab \
+        for apps — then release to start the one you land on.
+
+        macOS needs your OK for this because two parts require it: reading the fn (globe) key, \
+        and noticing when you let go of the keys to make your pick. macOS only allows that after \
+        you enable Timeslice under Accessibility. It’s used only for these shortcuts — nothing else.
+
+        Everything else in Timeslice works without this. (If an old “Timeslice” entry is already \
+        listed, remove it with “–” and add this one.)
+        """
+        alert.addButton(withTitle: "Open Accessibility Settings")
+        alert.addButton(withTitle: "Later")
+        if alert.runModal() == .alertFirstButtonReturn {
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
+    private func pollForAccessibility() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self else { return }
+            if self.hotkeys.isActive { return }
+            if self.hotkeys.register() { return }
+            self.pollForAccessibility()
+        }
+    }
+
+    private func showHUDForRunning() {
+        if let id = engine.runningProjectID, let project = appState.projects.first(where: { $0.id == id }) {
+            hud.showCommitted(text: project.name, colorHex: project.colorHex, running: true)
+        } else {
+            hud.showCommitted(text: "Stopped", colorHex: "#8E8E93", running: false)
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        hotkeys?.unregister()
+    }
+
+    /// Fires when the app is activated with no visible windows — e.g. ⌘-Tab to Timeslice or
+    /// clicking its Dock icon after the main window was closed. Reopen the main window so the
+    /// user doesn't have to go back to the popover's "Open" button.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { showMainWindow() }
+        return true
+    }
+
+    private func seedProjectsIfEmpty() throws {
+        guard try store.listProjects(includeArchived: true).isEmpty else { return }
+        let starters = ["Deep Work", "Meetings", "Email", "Breaks"]
+        for (index, name) in starters.enumerated() {
+            try store.createProject(name: name, colorHex: Palette.color(forIndex: index))
+        }
+    }
+
+    private func showMainWindow() {
+        if mainWindowController == nil {
+            mainWindowController = MainWindowController(appState: appState, engine: engine, privacy: privacy, settings: settings)
+        }
+        mainWindowController?.show()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func presentFatal(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Timeslice failed to start"
+        alert.informativeText = error.localizedDescription
+        alert.runModal()
+        NSApp.terminate(nil)
+    }
+}
