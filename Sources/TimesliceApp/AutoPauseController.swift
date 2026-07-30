@@ -72,6 +72,10 @@ final class AutoPauseController: ObservableObject {
     }
 
     @objc private func didWake() {
+        // The run loop is suspended during sleep, so the menu bar's deferred state refresh can be
+        // missed — the paused task ends up without its orange pill. Nudge a refresh on wake.
+        NotificationCenter.default.post(name: TimesliceNotifications.dataDidChange, object: nil)
+
         guard let resume = resumeAfterWake else { return }
         resumeAfterWake = nil
         // Only offer if that task still exists and isn't archived/finished.
@@ -147,9 +151,9 @@ final class AutoPauseController: ObservableObject {
     private func presentStillWorkingPanel(projectID: Int64, name: String) {
         showPrompt(
             title: "Still on “\(name)”?",
-            message: "Paused it for now. Resume if you're still on it.",
-            primary: "Keep going",
-            secondary: nil   // already paused; dismissing the panel just leaves it paused
+            message: "Paused it for now. Keep going, or leave it paused?",
+            primary: "Keep going",       // default — highlighted, Return activates it
+            secondary: "Keep it paused"
         ) { [weak self] keepGoing in
             guard let self else { return }
             self.awaitingResponse = false

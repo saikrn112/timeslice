@@ -54,6 +54,17 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
                 self?.updateTitle()
             }.store(in: &cancellables)
 
+        // After sleep/wake the run loop was suspended, so a deferred refresh can be missed and
+        // the paused pill never gets drawn. Force a full redraw on wake (bypass the dedup cache).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.lastRenderedTitle = nil
+                self?.updateTitle()
+            }
+        }
+
         updateTitle()
     }
 
