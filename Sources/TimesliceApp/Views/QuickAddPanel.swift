@@ -56,7 +56,9 @@ final class QuickAddPanel {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.sharingType = .none   // keep the entered name out of screen captures
+        // Normally excluded from screen capture; in demo mode leave it visible so it can be
+        // screen-recorded for the README.
+        panel.sharingType = ProcessInfo.processInfo.environment["TIMESLICE_SEED_DEMO"] == "1" ? .readOnly : .none
         return panel
     }
 

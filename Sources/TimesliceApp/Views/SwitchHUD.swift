@@ -66,7 +66,9 @@ final class SwitchHUD {
         panel.hasShadow = true
         panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.sharingType = .none   // keep the HUD out of screen captures — it names tasks
+        // Normally excluded from screen capture (it names tasks); in demo mode leave it visible
+        // so the switcher can be screen-recorded for the README.
+        panel.sharingType = ProcessInfo.processInfo.environment["TIMESLICE_SEED_DEMO"] == "1" ? .readOnly : .none
         return panel
     }
 
