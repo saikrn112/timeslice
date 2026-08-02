@@ -78,6 +78,134 @@ public enum Aggregations {
             .sorted { ($0.day, $0.projectID) < ($1.day, $1.projectID) }
     }
 
+    // MARK: - Ranged aggregation (drives the global metrics filter)
+
+    /// Seconds per project within `range` (clipped to it). Includes archived tasks if passed in.
+    public static func totals(
+        projects: [Project], intervals: [Interval], range: DateRange,
+        now: Date = Date()
+    ) -> [ProjectTotal] {
+        var byProject: [Int64: TimeInterval] = [:]
+        for interval in intervals {
+            let secs = clip(interval, windowStart: range.start, windowEnd: range.end, now: now)
+            guard secs > 0 else { continue }
+            byProject[interval.projectID, default: 0] += secs
+        }
+        return projects.map { ProjectTotal(project: $0, seconds: byProject[$0.id] ?? 0) }
+    }
+
+    /// Bucketed totals across `range` — one entry per day/week/month depending on `range.unit`.
+    /// Empty buckets are included (as zeros) so charts show gaps honestly.
+    public static func buckets(
+        intervals: [Interval], range: DateRange, deepThreshold: TimeInterval,
+        now: Date = Date(), calendar: Calendar = .current
+    ) -> [Bucket] {
+        let component: Calendar.Component = range.unit.bucket == .hour ? .day : range.unit.bucket
+        // Seed every bucket start in the window.
+        var starts: [Date] = []
+        var cursor = bucketStart(for: range.start, component: component, calendar: calendar)
+        while cursor < range.end {
+            starts.append(cursor)
+            guard let next = calendar.date(byAdding: component, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+        var total = Dictionary(uniqueKeysWithValues: starts.map { ($0, TimeInterval(0)) })
+        var deep = total
+
+        for interval in intervals {
+            let end = interval.end ?? now
+            let isDeep = end.timeIntervalSince(interval.start) >= deepThreshold
+            // Split by day, then fold each day's slice into its bucket — keeps DST/midnight correct.
+            forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
+                guard dayStart >= range.start && dayStart < range.end else { return }
+                let secs = segEnd.timeIntervalSince(segStart)
+                guard secs > 0 else { return }
+                let key = bucketStart(for: dayStart, component: component, calendar: calendar)
+                guard total[key] != nil else { return }
+                total[key, default: 0] += secs
+                if isDeep { deep[key, default: 0] += secs }
+            }
+        }
+        return starts.map { Bucket(start: $0, totalSeconds: total[$0] ?? 0, deepSeconds: deep[$0] ?? 0) }
+    }
+
+    private static func bucketStart(for date: Date, component: Calendar.Component,
+                                    calendar: Calendar) -> Date {
+        switch component {
+        case .weekOfYear: return calendar.dateInterval(of: .weekOfYear, for: date)?.start ?? date
+        case .month:      return calendar.dateInterval(of: .month, for: date)?.start ?? date
+        default:          return calendar.startOfDay(for: date)
+        }
+    }
+
+    /// Headline stats for `range`.
+    public static func summary(
+        intervals: [Interval], range: DateRange, deepThreshold: TimeInterval,
+        dailyGoalSeconds: TimeInterval, now: Date = Date(), calendar: Calendar = .current
+    ) -> RangeSummary {
+        // Per-day totals within the range (day granularity regardless of bucket size).
+        var perDay: [Date: TimeInterval] = [:]
+        var deepTotal: TimeInterval = 0
+        var total: TimeInterval = 0
+        var longest: TimeInterval = 0
+
+        for interval in intervals {
+            let end = interval.end ?? now
+            let full = end.timeIntervalSince(interval.start)
+            let isDeep = full >= deepThreshold
+            var withinRange: TimeInterval = 0
+            forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
+                guard dayStart >= range.start && dayStart < range.end else { return }
+                let secs = segEnd.timeIntervalSince(segStart)
+                guard secs > 0 else { return }
+                perDay[dayStart, default: 0] += secs
+                withinRange += secs
+            }
+            guard withinRange > 0 else { continue }
+            total += withinRange
+            if isDeep { deepTotal += withinRange }
+            longest = max(longest, min(full, withinRange))
+        }
+
+        let switchesInRange = switchesPerDay(intervals: intervals.filter { !$0.isRunning }, calendar: calendar)
+            .filter { $0.day >= range.start && $0.day < range.end }
+            .reduce(0) { $0 + $1.switches }
+
+        return RangeSummary(
+            totalSeconds: total,
+            deepSeconds: deepTotal,
+            activeDays: perDay.values.filter { $0 > 0 }.count,
+            daysOnGoal: perDay.values.filter { $0 >= dailyGoalSeconds }.count,
+            switches: switchesInRange,
+            longestSessionSeconds: longest,
+            bestDaySeconds: perDay.values.max() ?? 0
+        )
+    }
+
+    /// Average seconds per weekday across the active days in `range`.
+    public static func weekdayAverages(
+        intervals: [Interval], range: DateRange, now: Date = Date(), calendar: Calendar = .current
+    ) -> [WeekdayAverage] {
+        var perDay: [Date: TimeInterval] = [:]
+        for interval in intervals {
+            let end = interval.end ?? now
+            forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
+                guard dayStart >= range.start && dayStart < range.end else { return }
+                perDay[dayStart, default: 0] += segEnd.timeIntervalSince(segStart)
+            }
+        }
+        var sum = [Int: TimeInterval](); var count = [Int: Int]()
+        for (day, secs) in perDay {
+            let wd = (calendar.component(.weekday, from: day)) - 1   // 0=Sun
+            sum[wd, default: 0] += secs
+            count[wd, default: 0] += 1
+        }
+        return (0..<7).map { wd in
+            let n = count[wd] ?? 0
+            return WeekdayAverage(weekday: wd, averageSeconds: n > 0 ? (sum[wd] ?? 0) / Double(n) : 0)
+        }
+    }
+
     // MARK: - Daily stats (hours + focus)
 
     /// Per-day totals for the last `days` calendar days ending on `now`'s day (inclusive).

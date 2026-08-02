@@ -69,7 +69,10 @@ final class AppState: ObservableObject {
             return a.project.sortOrder < b.project.sortOrder
         }
         allTimeTotals = Aggregations.allTimeTotals(projects: active, intervals: closed, now: now).sorted(by: byFinished)
-        todayTotals = Aggregations.todayTotals(projects: active, intervals: closed, now: now).sorted(by: byFinished)
+        // Today shows unfinished tasks plus anything finished *today* (struck through) — so a task
+        // you completed yesterday clears out of Today but stays in All Time.
+        let todayVisible = active.filter { $0.showsInToday(now: now) }
+        todayTotals = Aggregations.todayTotals(projects: todayVisible, intervals: closed, now: now).sorted(by: byFinished)
         archivedTotals = Aggregations.allTimeTotals(projects: archived, intervals: closed, now: now)
     }
 
@@ -112,6 +115,44 @@ final class AppState: ObservableObject {
     func unarchive(projectID: Int64) {
         try? store.setProjectArchived(id: projectID, archived: false)
         reload()
+    }
+
+    /// Palette rows for `query` — active and finished tasks ranked for resuming. Archived ones
+    /// are excluded: archiving is how you get a task *out* of the way, so resurfacing it in the
+    /// quick-switch palette defeats the point.
+    /// The palette's list scrolls, so the cap only exists to keep ranking cheap — 8 was tight
+    /// enough that finished tasks fell off the end for anyone with a handful of active ones.
+    func searchTasks(_ query: String, limit: Int = 40) -> [TaskMatch] {
+        let all = (try? store.listProjects(includeArchived: false)) ?? []
+        let activity = (try? store.lastActivityByProject()) ?? [:]
+        return TaskSearch.rank(query: query, projects: all, lastActivity: activity, limit: limit)
+    }
+
+    /// Time shown on a palette row: today's tracked seconds (live for the running task), falling
+    /// back to the all-time total so tasks you last touched on an earlier day still show a number
+    /// instead of a bare 0:00.
+    func todaySeconds(for projectID: Int64) -> TimeInterval {
+        let today = liveSeconds(
+            base: todayTotals.first { $0.project.id == projectID }?.seconds ?? 0,
+            projectID: projectID
+        )
+        if today > 0 { return today }
+        // Fall back to the all-time total from the store — allTimeTotals only covers active
+        // tasks, and the palette also lists finished/archived ones.
+        let intervals = (try? store.intervals())?.filter { $0.projectID == projectID } ?? []
+        return intervals.reduce(0) { $0 + $1.seconds() }
+    }
+
+    /// Resume an existing task from the palette: clear finished/archived as needed, then start it.
+    /// This is what makes "mark done now, pick it back up later" frictionless — no duplicates.
+    func resumeAndStart(projectID: Int64) {
+        if let p = (try? store.listProjects(includeArchived: true))?.first(where: { $0.id == projectID }) {
+            if p.archived { try? store.setProjectArchived(id: projectID, archived: false) }
+            if p.finished { try? store.setProjectFinished(id: projectID, finished: false) }
+        }
+        reload()
+        selectedProjectID = projectID
+        engine.switchTo(projectID: projectID)
     }
 
     /// Create a new task and immediately start timing it. Returns the new task id.

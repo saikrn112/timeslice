@@ -66,6 +66,12 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
 
         updateTitle()
+        // Belt-and-braces: also refresh on the next tick, so a restored timer is reflected even
+        // if state settled after this init (the title otherwise stayed blank until a pause/start).
+        DispatchQueue.main.async { [weak self] in
+            self?.lastRenderedTitle = nil
+            self?.updateTitle()
+        }
     }
 
     private func configureButton() {
