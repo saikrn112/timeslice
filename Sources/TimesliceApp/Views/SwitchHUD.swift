@@ -38,8 +38,12 @@ final class SwitchHUD {
     // MARK: - Presentation
 
     private func switcherSize(count: Int) -> NSSize {
-        let rows = min(max(count, 1), 8)
-        return NSSize(width: 440, height: CGFloat(rows) * 44 + 58)
+        // Rows stay a fixed height; when there are more tasks than fit, the list windows around
+        // the selection and we add room for the "N more" hints above/below.
+        let cap = SwitcherList.maxVisibleRows
+        let rows = min(max(count, 1), cap)
+        let hintRows = count > cap ? 2 : 0
+        return NSSize(width: 440, height: CGFloat(rows) * 44 + CGFloat(hintRows) * 16 + 58)
     }
 
     private func present(_ view: AnyView, size: NSSize) {
@@ -91,14 +95,36 @@ private struct SwitcherList: View {
     let runningID: Int64?
     @ObservedObject var clock: TickClock
 
+    /// Max rows drawn at once. With more tasks than this we window around the selection so rows
+    /// stay full-size and readable instead of squashing to fit a fixed-height panel.
+    static let maxVisibleRows = 8
+
     private func liveSeconds(for id: Int64) -> TimeInterval {
         let base = todaySeconds[id] ?? 0
         return id == runningID ? base + clock.elapsed : base
     }
 
+    /// A window of tasks centered on the selection (clamped at the ends), plus how many are
+    /// hidden above/below so we can hint at them.
+    private var windowed: (tasks: [Project], hiddenAbove: Int, hiddenBelow: Int) {
+        let cap = Self.maxVisibleRows
+        guard tasks.count > cap else { return (tasks, 0, 0) }
+        let selIndex = tasks.firstIndex { $0.id == selectedID } ?? 0
+        var start = selIndex - cap / 2
+        start = max(0, min(start, tasks.count - cap))
+        let slice = Array(tasks[start..<(start + cap)])
+        return (slice, start, tasks.count - (start + cap))
+    }
+
     var body: some View {
-        VStack(spacing: 5) {
-            ForEach(tasks) { task in
+        let win = windowed
+        return VStack(spacing: 5) {
+            if win.hiddenAbove > 0 {
+                Text("▲ \(win.hiddenAbove) more")
+                    .font(.system(size: 10, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.35))
+            }
+            ForEach(win.tasks) { task in
                 let isSel = task.id == selectedID
                 let isRunning = task.id == runningID
                 HStack(spacing: 11) {
@@ -127,6 +153,11 @@ private struct SwitcherList: View {
                         .fill(isSel ? Color.accentColor : Color.clear)
                         .shadow(color: isSel ? Color.accentColor.opacity(0.5) : .clear, radius: 8)
                 )
+            }
+            if win.hiddenBelow > 0 {
+                Text("▼ \(win.hiddenBelow) more")
+                    .font(.system(size: 10, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.35))
             }
         }
         .padding(.horizontal, 16)

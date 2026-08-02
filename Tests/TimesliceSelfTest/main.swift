@@ -171,11 +171,92 @@ func testAggregations() {
     }
 }
 
+// MARK: - Finished-task visibility (semi-archive)
+
+func testFinishedVisibility() {
+    print("Finished visibility:")
+    let now = date(2026, 3, 10, 15, 0)
+
+    func p(finished: Bool, finishedAt: Date?) -> Project {
+        Project(id: 1, name: "T", colorHex: "#fff", sortOrder: 0, archived: false,
+                finished: finished, finishedAt: finishedAt)
+    }
+
+    check(p(finished: false, finishedAt: nil).showsInToday(now: now, calendar: cal),
+          "unfinished tasks always show in Today")
+    check(p(finished: true, finishedAt: date(2026, 3, 10, 9, 0)).showsInToday(now: now, calendar: cal),
+          "finished TODAY still shows (struck through)")
+    check(!p(finished: true, finishedAt: date(2026, 3, 9, 9, 0)).showsInToday(now: now, calendar: cal),
+          "finished YESTERDAY drops out of Today")
+    check(!p(finished: true, finishedAt: nil).showsInToday(now: now, calendar: cal),
+          "finished with no timestamp (legacy) drops out of Today")
+}
+
+// MARK: - Task search (palette)
+
+func testTaskSearch() {
+    print("TaskSearch:")
+
+    func proj(_ id: Int64, _ name: String, finished: Bool = false, archived: Bool = false) -> Project {
+        Project(id: id, name: name, colorHex: "#fff", sortOrder: Int(id), archived: archived, finished: finished)
+    }
+
+    let projects = [
+        proj(1, "Deep Work"),
+        proj(2, "GPU profiling", finished: true),
+        proj(3, "Design docs"),
+        proj(4, "Old Prototype", archived: true),
+    ]
+
+    do { // fuzzy subsequence matches, non-matches score 0
+        check(TaskSearch.score(query: "gpu", candidate: "gpu profiling") > 0, "prefix matches")
+        check(TaskSearch.score(query: "dw", candidate: "deep work") > 0, "initials match as subsequence")
+        check(TaskSearch.score(query: "zzz", candidate: "deep work") == 0, "no match scores 0")
+    }
+
+    do { // prefix beats mid-word for the same query
+        let a = TaskSearch.score(query: "doc", candidate: "docs")
+        let b = TaskSearch.score(query: "doc", candidate: "design docs review")
+        check(a > b, "tighter/prefix candidate outranks a longer one")
+    }
+
+    do { // active outranks finished/archived when the match quality is equal
+        let equal = [proj(1, "Alpha One"), proj(2, "Alpha Two", finished: true),
+                     proj(3, "Alpha Three", archived: true)]
+        let r = TaskSearch.rank(query: "alpha", projects: equal, lastActivity: [:])
+        let tiers = r.map { $0.project.archived ? 2 : ($0.project.finished ? 1 : 0) }
+        check(tiers == tiers.sorted(), "equal-scoring matches order active → finished → archived")
+    }
+
+    do { // a better match wins regardless of status — tiering must not gate score
+        let r = TaskSearch.rank(query: "gpu", projects: projects, lastActivity: [:])
+        check(r.first?.project.id == 2, "finished exact match outranks weaker active matches")
+    }
+
+    do { // finished tasks survive the limit even when active tasks fill it
+        // The bug: tier-first sorting truncated every done task off the end.
+        var many = (1...8).map { proj(Int64($0), "Active Task \($0)") }
+        many.append(proj(99, "Active Retro", finished: true))
+        let r = TaskSearch.rank(query: "retro", projects: many, lastActivity: [:], limit: 8)
+        check(r.contains { $0.project.id == 99 }, "finished match not starved by 8 active tasks")
+    }
+
+    do { // empty query returns recents, most-recent first within a tier
+        let now = Date()
+        let activity: [Int64: Date] = [1: now.addingTimeInterval(-3600), 3: now]
+        let r = TaskSearch.rank(query: "", projects: projects, lastActivity: activity)
+        check(r.first?.project.id == 3, "empty query puts the most recently used active task first")
+        check(r.count == projects.count, "empty query lists all tasks")
+    }
+}
+
 // MARK: - Run
 
 do {
     try testStore()
     testAggregations()
+    testFinishedVisibility()
+    testTaskSearch()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1

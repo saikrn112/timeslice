@@ -30,30 +30,60 @@ struct MainWindowView: View {
         .onAppear { appState.reload() }
     }
 
+    /// One low-chrome row: icon+label view tabs, an inline text scope toggle, utilities far right.
+    /// Segmented pickers stacked in two rows were too heavy for four small controls.
     private var toolbar: some View {
-        HStack {
-            // Today / All-Time on the LEFT.
+        HStack(spacing: 14) {
+            HStack(spacing: 4) {
+                tabButton(.projects, icon: "checklist")
+                tabButton(.metrics, icon: "chart.bar.xaxis")
+            }
+
             if selectedTab == .projects {
-                Picker("", selection: $appState.scope) {
-                    ForEach(TimeScope.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 200)
+                Divider().frame(height: 14)
+                scopeToggle
             }
 
             Spacer()
 
-            // Tasks / Metrics on the RIGHT.
-            Picker("", selection: $selectedTab) {
-                ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 220)
-
             settingsButton
             privacyIndicator
         }
-        .padding(10)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+    }
+
+    private func tabButton(_ tab: Tab, icon: String) -> some View {
+        let selected = selectedTab == tab
+        return Button { selectedTab = tab } label: {
+            HStack(spacing: 5) {
+                Image(systemName: icon).font(.system(size: 11, weight: .medium))
+                Text(tab.rawValue).font(.system(size: 12, weight: selected ? .semibold : .regular))
+            }
+            .foregroundStyle(selected ? Color.primary : Color.secondary)
+            .padding(.horizontal, 9).padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(selected ? Color.secondary.opacity(0.16) : .clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Plain text toggle — reads as a choice, not another control block.
+    private var scopeToggle: some View {
+        HStack(spacing: 6) {
+            ForEach(Array(TimeScope.allCases.enumerated()), id: \.element.id) { idx, scope in
+                if idx > 0 { Text("·").font(.system(size: 11)).foregroundStyle(.tertiary) }
+                Button { appState.scope = scope } label: {
+                    Text(scope.rawValue)
+                        .font(.system(size: 12, weight: appState.scope == scope ? .semibold : .regular))
+                        .foregroundStyle(appState.scope == scope ? Color.accentColor : Color.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 
     @State private var showSettings = false
@@ -78,15 +108,17 @@ struct MainWindowView: View {
                 .font(.system(size: 14))
         }
         .buttonStyle(.borderless)
-        .help(privacy.level == .full
-              ? "Privacy off — menu bar shows the task name. Click to hide it and disable the switcher for screen sharing."
-              : "Privacy on — task name hidden and switcher disabled. Click to show it again. (Window & popover are always hidden from capture.)")
+        .help(privacyHelp)
     }
 
-    private var privacyLabel: String {
+    private var privacyHelp: String {
         switch privacy.level {
-        case .full: return "showing task name + time"
-        case .iconOnly: return "clock icon only"
+        case .full:
+            return "Privacy off — the menu bar shows your task name and these windows appear "
+                 + "in a screen share. Click to hide everything (Fn + ⌘ + ⇧ + P)."
+        case .iconOnly:
+            return "Privacy on — task name hidden, windows blank out in a screen share, and the "
+                 + "switcher is disabled. Click to reveal again (Fn + ⌘ + ⇧ + P)."
         }
     }
 }

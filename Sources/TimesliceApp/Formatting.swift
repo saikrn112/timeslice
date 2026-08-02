@@ -53,13 +53,39 @@ extension Color {
     }
 }
 
-/// Default palette for new projects (brand-neutral, works in light/dark).
+/// Default palette for new tasks (brand-neutral, works in light/dark).
 enum Palette {
+    /// Hand-picked, well-separated base colors used for the first tasks.
     static let colors = [
         "#4E79A7", "#F28E2B", "#59A14F", "#E15759", "#B07AA1",
         "#76B7B2", "#EDC948", "#FF9DA7", "#9C755F", "#BAB0AC",
     ]
+
+    /// Beyond the base palette, generate new hues instead of repeating — with many tasks a
+    /// repeated color makes the timeline/legend ambiguous. Uses the golden-angle so successive
+    /// hues stay far apart, and alternates lightness so neighbours differ in two dimensions.
     static func color(forIndex index: Int) -> String {
-        colors[index % colors.count]
+        if index < colors.count { return colors[index] }
+        let n = index - colors.count
+        let hue = (Double(n) * 137.507).truncatingRemainder(dividingBy: 360) / 360   // golden angle
+        let saturation = 0.55
+        let brightness = n % 2 == 0 ? 0.78 : 0.62
+        return hexString(fromHue: hue, saturation: saturation, brightness: brightness)
+    }
+
+    private static func hexString(fromHue h: Double, saturation s: Double, brightness v: Double) -> String {
+        let i = Int(h * 6)
+        let f = h * 6 - Double(i)
+        let p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s)
+        let (r, g, b): (Double, Double, Double)
+        switch i % 6 {
+        case 0: (r, g, b) = (v, t, p)
+        case 1: (r, g, b) = (q, v, p)
+        case 2: (r, g, b) = (p, v, t)
+        case 3: (r, g, b) = (p, q, v)
+        case 4: (r, g, b) = (t, p, v)
+        default: (r, g, b) = (v, p, q)
+        }
+        return String(format: "#%02X%02X%02X", Int(r * 255), Int(g * 255), Int(b * 255))
     }
 }

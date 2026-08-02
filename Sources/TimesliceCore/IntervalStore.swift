@@ -70,6 +70,9 @@ public final class IntervalStore {
         // Today/All-Time but render struck-through at the end of the list; archived tasks leave
         // those views entirely. Ignore the error if the column already exists.
         _ = sqlite3_exec(db, "ALTER TABLE projects ADD COLUMN finished INTEGER NOT NULL DEFAULT 0", nil, nil, nil)
+        // When a task was marked done (epoch seconds). Lets a finished task stay visible+struck
+        // through for the rest of that day, then drop out of Today while remaining in All Time.
+        _ = sqlite3_exec(db, "ALTER TABLE projects ADD COLUMN finished_at REAL", nil, nil, nil)
     }
 
     // MARK: - Projects
@@ -109,11 +112,14 @@ public final class IntervalStore {
         try step(stmt)
     }
 
-    public func setProjectFinished(id: Int64, finished: Bool) throws {
-        let stmt = try prepare("UPDATE projects SET finished = ? WHERE id = ?")
+    /// Mark finished/unfinished, stamping when it happened so Today can drop it tomorrow.
+    public func setProjectFinished(id: Int64, finished: Bool, at date: Date = Date()) throws {
+        let stmt = try prepare("UPDATE projects SET finished = ?, finished_at = ? WHERE id = ?")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_int(stmt, 1, finished ? 1 : 0)
-        sqlite3_bind_int64(stmt, 2, id)
+        if finished { sqlite3_bind_double(stmt, 2, date.timeIntervalSince1970) }
+        else { sqlite3_bind_null(stmt, 2) }
+        sqlite3_bind_int64(stmt, 3, id)
         try step(stmt)
     }
 
@@ -150,7 +156,7 @@ public final class IntervalStore {
 
     public func listProjects(includeArchived: Bool = false) throws -> [Project] {
         let sql = """
-        SELECT id, name, color_hex, sort_order, archived, finished FROM projects
+        SELECT id, name, color_hex, sort_order, archived, finished, finished_at FROM projects
         \(includeArchived ? "" : "WHERE archived = 0")
         ORDER BY sort_order ASC, id ASC
         """
@@ -164,7 +170,9 @@ public final class IntervalStore {
                 colorHex: text(stmt, 2),
                 sortOrder: Int(sqlite3_column_int(stmt, 3)),
                 archived: sqlite3_column_int(stmt, 4) != 0,
-                finished: sqlite3_column_int(stmt, 5) != 0
+                finished: sqlite3_column_int(stmt, 5) != 0,
+                finishedAt: sqlite3_column_type(stmt, 6) == SQLITE_NULL
+                    ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6))
             ))
         }
         return rows
@@ -202,6 +210,27 @@ public final class IntervalStore {
         try transaction {
             try closeOpenIntervalLocked(at: now)
         }
+    }
+
+    /// Most recent activity time per task id — powers "recently used" ordering in the palette.
+    public func lastActivityByProject() throws -> [Int64: Date] {
+        let stmt = try prepare("SELECT project_id, MAX(COALESCE(end_utc, start_utc)) FROM intervals GROUP BY project_id")
+        defer { sqlite3_finalize(stmt) }
+        var map: [Int64: Date] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = sqlite3_column_int64(stmt, 0)
+            map[id] = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 1))
+        }
+        return map
+    }
+
+    /// Start of the earliest recorded interval, if any — bounds the "All time" range.
+    public func earliestIntervalStart() throws -> Date? {
+        let stmt = try prepare("SELECT MIN(start_utc) FROM intervals")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW,
+              sqlite3_column_type(stmt, 0) != SQLITE_NULL else { return nil }
+        return Date(timeIntervalSince1970: sqlite3_column_double(stmt, 0))
     }
 
     /// Insert an already-closed interval at explicit times. For backfilling demo/history data.

@@ -10,14 +10,26 @@ public struct Project: Identifiable, Hashable, Sendable {
     /// Finished = done but still counted in Today/All-Time (struck-through at list end).
     /// Distinct from `archived`, which removes the task from those views entirely.
     public var finished: Bool
+    /// When it was marked done — a task finished today stays visible (struck through) for the rest
+    /// of the day, then drops out of Today while remaining in All Time.
+    public var finishedAt: Date?
 
-    public init(id: Int64, name: String, colorHex: String, sortOrder: Int, archived: Bool, finished: Bool = false) {
+    public init(id: Int64, name: String, colorHex: String, sortOrder: Int, archived: Bool,
+                finished: Bool = false, finishedAt: Date? = nil) {
         self.id = id
         self.name = name
         self.colorHex = colorHex
         self.sortOrder = sortOrder
         self.archived = archived
         self.finished = finished
+        self.finishedAt = finishedAt
+    }
+
+    /// True when this task should still appear in the Today list: not finished, or finished today.
+    public func showsInToday(now: Date = Date(), calendar: Calendar = .current) -> Bool {
+        guard finished else { return true }
+        guard let finishedAt else { return false }   // finished before we tracked the date
+        return calendar.isDate(finishedAt, inSameDayAs: now)
     }
 }
 
@@ -106,6 +118,60 @@ public struct DaySegment: Hashable, Sendable, Identifiable {
         self.projectID = projectID
         self.startHour = startHour
         self.endHour = endHour
+    }
+}
+
+/// One bucket (day / week / month) of a ranged chart.
+public struct Bucket: Hashable, Sendable, Identifiable {
+    public let start: Date            // bucket start, local
+    public let totalSeconds: TimeInterval
+    public let deepSeconds: TimeInterval
+    public var id: Date { start }
+
+    public init(start: Date, totalSeconds: TimeInterval, deepSeconds: TimeInterval) {
+        self.start = start
+        self.totalSeconds = totalSeconds
+        self.deepSeconds = deepSeconds
+    }
+
+    public var focusRatio: Double { totalSeconds > 0 ? deepSeconds / totalSeconds : 0 }
+}
+
+/// Headline numbers for whatever range is selected.
+public struct RangeSummary: Sendable {
+    public let totalSeconds: TimeInterval
+    public let deepSeconds: TimeInterval
+    public let activeDays: Int
+    public let daysOnGoal: Int
+    public let switches: Int
+    public let longestSessionSeconds: TimeInterval
+    public let bestDaySeconds: TimeInterval
+
+    public init(totalSeconds: TimeInterval, deepSeconds: TimeInterval, activeDays: Int,
+                daysOnGoal: Int, switches: Int, longestSessionSeconds: TimeInterval,
+                bestDaySeconds: TimeInterval) {
+        self.totalSeconds = totalSeconds
+        self.deepSeconds = deepSeconds
+        self.activeDays = activeDays
+        self.daysOnGoal = daysOnGoal
+        self.switches = switches
+        self.longestSessionSeconds = longestSessionSeconds
+        self.bestDaySeconds = bestDaySeconds
+    }
+
+    public var focusRatio: Double { totalSeconds > 0 ? deepSeconds / totalSeconds : 0 }
+    public var avgPerActiveDay: TimeInterval { activeDays > 0 ? totalSeconds / Double(activeDays) : 0 }
+}
+
+/// Average seconds per weekday (0=Sunday…6=Saturday) across a range.
+public struct WeekdayAverage: Hashable, Sendable, Identifiable {
+    public let weekday: Int
+    public let averageSeconds: TimeInterval
+    public var id: Int { weekday }
+
+    public init(weekday: Int, averageSeconds: TimeInterval) {
+        self.weekday = weekday
+        self.averageSeconds = averageSeconds
     }
 }
 

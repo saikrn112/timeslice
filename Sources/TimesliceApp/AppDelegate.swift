@@ -36,12 +36,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         engine = TimerEngine(store: store)
         privacy = PrivacyController()
-        // In screenshot mode, disable capture exclusion so `screencapture` can image the window
-        // (normally windows use sharingType = .none and appear blank to any capture).
-        if DemoData.isRequested { privacy.setWindowExclusion(false) }
+        // In screenshot mode, keep windows capturable so `screencapture` can image them
+        // (with privacy on, windows use sharingType = .none and appear blank to any capture).
+        if DemoData.isRequested { privacy.setWindowsAlwaysCapturable(true) }
         appState = AppState(store: store, engine: engine)
-        appState.reload()
+        // Restore the open interval FIRST, then reload — otherwise totals are computed while
+        // nothing is running and the menu bar's first paint has no current task (it only
+        // appeared after a manual pause/start nudged a refresh).
         engine.restore()
+        appState.reload()
 
         let autoPause = AutoPauseController(engine: engine, appState: appState, settings: settings)
         autoPause.openMainWindow = { [weak self] in self?.showMainWindow() }
@@ -140,15 +143,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         hotkeys.onQuickAdd = { [weak self] in
             guard let self, !self.switcherSuppressed else { return }   // don't reveal input while sharing
-            self.showMainWindow()        // open the full app right away, behind the input
-            self.quickAdd.show { [weak self] name in
-                self?.appState.addAndStart(name: name)
-                self?.showHUDForRunning()
-            }
+            // The palette stands alone — it shows matches, statuses and today's times, so
+            // there's no reason to drag the whole window forward just to add or resume a task.
+            self.quickAdd.show(
+                search: { [weak self] q in self?.appState.searchTasks(q) ?? [] },
+                todaySeconds: { [weak self] id in self?.appState.todaySeconds(for: id) ?? 0 },
+                onResume: { [weak self] id in
+                    self?.appState.resumeAndStart(projectID: id)
+                    self?.showHUDForRunning()
+                },
+                onCreate: { [weak self] name in
+                    self?.appState.addAndStart(name: name)
+                    self?.showHUDForRunning()
+                }
+            )
         }
 
         // Requires Accessibility permission. If not yet granted, guide the user, then poll.
-        if !hotkeys.register() {
+        // Only a screenshot run skips this — the modal would sit on top of the window being
+        // captured. Plain demo mode still prompts, so hotkeys can be tested against demo data.
+        if !hotkeys.register() && !DemoData.isScreenshotRun {
             promptForAccessibility()
             pollForAccessibility()
         }
@@ -205,8 +219,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Fires when the app is activated with no visible windows — e.g. ⌘-Tab to Timeslice or
     /// clicking its Dock icon after the main window was closed. Reopen the main window so the
     /// user doesn't have to go back to the popover's "Open" button.
+    ///
+    /// Skipped while a floating panel (the palette) owns the activation: it calls
+    /// `NSApp.activate` to take keyboard focus, and with no other window visible macOS reads
+    /// that as a reopen — which would pop the main window up behind the palette.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { showMainWindow() }
+        if !flag && !quickAdd.isPresenting { showMainWindow() }
         return true
     }
 

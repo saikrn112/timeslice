@@ -1,35 +1,45 @@
 import AppKit
 import Combine
 
-/// How much the menu-bar item reveals while sharing/recording the screen.
+/// How much Timeslice reveals while the screen is being shared or recorded.
 enum PrivacyLevel: Int, CaseIterable {
-    case full       // task name + time (ms) + clock icon
-    case iconOnly   // clock icon only, no time/name
+    case full       // menu bar shows task name + time; windows render to a capture
+    case iconOnly   // menu bar shows the clock icon only; windows blank out on a capture
 
     var next: PrivacyLevel {
         PrivacyLevel(rawValue: (rawValue + 1) % PrivacyLevel.allCases.count) ?? .full
     }
 }
 
-/// Owns screen-share privacy: the menu-bar redaction level and window capture exclusion.
+/// Owns screen-share privacy. One switch — `level` — governs everything visible:
 ///
-/// - The detailed windows (main + popover) are set to `sharingType = .none`, so they render
-///   normally to the local display but appear blank to any capture/share, including full-screen.
-/// - The menu-bar item is system-owned and cannot be excluded via `sharingType`, so instead we
-///   change *what it displays* via `level`, cycled with a global hotkey.
+/// - `.full`     → menu bar shows the task name + time, windows have `sharingType = .readOnly`
+///                 (they appear in a share like any normal window).
+/// - `.iconOnly` → menu bar shows only the clock icon, windows have `sharingType = .none`
+///                 (they render locally but come out blank in any capture, including full-screen),
+///                 and the switcher HUD is suppressed.
 ///
 /// The timer keeps running regardless: privacy only affects presentation, never the write path.
 @MainActor
 final class PrivacyController: ObservableObject {
-    /// When true, capture-excluded windows blank out on a shared/recorded screen.
-    @Published var excludeWindowsFromCapture: Bool = true
-    /// Current menu-bar redaction level.
-    @Published var level: PrivacyLevel = .full
+    /// The single source of truth for how much is revealed.
+    @Published var level: PrivacyLevel = .full {
+        didSet { if oldValue != level { applyToAll() } }
+    }
+
+    /// Demo/screenshot mode: keep windows capturable even at `.iconOnly` so `screencapture`
+    /// can actually record them.
+    private var forceWindowsCapturable = false
 
     /// Windows we manage; kept weakly so closing them doesn't leak.
     private var managed: [Weak] = []
 
     private final class Weak { weak var window: NSWindow?; init(_ w: NSWindow?) { window = w } }
+
+    /// Whether managed windows should be hidden from captures right now.
+    private var hidesWindowsFromCapture: Bool {
+        !forceWindowsCapturable && level == .iconOnly
+    }
 
     /// Register a window to have its sharing type managed, and apply the current setting.
     func manage(_ window: NSWindow?) {
@@ -40,7 +50,7 @@ final class PrivacyController: ObservableObject {
 
     func applySharing(to window: NSWindow?) {
         guard let window else { return }
-        window.sharingType = excludeWindowsFromCapture ? .none : .readOnly
+        window.sharingType = hidesWindowsFromCapture ? .none : .readOnly
     }
 
     private func applyToAll() {
@@ -48,13 +58,21 @@ final class PrivacyController: ObservableObject {
         for entry in managed { applySharing(to: entry.window) }
     }
 
-    /// Cycle the menu-bar redaction level (bound to fn+⌘+⇧+P).
+    /// Cycle privacy (bound to fn+⌘+⇧+P and the window's eye button).
     func cycleLevel() {
         level = level.next
     }
 
-    func setWindowExclusion(_ enabled: Bool) {
-        excludeWindowsFromCapture = enabled
+    /// Screenshot/demo mode only: let captures see the windows regardless of level.
+    func setWindowsAlwaysCapturable(_ enabled: Bool) {
+        forceWindowsCapturable = enabled
         applyToAll()
     }
+
+    // No auto-detection of screen sharing. macOS has no public API for "am I being
+    // captured?" — `CGDisplayIsCaptured` covers exclusive fullscreen display capture, not
+    // sharing, and ScreenCaptureKit only reports captures *this* app starts. Guessing from
+    // running apps doesn't work either: Zoom/Slack/QuickTime sit running all day without a
+    // share active, and Google Meet is just a browser tab with no distinct process. That
+    // would pin privacy on permanently, which is worse than an honest manual toggle.
 }
