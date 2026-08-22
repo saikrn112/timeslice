@@ -94,6 +94,34 @@ public enum Aggregations {
         return projects.map { ProjectTotal(project: $0, seconds: byProject[$0.id] ?? 0) }
     }
 
+    /// Roll per-task totals up to their groups. Pure post-processing on whatever `totals(...)`
+    /// already produced, which is why this works identically for every range — bucketing,
+    /// midnight-splitting and clipping all happen upstream and are blind to grouping.
+    ///
+    /// Tasks with no group collapse into a single Inbox row (`project == nil`). Zero-second rows
+    /// are dropped so a group only appears once it has time in the range.
+    public static func rollUp(
+        totals: [ProjectTotal],
+        taskProjects: [TaskProject]
+    ) -> [TaskProjectTotal] {
+        let byID = Dictionary(uniqueKeysWithValues: taskProjects.map { ($0.id, $0) })
+        var seconds: [Int64?: TimeInterval] = [:]
+        var counts: [Int64?: Int] = [:]
+        for total in totals where total.seconds > 0 {
+            let key = total.project.taskProjectID
+            seconds[key, default: 0] += total.seconds
+            counts[key, default: 0] += 1
+        }
+        return seconds
+            .map { key, secs in
+                TaskProjectTotal(project: key.flatMap { byID[$0] },
+                                 seconds: secs,
+                                 taskCount: counts[key] ?? 0)
+            }
+            // Biggest first; Inbox sorts by its own size like any other row.
+            .sorted { $0.seconds > $1.seconds }
+    }
+
     /// Bucketed totals across `range` — one entry per day/week/month depending on `range.unit`.
     /// Empty buckets are included (as zeros) so charts show gaps honestly.
     public static func buckets(

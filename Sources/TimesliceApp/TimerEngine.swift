@@ -33,6 +33,9 @@ final class TimerEngine: ObservableObject {
     @Published private(set) var currentProjectID: Int64?
     /// Start time of the current running interval (nil while paused).
     @Published private(set) var runningSince: Date?
+    /// When the current task was paused (nil unless `isPaused`). Drives the "still paused?"
+    /// nudge — the mirror of the long-session checkpoint, for when you forget to un-pause.
+    @Published private(set) var pausedSince: Date?
 
     /// Live elapsed seconds of the current running interval; 0 while paused. Non-reactive read;
     /// for reactive UI, observe `clock`.
@@ -58,6 +61,7 @@ final class TimerEngine: ObservableObject {
             runningProjectID = open.projectID
             currentProjectID = open.projectID
             runningSince = open.start
+            pausedSince = nil
             startTicking()
         }
     }
@@ -81,6 +85,7 @@ final class TimerEngine: ObservableObject {
             runningProjectID = projectID
             currentProjectID = projectID
             runningSince = now
+            pausedSince = nil          // running again — nothing to nudge about
             clock.elapsed = 0
             startTicking()
             notifyChanged()
@@ -101,6 +106,7 @@ final class TimerEngine: ObservableObject {
             try store.stopOpenInterval(at: end)
             runningProjectID = nil
             runningSince = nil
+            pausedSince = end
             clock.elapsed = 0
             stopTicking()
             notifyChanged()
@@ -120,6 +126,7 @@ final class TimerEngine: ObservableObject {
         runningProjectID = nil
         currentProjectID = nil
         runningSince = nil
+        pausedSince = nil              // idle, not paused — nothing to resume
         clock.elapsed = 0
         stopTicking()
         notifyChanged()

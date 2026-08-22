@@ -19,6 +19,8 @@ final class AppState: ObservableObject {
 
     /// Active (non-archived) tasks only — used for selection/navigation.
     @Published var projects: [Project] = []
+    /// Groups above tasks (Inbox is implicit — a task with `taskProjectID == nil`).
+    @Published var taskProjects: [TaskProject] = []
     /// Active-task totals for the Today and All-Time scopes.
     @Published var todayTotals: [ProjectTotal] = []
     @Published var allTimeTotals: [ProjectTotal] = []
@@ -48,6 +50,8 @@ final class AppState: ObservableObject {
 
     func reload() {
         projects = (try? store.listProjects(includeArchived: false)) ?? []
+        allProjectsCache = (try? store.listProjects(includeArchived: true)) ?? []
+        taskProjects = (try? store.listTaskProjects()) ?? []
         recomputeTotals()
         // Keep selection on an existing active task.
         if selectedProjectID == nil || !projects.contains(where: { $0.id == selectedProjectID }) {
@@ -125,7 +129,15 @@ final class AppState: ObservableObject {
     func searchTasks(_ query: String, limit: Int = 40) -> [TaskMatch] {
         let all = (try? store.listProjects(includeArchived: false)) ?? []
         let activity = (try? store.lastActivityByProject()) ?? [:]
-        return TaskSearch.rank(query: query, projects: all, lastActivity: activity, limit: limit)
+        // Also match a task by its PROJECT's name — typing "inference" should surface the tasks
+        // in that project, not just tasks literally called that.
+        var groupNames: [Int64: String] = [:]
+        for task in all {
+            if let gid = task.taskProjectID,
+               let g = taskProjects.first(where: { $0.id == gid }) { groupNames[task.id] = g.name }
+        }
+        return TaskSearch.rank(query: query, projects: all, lastActivity: activity,
+                               groupNames: groupNames, limit: limit)
     }
 
     /// Time shown on a palette row: today's tracked seconds (live for the running task), falling
@@ -156,13 +168,143 @@ final class AppState: ObservableObject {
     }
 
     /// Create a new task and immediately start timing it. Returns the new task id.
+    ///
+    /// `groupName` comes from a `/project` token in the palette; the group is created if it
+    /// doesn't exist yet, so "assign" and "create" are the same action.
     @discardableResult
-    func addAndStart(name: String) -> Int64? {
+    func addAndStart(name: String, groupName: String? = nil) -> Int64? {
         guard let id = try? store.createProject(name: name, colorHex: Palette.color(forIndex: projects.count)) else { return nil }
+        if let groupName, !groupName.isEmpty {
+            let color = Palette.color(forIndex: taskProjects.count)
+            if let groupID = try? store.upsertTaskProject(name: groupName, colorHex: color) {
+                try? store.setTaskProject(taskID: id, taskProjectID: groupID)
+            }
+        }
         reload()
         selectedProjectID = id
         engine.switchTo(projectID: id)
         return id
+    }
+
+    // MARK: - Grouping
+
+    /// Colour a task should render in: its group's, or its own when in Inbox.
+    ///
+    /// This is the whole point of the feature — with 35 tasks the timeline was painting 35
+    /// generated hues that started to look alike. Inheriting the group's colour collapses that
+    /// to a handful without losing per-task detail (hover still names the task).
+    func displayColorHex(for task: Project) -> String {
+        guard let groupID = task.taskProjectID,
+              let group = taskProjects.first(where: { $0.id == groupID }) else { return task.colorHex }
+        // A SHADE of the project colour, not the flat colour: same hue so the group reads as one
+        // family, but distinct enough that adjacent blocks from two tasks in the same project
+        // don't merge into an indistinguishable band on the timeline.
+        return Palette.shade(ofHex: group.colorHex, index: shadeIndex(of: task, in: groupID))
+    }
+
+    /// A task's position among its project's tasks, in stable id order — so a task keeps the same
+    /// shade as others come and go, rather than reshuffling on every change.
+    private func shadeIndex(of task: Project, in groupID: Int64) -> Int {
+        let siblings = allProjectsCache
+            .filter { $0.taskProjectID == groupID }
+            .sorted { $0.id < $1.id }
+        return siblings.firstIndex { $0.id == task.id } ?? 0
+    }
+
+    /// All tasks incl. archived — shades must stay stable even when a sibling is archived, so this
+    /// can't just use the visible list. Refreshed in `reload()`.
+    ///
+    /// Must be @Published: `displayColorHex` reads it, so as a plain `var` a re-assignment
+    /// changed colours in the store but never told SwiftUI to redraw.
+    @Published private var allProjectsCache: [Project] = []
+
+    func displayColorHex(forTaskID id: Int64) -> String {
+        guard let task = projects.first(where: { $0.id == id })
+            ?? (try? store.listProjects(includeArchived: true))?.first(where: { $0.id == id })
+        else { return "#8E8E93" }
+        return displayColorHex(for: task)
+    }
+
+    /// Move tasks into a group (creating it by name if needed), or to Inbox with `nil`.
+    func assign(taskIDs: [Int64], toGroupNamed name: String?) {
+        var groupID: Int64?
+        if let name, !name.trimmingCharacters(in: .whitespaces).isEmpty {
+            groupID = try? store.upsertTaskProject(
+                name: name, colorHex: Palette.color(forIndex: taskProjects.count))
+        }
+        for id in taskIDs {
+            try? store.setTaskProject(taskID: id, taskProjectID: groupID)
+        }
+        reload()
+        NotificationCenter.default.post(name: TimesliceNotifications.dataDidChange, object: nil)
+    }
+
+    /// Move a project up or down in the display order. Also reorders the task list, the
+    /// switcher and the palette, since all three read `orderedProjects`.
+    func moveTaskProject(id: Int64, by delta: Int) {
+        var ids = taskProjects.map(\.id)
+        guard let from = ids.firstIndex(of: id) else { return }
+        let to = from + delta
+        guard to >= 0, to < ids.count else { return }
+        ids.swapAt(from, to)
+        try? store.setTaskProjectOrder(ids)
+        reload()
+        NotificationCenter.default.post(name: TimesliceNotifications.dataDidChange, object: nil)
+    }
+
+    /// Move `movedID` to where `targetID` currently sits, shifting the rest — the drag-and-drop
+    /// equivalent of the old up/down buttons.
+    func reorderTaskProject(_ movedID: Int64, toPositionOf targetID: Int64) {
+        var ids = taskProjects.map(\.id)
+        guard let from = ids.firstIndex(of: movedID),
+              let to = ids.firstIndex(of: targetID), from != to else { return }
+        ids.remove(at: from)
+        ids.insert(movedID, at: to)
+        try? store.setTaskProjectOrder(ids)
+        reload()
+        NotificationCenter.default.post(name: TimesliceNotifications.dataDidChange, object: nil)
+    }
+
+    /// Bulk lifecycle actions for every task in a group — the group-level equivalents of the
+    /// per-row finish/archive buttons.
+    func finishAll(taskIDs: [Int64]) {
+        for id in taskIDs {
+            engine.clearIfCurrent(projectID: id)
+            try? store.setProjectFinished(id: id, finished: true)
+        }
+        reload()
+        NotificationCenter.default.post(name: TimesliceNotifications.dataDidChange, object: nil)
+    }
+
+    func archiveAll(taskIDs: [Int64]) {
+        for id in taskIDs {
+            engine.clearIfCurrent(projectID: id)
+            try? store.setProjectArchived(id: id, archived: true)
+        }
+        reload()
+        NotificationCenter.default.post(name: TimesliceNotifications.dataDidChange, object: nil)
+    }
+
+    func unfinishAll(taskIDs: [Int64]) {
+        for id in taskIDs { try? store.setProjectFinished(id: id, finished: false) }
+        reload()
+        NotificationCenter.default.post(name: TimesliceNotifications.dataDidChange, object: nil)
+    }
+
+    /// Short project label for compact rows (palette, switcher HUD) — nil for Inbox, so
+    /// uncategorised tasks add no visual noise. Truncated to keep rows from growing.
+    func shortGroupName(forTaskID id: Int64, max: Int = 12) -> String? {
+        guard let task = allProjectsCache.first(where: { $0.id == id }),
+              let groupID = task.taskProjectID,
+              let group = taskProjects.first(where: { $0.id == groupID }) else { return nil }
+        let name = group.name
+        guard name.count > max else { return name }
+        return String(name.prefix(max - 1)) + "…"
+    }
+
+    /// Per-group totals for the current scope, Inbox included.
+    var visibleGroupTotals: [TaskProjectTotal] {
+        Aggregations.rollUp(totals: visibleTotals, taskProjects: taskProjects)
     }
 
     /// Reset a task's tracked time to zero (keeps the task). Stops its timer if running.
@@ -183,7 +325,28 @@ final class AppState: ObservableObject {
 
     /// Active, not-yet-finished tasks — the ones you can cycle to and start timing.
     var selectableProjects: [Project] {
-        projects.filter { !$0.finished }
+        orderedProjects.filter { !$0.finished }
+    }
+
+    /// Tasks in the order they're DISPLAYED: grouped by project (in project sort order), Inbox
+    /// last, and within each group unfinished before finished.
+    ///
+    /// Arrow keys, the switcher and the palette all read this. They used to walk raw `projects`
+    /// order, so once the list rendered grouped, ↑/↓ jumped around instead of moving to the
+    /// visually adjacent row.
+    var orderedProjects: [Project] {
+        let groupRank: (Int64?) -> Int = { [taskProjects] gid in
+            guard let gid else { return Int.max }        // Inbox always last
+            return taskProjects.firstIndex { $0.id == gid } ?? Int.max - 1
+        }
+        return projects.sorted { a, b in
+            let ra = groupRank(a.taskProjectID), rb = groupRank(b.taskProjectID)
+            if ra != rb { return ra < rb }
+            // Finished tasks sink within their group, mirroring the list.
+            if a.finished != b.finished { return !a.finished }
+            if a.sortOrder != b.sortOrder { return a.sortOrder < b.sortOrder }
+            return a.id < b.id
+        }
     }
 
     /// Today's tracked seconds per task id (live for the running task), for the switcher HUD.

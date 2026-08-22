@@ -13,9 +13,11 @@ public struct Project: Identifiable, Hashable, Sendable {
     /// When it was marked done — a task finished today stays visible (struck through) for the rest
     /// of the day, then drops out of Today while remaining in All Time.
     public var finishedAt: Date?
+    /// The group this task rolls up to; nil = Inbox (uncategorised).
+    public var taskProjectID: Int64?
 
     public init(id: Int64, name: String, colorHex: String, sortOrder: Int, archived: Bool,
-                finished: Bool = false, finishedAt: Date? = nil) {
+                finished: Bool = false, finishedAt: Date? = nil, taskProjectID: Int64? = nil) {
         self.id = id
         self.name = name
         self.colorHex = colorHex
@@ -23,6 +25,7 @@ public struct Project: Identifiable, Hashable, Sendable {
         self.archived = archived
         self.finished = finished
         self.finishedAt = finishedAt
+        self.taskProjectID = taskProjectID
     }
 
     /// True when this task should still appear in the Today list: not finished, or finished today.
@@ -30,6 +33,44 @@ public struct Project: Identifiable, Hashable, Sendable {
         guard finished else { return true }
         guard let finishedAt else { return false }   // finished before we tracked the date
         return calendar.isDate(finishedAt, inSameDayAs: now)
+    }
+}
+
+/// A grouping above tasks. Named `TaskProject` because the `projects` DB table (and the `Project`
+/// type above) actually hold *tasks* — early naming that predates this layer.
+///
+/// Tasks reference these; intervals never do. Grouping is therefore a display-time rollup, not a
+/// property of recorded time.
+public struct TaskProject: Identifiable, Hashable, Sendable {
+    public let id: Int64
+    public var name: String
+    public var colorHex: String
+    public var sortOrder: Int
+
+    public init(id: Int64, name: String, colorHex: String, sortOrder: Int = 0) {
+        self.id = id
+        self.name = name
+        self.colorHex = colorHex
+        self.sortOrder = sortOrder
+    }
+}
+
+/// Seconds rolled up to a group. `project == nil` is the Inbox bucket.
+public struct TaskProjectTotal: Identifiable, Hashable, Sendable {
+    public let project: TaskProject?
+    public let seconds: TimeInterval
+    /// Tasks contributing to this group, largest first.
+    public let taskCount: Int
+
+    /// -1 stands in for Inbox so the type can be `Identifiable` without an optional id.
+    public var id: Int64 { project?.id ?? -1 }
+    public var name: String { project?.name ?? "Inbox" }
+    public var colorHex: String { project?.colorHex ?? "#8E8E93" }
+
+    public init(project: TaskProject?, seconds: TimeInterval, taskCount: Int) {
+        self.project = project
+        self.seconds = seconds
+        self.taskCount = taskCount
     }
 }
 

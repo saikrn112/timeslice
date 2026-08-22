@@ -51,10 +51,15 @@ below follows it. Hover any bar for the numbers; the solid inner bar is focused 
 - **Menu bar**: live timer + current task; turns into an orange pill whenever it's paused.
 - **Revolver switcher** (**Fn + ⌘ + ⇧** + `\`/`]`): flick between tasks from any app, release to switch.
 - **Task palette** (**Fn + ⌘ + ⇧ + A**): Spotlight-style — type to search every task (including
-  finished ones), Enter resumes it, or create a new one. Two keypresses either way.
-- **Auto-pause**: runs too long → pauses and asks "still on this?"; sleeping pauses too, waking
-  offers to resume — forgotten timers never inflate your time.
-- **Metrics**: day timeline, hours-per-day vs a goal, focus %, and where your time went.
+  finished ones, and by their project's name), Enter resumes it, or create a new one. Two
+  keypresses either way; add `/project` to file it as you create it.
+- **Projects**: one optional project per task, everything else in Inbox — no filing decision when
+  you're mid-flow. Tasks take a shade of their project's colour, so the timeline stays readable
+  with dozens of tasks. Assign by right-click, multi-select, or dragging a card.
+- **Auto-pause both ways**: runs too long → pauses and asks "still on this?"; sits paused too long
+  → asks whether you forgot to resume. Sleeping pauses too. One switch silences all of it.
+- **Metrics**: day timeline, hours-per-day vs a goal, focus %, and where your time went — grouped
+  by task or project. Drag across the timeline to measure working vs idle in any stretch.
 - **Screen-share safe**: one toggle (**Fn + ⌘ + ⇧ + P**) hides everything at once — the menu-bar
   task name, the switcher, and the windows themselves (they stay visible to you but come out
   blank in any capture, including full-screen). The timer keeps running the whole time.
@@ -67,7 +72,7 @@ together, then press the last key. These work from any app:
 | Hold | then press | What it does |
 |---|---|---|
 | Fn + ⌘ + ⇧ | `\` (next) or `]` (prev) | Cycle the task switcher; **release the three keys** to switch to the highlighted task. A quick press-and-release (without cycling) just pauses the current task. |
-| Fn + ⌘ + ⇧ | `A` | Open the task palette: fuzzy-search your tasks, including finished ones (archived tasks stay out of the way). Enter resumes the highlighted one — un-finishing it as needed — or creates a new task from the last row. |
+| Fn + ⌘ + ⇧ | `A` | Open the task palette: fuzzy-search your tasks, including finished ones and by project name (archived tasks stay out of the way). Enter resumes the highlighted one — un-finishing it as needed — or creates a new task from the last row. Append `/project` to file a new task as you create it. |
 | Fn + ⌘ + ⇧ | `P` | Toggle privacy: hides the menu-bar task name, blanks the windows in any screen capture, and disables the switcher. Press again to reveal. |
 
 Inside the app window/popover (no modifiers): **↑ / ↓** to select a task, **Space** to start/stop.
@@ -90,3 +95,10 @@ the script anytime to update.
 
 > Dev: `swift build` / `swift run TimesliceApp` for iteration; `swift run TimesliceSelfTest` for
 > the core-logic checks. Data lives at `~/Library/Application Support/Timeslice/timeslice.db`.
+
+## License
+
+[GPLv3](LICENSE). Free to use, study, modify and share — but if you distribute a modified version,
+it has to stay free software under the same licence, source included.
+
+Copyright (C) 2026 Ramana

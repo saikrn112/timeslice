@@ -73,6 +73,25 @@ public final class IntervalStore {
         // When a task was marked done (epoch seconds). Lets a finished task stay visible+struck
         // through for the rest of that day, then drop out of Today while remaining in All Time.
         _ = sqlite3_exec(db, "ALTER TABLE projects ADD COLUMN finished_at REAL", nil, nil, nil)
+
+        // Grouping: one optional project per task. NOTE the naming — the `projects` table above
+        // holds TASKS (early name, never migrated), so the grouping table is `task_projects`.
+        //
+        // Only tasks carry the reference; intervals are untouched. That's what makes
+        // re-categorising retroactive for free: the interval still points at its task, the task
+        // points at a different group, and every rollup recomputes with no data migration.
+        _ = sqlite3_exec(db, """
+        CREATE TABLE IF NOT EXISTS task_projects (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL UNIQUE,
+            color_hex  TEXT NOT NULL DEFAULT '#8E8E93',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        """, nil, nil, nil)
+        // NULL = Inbox. Inbox is implicit — never a row — so there's nothing to keep in sync.
+        _ = sqlite3_exec(db, "ALTER TABLE projects ADD COLUMN task_project_id INTEGER REFERENCES task_projects(id)", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_projects_task_project ON projects(task_project_id)", nil, nil, nil)
     }
 
     // MARK: - Projects
@@ -146,6 +165,99 @@ public final class IntervalStore {
         }
     }
 
+    // MARK: - Task projects (grouping above tasks)
+
+    /// Find-or-create by name, so "assign to a group" and "create a group" are one action.
+    @discardableResult
+    public func upsertTaskProject(name: String, colorHex: String) throws -> Int64 {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        if let existing = try taskProject(named: trimmed) { return existing.id }
+        let stmt = try prepare("""
+            INSERT INTO task_projects (name, color_hex, sort_order)
+            VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM task_projects))
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, trimmed)
+        bindText(stmt, 2, colorHex)
+        try step(stmt)
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    public func taskProject(named name: String) throws -> TaskProject? {
+        let stmt = try prepare("SELECT id, name, color_hex, sort_order FROM task_projects WHERE name = ? COLLATE NOCASE")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, name.trimmingCharacters(in: .whitespaces))
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return TaskProject(id: sqlite3_column_int64(stmt, 0), name: text(stmt, 1),
+                           colorHex: text(stmt, 2), sortOrder: Int(sqlite3_column_int(stmt, 3)))
+    }
+
+    public func listTaskProjects() throws -> [TaskProject] {
+        let stmt = try prepare("SELECT id, name, color_hex, sort_order FROM task_projects ORDER BY sort_order ASC, id ASC")
+        defer { sqlite3_finalize(stmt) }
+        var rows: [TaskProject] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            rows.append(TaskProject(id: sqlite3_column_int64(stmt, 0), name: text(stmt, 1),
+                                    colorHex: text(stmt, 2), sortOrder: Int(sqlite3_column_int(stmt, 3))))
+        }
+        return rows
+    }
+
+    /// Move a task into a group, or to Inbox with `nil`. Intervals are never touched, so this
+    /// retroactively re-buckets all of the task's history.
+    public func setTaskProject(taskID: Int64, taskProjectID: Int64?) throws {
+        let stmt = try prepare("UPDATE projects SET task_project_id = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        if let taskProjectID { sqlite3_bind_int64(stmt, 1, taskProjectID) } else { sqlite3_bind_null(stmt, 1) }
+        sqlite3_bind_int64(stmt, 2, taskID)
+        try step(stmt)
+    }
+
+    /// Persist a new display order for groups (index in `orderedIDs` becomes `sort_order`).
+    public func setTaskProjectOrder(_ orderedIDs: [Int64]) throws {
+        try transaction {
+            for (index, id) in orderedIDs.enumerated() {
+                let stmt = try prepare("UPDATE task_projects SET sort_order = ? WHERE id = ?")
+                sqlite3_bind_int(stmt, 1, Int32(index))
+                sqlite3_bind_int64(stmt, 2, id)
+                try step(stmt)
+                sqlite3_finalize(stmt)
+            }
+        }
+    }
+
+    public func renameTaskProject(id: Int64, name: String) throws {
+        let stmt = try prepare("UPDATE task_projects SET name = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, name.trimmingCharacters(in: .whitespaces))
+        sqlite3_bind_int64(stmt, 2, id)
+        try step(stmt)
+    }
+
+    public func setTaskProjectColor(id: Int64, colorHex: String) throws {
+        let stmt = try prepare("UPDATE task_projects SET color_hex = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, colorHex)
+        sqlite3_bind_int64(stmt, 2, id)
+        try step(stmt)
+    }
+
+    /// Delete a group. Its tasks fall back to Inbox — deleting a grouping must never delete
+    /// tracked time.
+    public func deleteTaskProject(id: Int64) throws {
+        try transaction {
+            let clear = try prepare("UPDATE projects SET task_project_id = NULL WHERE task_project_id = ?")
+            sqlite3_bind_int64(clear, 1, id)
+            try step(clear)
+            sqlite3_finalize(clear)
+
+            let del = try prepare("DELETE FROM task_projects WHERE id = ?")
+            sqlite3_bind_int64(del, 1, id)
+            try step(del)
+            sqlite3_finalize(del)
+        }
+    }
+
     public func setProjectOrder(id: Int64, sortOrder: Int) throws {
         let stmt = try prepare("UPDATE projects SET sort_order = ? WHERE id = ?")
         defer { sqlite3_finalize(stmt) }
@@ -156,7 +268,8 @@ public final class IntervalStore {
 
     public func listProjects(includeArchived: Bool = false) throws -> [Project] {
         let sql = """
-        SELECT id, name, color_hex, sort_order, archived, finished, finished_at FROM projects
+        SELECT id, name, color_hex, sort_order, archived, finished, finished_at, task_project_id
+        FROM projects
         \(includeArchived ? "" : "WHERE archived = 0")
         ORDER BY sort_order ASC, id ASC
         """
@@ -172,7 +285,9 @@ public final class IntervalStore {
                 archived: sqlite3_column_int(stmt, 4) != 0,
                 finished: sqlite3_column_int(stmt, 5) != 0,
                 finishedAt: sqlite3_column_type(stmt, 6) == SQLITE_NULL
-                    ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6))
+                    ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6)),
+                taskProjectID: sqlite3_column_type(stmt, 7) == SQLITE_NULL
+                    ? nil : sqlite3_column_int64(stmt, 7)
             ))
         }
         return rows

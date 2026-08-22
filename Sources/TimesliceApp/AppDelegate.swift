@@ -116,13 +116,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.appState.selectedProjectID = selectable.first?.id
             }
             self.switcherStartID = self.appState.selectedProjectID
-            self.hud.showSwitcher(tasks: selectable, selectedID: self.appState.selectedProjectID, todaySeconds: self.appState.todaySecondsByID, runningID: self.engine.runningProjectID, clock: self.engine.clock)
+            self.hud.showSwitcher(tasks: selectable, selectedID: self.appState.selectedProjectID, todaySeconds: self.appState.todaySecondsByID, runningID: self.engine.runningProjectID, clock: self.engine.clock,
+                                 displayColor: { [weak self] id in self?.appState.displayColorHex(forTaskID: id) ?? "#8E8E93" },
+                                 groupName: { [weak self] id in self?.appState.shortGroupName(forTaskID: id) })
         }
 
         hotkeys.onCycle = { [weak self] delta in
             guard let self, !self.switcherSuppressed else { return }
             self.appState.moveSelection(by: delta)   // \ forward (+1), ] reverse (-1)
-            self.hud.showSwitcher(tasks: self.appState.selectableProjects, selectedID: self.appState.selectedProjectID, todaySeconds: self.appState.todaySecondsByID, runningID: self.engine.runningProjectID, clock: self.engine.clock)
+            self.hud.showSwitcher(tasks: self.appState.selectableProjects, selectedID: self.appState.selectedProjectID, todaySeconds: self.appState.todaySecondsByID, runningID: self.engine.runningProjectID, clock: self.engine.clock,
+                                 displayColor: { [weak self] id in self?.appState.displayColorHex(forTaskID: id) ?? "#8E8E93" },
+                                 groupName: { [weak self] id in self?.appState.shortGroupName(forTaskID: id) })
         }
 
         hotkeys.onCommit = { [weak self] in
@@ -152,10 +156,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.appState.resumeAndStart(projectID: id)
                     self?.showHUDForRunning()
                 },
-                onCreate: { [weak self] name in
-                    self?.appState.addAndStart(name: name)
+                onCreate: { [weak self] name, group in
+                    self?.appState.addAndStart(name: name, groupName: group)
                     self?.showHUDForRunning()
-                }
+                },
+                groups: { [weak self] in self?.appState.taskProjects ?? [] },
+                displayColor: { [weak self] id in self?.appState.displayColorHex(forTaskID: id) ?? "#8E8E93" },
+                groupName: { [weak self] id in self?.appState.shortGroupName(forTaskID: id) }
             )
         }
 

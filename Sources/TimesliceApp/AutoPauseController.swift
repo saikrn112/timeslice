@@ -51,12 +51,23 @@ final class AutoPauseController: ObservableObject {
         // (Re)arm the long-session checkpoint whenever the running task or the threshold changes.
         // @Published fires in willSet (before the value updates), so hop to the next runloop tick
         // to read the settled `runningSince` — otherwise the arm reads nil and never fires.
-        Publishers.Merge(
+        Publishers.Merge3(
             engine.$runningSince.map { _ in () },
-            settings.$autoPauseMinutes.map { _ in () }
+            settings.$autoPauseMinutes.map { _ in () },
+            settings.$promptsEnabled.map { _ in () }
         )
         .receive(on: RunLoop.main)
         .sink { [weak self] _ in self?.rearmCheckpoint() }
+        .store(in: &cancellables)
+
+        // Same for the mirror-image nudge: armed off `pausedSince` instead of `runningSince`.
+        Publishers.Merge3(
+            engine.$pausedSince.map { _ in () },
+            settings.$idleNudgeMinutes.map { _ in () },
+            settings.$promptsEnabled.map { _ in () }
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _ in self?.rearmIdleNudge() }
         .store(in: &cancellables)
     }
 
@@ -78,6 +89,9 @@ final class AutoPauseController: ObservableObject {
 
         guard let resume = resumeAfterWake else { return }
         resumeAfterWake = nil
+        // Prompts fully disabled → stay silent. Sleep still paused the timer (that's about
+        // keeping the data honest, not about nudging), it just won't ask anything now.
+        guard settings.promptsEnabled else { return }
         // Only offer if that task still exists and isn't archived/finished.
         guard appState.selectableProjects.contains(where: { $0.id == resume.projectID }) else { return }
         promptResume(projectID: resume.projectID, name: resume.name)
@@ -97,13 +111,10 @@ final class AutoPauseController: ObservableObject {
         pendingPromptProjectID = nil
         dismissPrompt()
 
-        guard settings.autoPauseEnabled, let since = engine.runningSince else { return }
-        let delay: TimeInterval
-        if let debug = Self.debugSeconds {
-            delay = debug
-        } else {
-            delay = max(1, since.addingTimeInterval(settings.autoPauseSeconds).timeIntervalSinceNow)
-        }
+        guard NudgePolicy.armsSessionNudge(settings.nudgeConfig, isRunning: engine.isRunning),
+              let since = engine.runningSince else { return }
+        let delay = Self.debugSeconds
+            ?? NudgePolicy.delay(since: since, threshold: settings.autoPauseSeconds)
         checkpointTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.checkpointReached() }
         }
@@ -126,6 +137,75 @@ final class AutoPauseController: ObservableObject {
     /// Set while the checkpoint itself pauses the timer, so the resulting state change doesn't
     /// bounce back into rearmCheckpoint and cancel the prompt.
     private var suppressRearm = false
+
+    // MARK: - Idle nudge (paused too long)
+
+    /// The mirror of the long-session checkpoint. That one catches "you forgot to pause";
+    /// this catches "you forgot to un-pause" — you took a break, came back, and started working
+    /// without resuming the timer, so the time goes unrecorded.
+    ///
+    /// Nothing is written either way: being paused is already the safe state, so this only asks.
+    private func rearmIdleNudge() {
+        idleTimer?.invalidate(); idleTimer = nil
+        idleNudgePending = false
+        // A paused task that gets resumed or cleared dismisses any pending idle prompt.
+        if !engine.isPaused { dismissIdlePromptIfShowing() }
+
+        // Don't stack on the other prompt. The "still working?" checkpoint pauses the timer
+        // itself, which sets `pausedSince` and would otherwise arm this nudge to fire a second
+        // panel over the first. While that prompt is unanswered, the pause isn't yours — it's
+        // the checkpoint's, and answering it re-arms whichever nudge then applies.
+        guard NudgePolicy.armsPausedNudge(settings.nudgeConfig,
+                                          isPaused: engine.isPaused,
+                                          awaitingAnswer: awaitingResponse),
+              let since = engine.pausedSince else { return }
+        let delay = Self.debugSeconds
+            ?? NudgePolicy.delay(since: since, threshold: settings.idleNudgeSeconds)
+        idleTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.idleNudgeReached() }
+        }
+    }
+
+    private func idleNudgeReached() {
+        // Only nudge about a task that's still paused and still resumable.
+        guard engine.isPaused, let id = engine.currentProjectID,
+              appState.selectableProjects.contains(where: { $0.id == id }) else { return }
+        let name = appState.projects.first { $0.id == id }?.name ?? "task"
+        idleNudgePending = true
+        promptStillPaused(projectID: id, name: name)
+    }
+
+    /// True while a "still paused?" prompt is pending, so its own dismissal can be told apart
+    /// from a state change that should cancel it.
+    private var idleNudgePending = false
+
+    private func promptStillPaused(projectID: Int64, name: String) {
+        let mins = Int(Date().timeIntervalSince(engine.pausedSince ?? Date()) / 60)
+        let howLong = mins >= 1 ? "\(mins)m" : "a while"
+        showPrompt(
+            title: "“\(name)” is still paused",
+            message: "Paused for \(howLong). Pick it back up, or leave it paused?",
+            primary: "Resume",              // default — Return resumes
+            secondary: "Leave paused"
+        ) { [weak self] resume in
+            guard let self else { return }
+            self.idleNudgePending = false
+            self.idleTimer?.invalidate(); self.idleTimer = nil
+            if resume, self.appState.selectableProjects.contains(where: { $0.id == projectID }) {
+                self.engine.switchTo(projectID: projectID)
+            }
+            // Declining doesn't re-arm: one nudge per pause, so leaving something paused
+            // deliberately doesn't turn into a repeating interruption.
+        }
+    }
+
+    private func dismissIdlePromptIfShowing() {
+        guard idleNudgePending else { return }
+        idleNudgePending = false
+        dismissPrompt()
+    }
+
+    private var idleTimer: Timer?
 
     // MARK: - Prompts
 
@@ -162,6 +242,9 @@ final class AutoPauseController: ObservableObject {
             if keepGoing, self.appState.selectableProjects.contains(where: { $0.id == projectID }) {
                 self.engine.switchTo(projectID: projectID)   // resume timing → re-arms checkpoint
             }
+            // "Keep it paused" deliberately doesn't arm the "still paused?" nudge: you just
+            // said you know it's paused, so asking again in a few minutes would be nagging.
+            // (`pausedSince` doesn't change here, so no re-arm fires.)
         }
     }
 

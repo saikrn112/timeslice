@@ -28,10 +28,21 @@ struct MetricsView: View {
     @State private var hoverHour: Double?
     @State private var hoveredSegment: DaySegment?
 
+    // Drag-select on the day timeline: the anchor where the drag began and the live edge.
+    // Both non-nil while dragging or while a completed selection is being shown.
+    @State private var selectionAnchor: Double?
+    @State private var selectionEdge: Double?
+    /// True only between a drag's first movement and its end, so each new drag re-anchors
+    /// instead of extending the previous selection.
+    @State private var isDragging = false
+
     /// Project lookup + the timeline legend, both computed once per recompute so hovering can't
     /// trigger DB reads or reshuffle the labels.
     @State private var projectLookup: [Int64: Project] = [:]
     @State private var legendItems: [(String, Color)] = []
+
+    /// Roll "Where time went" up to groups instead of listing every task.
+    @State private var groupByProject = false
 
     /// Bucket under the cursor on the hours / focus charts.
     @State private var hoveredBucket: Bucket?
@@ -58,9 +69,19 @@ struct MetricsView: View {
                 if isDay { sessionList } else { weekdayPattern }
             }
             .padding(18)
+            // Clicking anywhere else in the view drops the timeline selection. Attached to the
+            // background rather than the content, and as a *simultaneous* gesture, so it can't
+            // swallow clicks on the range pills, the ✕, or any chart interaction.
+            .background(
+                Color.clear
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(TapGesture().onEnded { clearSelection() })
+            )
         }
         .onAppear { syncToNowIfStale(); recompute() }
-        .onChange(of: range) { _, _ in recompute() }
+        // Changing day/range invalidates any timeline selection — the hours it referred to
+        // belong to a different day's data.
+        .onChange(of: range) { _, _ in clearSelection(); recompute() }
         .onReceive(NotificationCenter.default.publisher(for: TimesliceNotifications.dataDidChange)) { _ in recompute() }
         .onReceive(settings.objectWillChange) { _ in DispatchQueue.main.async { recompute() } }
         // The app can run for days; re-anchor to the real "today" on wake so the range never
@@ -90,7 +111,7 @@ struct MetricsView: View {
                  caption: "≥\(settings.deepBlockMinutes)m blocks", tint: .purple)
             if isDay {
                 tile("Switches", value: "\(summary?.switches ?? 0)", caption: "this day", tint: .orange)
-                tile("Longest", value: Format.duration(summary?.longestSessionSeconds ?? 0),
+                tile("Longest", value: Format.compact(summary?.longestSessionSeconds ?? 0),
                      caption: "session", tint: .teal)
             } else {
                 tile("On goal", value: "\(summary?.daysOnGoal ?? 0)/\(summary?.activeDays ?? 0)",
@@ -108,14 +129,21 @@ struct MetricsView: View {
         let target = isDay
             ? settings.dailyGoalSeconds
             : settings.dailyGoalSeconds * Double(max(1, summary?.activeDays ?? 1))
-        let frac = target > 0 ? min(1, total / target) : 0
+        // `ratio` is unclamped so the label can read past 100%; the bar itself still clamps.
+        let ratio = target > 0 ? total / target : 0
+        let frac = min(1, ratio)
         return VStack(alignment: .leading, spacing: 6) {
             Text(isDay ? "Tracked" : "Total").font(.caption).foregroundStyle(.secondary)
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(hours(total)).font(.system(.title2, design: .rounded)).fontWeight(.semibold)
-                Text("/ \(hours(target))").font(.caption).foregroundStyle(.secondary)
+                Text(hoursOnly(total)).font(.system(.title2, design: .rounded)).fontWeight(.semibold)
+                Text("/ \(hoursOnly(target))").font(.caption).foregroundStyle(.secondary)
             }
-            ProgressView(value: frac).tint(frac >= 1 ? .green : .accentColor)
+            HStack(spacing: 6) {
+                ProgressView(value: frac).tint(frac >= 1 ? .green : .accentColor)
+                Text(percent(ratio))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(ratio >= 1 ? Color.green : Color.secondary)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -168,7 +196,22 @@ struct MetricsView: View {
                 .chartOverlay { proxy in
                     GeometryReader { geo in
                         ZStack(alignment: .topLeading) {
-                            if let hour = hoverHour, let plot = geo[proxy.plotFrame!] as CGRect? {
+                            // Shaded band for a drag-selection, drawn under the cursor rule.
+                            if let plot = geo[proxy.plotFrame!] as CGRect?,
+                               let range = selectedRange {
+                                let x1 = plot.minX + plot.width * CGFloat(range.lowerBound / 24)
+                                let x2 = plot.minX + plot.width * CGFloat(range.upperBound / 24)
+                                Rectangle()
+                                    .fill(Color.accentColor.opacity(0.18))
+                                    .overlay(Rectangle().stroke(Color.accentColor.opacity(0.5), lineWidth: 1))
+                                    .frame(width: max(1, x2 - x1), height: plot.height)
+                                    .offset(x: x1, y: plot.minY)
+                                    .allowsHitTesting(false)
+                            }
+                            // Cursor rule + block tooltip — suppressed during a drag, where the
+                            // selection readout is the thing being read.
+                            if let hour = hoverHour, selectionAnchor == nil,
+                               let plot = geo[proxy.plotFrame!] as CGRect? {
                                 let x = plot.minX + (plot.width * CGFloat(hour / 24))
                                 Path { p in
                                     p.move(to: CGPoint(x: x, y: plot.minY))
@@ -198,11 +241,161 @@ struct MetricsView: View {
                                         hoveredSegment = nil
                                     }
                                 }
+                                // Drag across the timeline to measure a stretch of the day.
+                                .gesture(
+                                    DragGesture(minimumDistance: 3)
+                                        .onChanged { value in
+                                            guard let plot = geo[proxy.plotFrame!] as CGRect?,
+                                                  plot.width > 0 else { return }
+                                            // Re-anchor on every NEW drag. Keying this off
+                                            // `selectionAnchor == nil` left the anchor stuck at
+                                            // wherever the first-ever drag began, so later drags
+                                            // could only move the right edge.
+                                            if !isDragging {
+                                                isDragging = true
+                                                selectionAnchor = hour(at: value.startLocation.x, in: plot)
+                                            }
+                                            selectionEdge = hour(at: value.location.x, in: plot)
+                                        }
+                                        .onEnded { value in
+                                            isDragging = false
+                                            guard let plot = geo[proxy.plotFrame!] as CGRect?,
+                                                  plot.width > 0 else { return }
+                                            selectionEdge = hour(at: value.location.x, in: plot)
+                                            // A stray micro-drag isn't a selection worth keeping.
+                                            guard let r = selectedRange,
+                                                  (r.upperBound - r.lowerBound) >= (1.0 / 60.0) else {
+                                                clearSelection()
+                                                return
+                                            }
+                                            // Tighten onto block boundaries once, on release —
+                                            // snapping live would make the band jump under the
+                                            // cursor while you're still choosing the edges.
+                                            let snapped = Aggregations.snapToSegments(
+                                                segments: daySegments,
+                                                from: r.lowerBound, to: r.upperBound
+                                            )
+                                            withAnimation(.easeOut(duration: 0.12)) {
+                                                selectionAnchor = snapped.from
+                                                selectionEdge = snapped.to
+                                            }
+                                        }
+                                )
+                                // A plain click (no drag) dismisses the selection, the way
+                                // clicking off a text selection clears it.
+                                .onTapGesture { clearSelection() }
                         }
                     }
                 }
                 .frame(height: 150)
+                if let summary = windowSummary { selectionReadout(summary) }
                 timelineLegend
+            }
+        }
+    }
+
+    // MARK: - Drag-selection on the day timeline
+
+    /// Local hour (0–24) for a point in the plot.
+    private func hour(at x: CGFloat, in plot: CGRect) -> Double {
+        let frac = (x - plot.minX) / plot.width
+        return Double(min(max(frac, 0), 1)) * 24
+    }
+
+    /// The current selection as an ordered range, or nil when nothing is selected.
+    private var selectedRange: ClosedRange<Double>? {
+        guard let a = selectionAnchor, let b = selectionEdge else { return nil }
+        return min(a, b)...max(a, b)
+    }
+
+    private var windowSummary: WindowSummary? {
+        guard let r = selectedRange, r.upperBound > r.lowerBound else { return nil }
+        return Aggregations.windowSummary(segments: daySegments,
+                                          from: r.lowerBound, to: r.upperBound)
+    }
+
+    private func clearSelection() {
+        selectionAnchor = nil
+        selectionEdge = nil
+        isDragging = false
+    }
+
+    /// Segments clipped to the selection — the source for both the breakdown and the session
+    /// list while a range is selected. Clipped, not merely filtered: a block straddling an edge
+    /// should contribute only its overlapping part, matching the Working/Idle figures above.
+    private var segmentsInSelection: [DaySegment] {
+        guard let r = selectedRange, r.upperBound > r.lowerBound else { return daySegments }
+        return daySegments.compactMap { seg in
+            let s = max(seg.startHour, r.lowerBound)
+            let e = min(seg.endHour, r.upperBound)
+            guard e > s else { return nil }
+            return DaySegment(id: seg.id, projectID: seg.projectID, startHour: s, endHour: e)
+        }
+    }
+
+    /// Per-task totals for the selection, ranked — same shape as `rankedTotals` so the existing
+    /// rows render unchanged.
+    private var totalsInSelection: [ProjectTotal] {
+        guard let summary = windowSummary else { return rankedTotals }
+        return summary.byProject.compactMap { row in
+            guard let project = projectLookup[row.projectID] else { return nil }
+            return ProjectTotal(project: project, seconds: row.seconds)
+        }
+    }
+
+    /// True while a selection is narrowing the sections below the timeline.
+    private var hasSelection: Bool { isDay && windowSummary != nil }
+
+    /// Section subtitle naming the active selection, so a filtered list can't be mistaken for
+    /// the whole day's.
+    private var selectionSubtitle: String? {
+        guard let s = windowSummary, hasSelection else { return nil }
+        return "\(spanLabel(from: s.startHour, to: s.endHour)) selected"
+    }
+
+    /// Tracked vs untracked for the selected stretch. The day-level "Tracked" tile can't answer
+    /// this — you weren't working the whole day, so a day figure says nothing about one stretch.
+    private func selectionReadout(_ s: WindowSummary) -> some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(spanLabel(from: s.startHour, to: s.endHour))
+                    .font(.system(size: 11, weight: .semibold))
+                Text("\(Format.compact(s.totalSeconds)) selected")
+                    .font(.system(size: 9)).foregroundStyle(.tertiary)
+            }
+
+            Divider().frame(height: 22)
+
+            statPair("Working", Format.compact(s.trackedSeconds),
+                     detail: "\(Int((s.trackedRatio * 100).rounded()))%", tint: .accentColor)
+            statPair("Idle", Format.compact(s.idleSeconds),
+                     detail: nil, tint: .secondary)
+
+            Spacer()
+
+            Button { clearSelection() } label: {
+                Image(systemName: "xmark.circle.fill").font(.system(size: 12))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tertiary)
+            .help("Clear selection")
+        }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 7).fill(Color.secondary.opacity(0.10))
+        )
+        .padding(.top, 2)
+    }
+
+    private func statPair(_ label: String, _ value: String, detail: String?, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label).font(.system(size: 9)).foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Text(value).font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(tint)
+                if let detail {
+                    Text(detail).font(.system(size: 9)).foregroundStyle(.tertiary)
+                }
             }
         }
     }
@@ -275,9 +468,10 @@ struct MetricsView: View {
 
     /// The day's blocks in order — the detail the single-bar charts couldn't give.
     private var sessionList: some View {
-        section("Sessions", subtitle: "\(daySegments.count) blocks") {
+        let segs = hasSelection ? segmentsInSelection : daySegments
+        return section("Sessions", subtitle: "\(segs.count) blocks\(hasSelection ? " in selection" : "")") {
             VStack(spacing: 4) {
-                ForEach(daySegments) { seg in
+                ForEach(segs) { seg in
                     let mins = (seg.endHour - seg.startHour) * 60
                     HStack(spacing: 9) {
                         Circle().fill(colorForProject(seg.projectID)).frame(width: 8, height: 8)
@@ -452,10 +646,22 @@ struct MetricsView: View {
     // MARK: - Where time went
 
     private var whereTimeWent: some View {
-        section("Where time went", subtitle: nil) {
-            let totals = rankedTotals
+        // While a stretch of the timeline is selected, this narrows to it — so the breakdown
+        // answers "what filled *that*", not "what filled the whole day".
+        section("Where time went", subtitle: selectionSubtitle, accessory: { groupToggle }) {
+            let totals = isDay && hasSelection ? totalsInSelection : rankedTotals
             if totals.isEmpty {
-                placeholder("Nothing tracked in this range")
+                placeholder(hasSelection ? "Nothing tracked in this selection"
+                                         : "Nothing tracked in this range")
+            } else if groupByProject {
+                // Rollup runs on the SAME totals, so grouped and ungrouped views always agree.
+                let rolled = Aggregations.rollUp(totals: totals, taskProjects: appState.taskProjects)
+                let maxSeconds = rolled.map(\.seconds).max() ?? 1
+                VStack(spacing: 8) {
+                    ForEach(rolled) { row in
+                        groupRow(row, fraction: maxSeconds > 0 ? row.seconds / maxSeconds : 0)
+                    }
+                }
             } else {
                 let maxSeconds = totals.map(\.seconds).max() ?? 1
                 VStack(spacing: 8) {
@@ -467,19 +673,62 @@ struct MetricsView: View {
         }
     }
 
-    private func rankRow(_ total: ProjectTotal, fraction: Double) -> some View {
+    /// Tasks ⇄ Projects. Hidden until at least one group exists, so the control doesn't appear
+    /// before it can do anything.
+    @ViewBuilder
+    private var groupToggle: some View {
+        if !appState.taskProjects.isEmpty {
+            HStack(spacing: 6) {
+                ForEach([false, true], id: \.self) { grouped in
+                    Button { groupByProject = grouped } label: {
+                        Text(grouped ? "Projects" : "Tasks")
+                            .font(.system(size: 11, weight: groupByProject == grouped ? .semibold : .regular))
+                            .foregroundStyle(groupByProject == grouped ? Color.accentColor : Color.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    if !grouped { Text("·").font(.system(size: 10)).foregroundStyle(.tertiary) }
+                }
+            }
+        }
+    }
+
+    private func groupRow(_ row: TaskProjectTotal, fraction: Double) -> some View {
         HStack(spacing: 10) {
-            Circle().fill(Color(hex: total.project.colorHex)).frame(width: 9, height: 9)
-            Text(total.project.name).font(.callout).lineLimit(1).frame(width: 130, alignment: .leading)
+            Circle().fill(Color(hex: row.colorHex)).frame(width: 9, height: 9)
+            HStack(spacing: 5) {
+                Text(row.name).font(.callout).lineLimit(1)
+                Text("\(row.taskCount)").font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(width: 130, alignment: .leading)
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.secondary.opacity(0.12))
-                    Capsule().fill(Color(hex: total.project.colorHex))
+                    Capsule().fill(Color(hex: row.colorHex))
                         .frame(width: max(4, geo.size.width * fraction))
                 }
             }
             .frame(height: 14)
-            Text(Format.duration(total.seconds))
+            Text(Format.compact(row.seconds))
+                .font(.system(.caption, design: .monospaced)).monospacedDigit()
+                .foregroundStyle(.secondary).frame(width: 70, alignment: .trailing)
+        }
+    }
+
+    private func rankRow(_ total: ProjectTotal, fraction: Double) -> some View {
+        HStack(spacing: 10) {
+            let hex = appState.displayColorHex(for: total.project)
+            Circle().fill(Color(hex: hex)).frame(width: 9, height: 9)
+            Text(total.project.name).font(.callout).lineLimit(1).frame(width: 130, alignment: .leading)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.secondary.opacity(0.12))
+                    Capsule().fill(Color(hex: hex))
+                        .frame(width: max(4, geo.size.width * fraction))
+                }
+            }
+            .frame(height: 14)
+            Text(Format.compact(total.seconds))
                 .font(.system(.caption, design: .monospaced)).monospacedDigit()
                 .foregroundStyle(.secondary).frame(width: 70, alignment: .trailing)
         }
@@ -620,10 +869,23 @@ struct MetricsView: View {
     // MARK: - Building blocks
 
     private func section<Content: View>(_ title: String, subtitle: String?, @ViewBuilder _ content: () -> Content) -> some View {
+        section(title, subtitle: subtitle, accessory: { EmptyView() }, content)
+    }
+
+    /// Same, with a control on the right of the header row (e.g. the Tasks ⇄ Projects toggle).
+    private func section<Content: View, Accessory: View>(
+        _ title: String, subtitle: String?,
+        @ViewBuilder accessory: () -> Accessory,
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.headline)
-                if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.headline)
+                    if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
+                }
+                Spacer()
+                accessory()
             }
             content()
         }
@@ -637,8 +899,12 @@ struct MetricsView: View {
     /// property, or every hover re-queries and the legend visibly re-renders.
     private var projectsByID: [Int64: Project] { projectLookup }
 
+    /// A task draws in its GROUP's colour when it has one, else its own. With many tasks the
+    /// generated per-task hues start to look alike; inheriting collapses the palette without
+    /// losing detail (hover still names the individual task).
     private func colorForProject(_ id: Int64) -> Color {
-        Color(hex: projectsByID[id]?.colorHex ?? "#8E8E93")
+        guard let task = projectsByID[id] else { return Color(hex: "#8E8E93") }
+        return Color(hex: appState.displayColorHex(for: task))
     }
 
     private func weekdayName(_ weekday: Int) -> String {
@@ -661,7 +927,17 @@ struct MetricsView: View {
         }
     }
 
-    private func hours(_ seconds: TimeInterval) -> String { String(format: "%.1fh", seconds / 3600) }
+    /// Tile/axis magnitudes. Decimal hours read fine up to a day ("6.2h"), but a month's total
+    /// as "312.5h" is hard to size up — past 24h this switches to `13d 1h`.
+    private func hours(_ seconds: TimeInterval) -> String {
+        seconds >= 24 * 3600 ? Format.compact(seconds) : String(format: "%.1fh", seconds / 3600)
+    }
+
+    /// Always hours, never rolling into days. Used where two figures sit side by side and must
+    /// share a unit — "23.6h / 1d 16h" forces you to do the conversion to compare them.
+    private func hoursOnly(_ seconds: TimeInterval) -> String {
+        String(format: "%.1fh", seconds / 3600)
+    }
     private func percent(_ ratio: Double) -> String { "\(Int((ratio * 100).rounded()))%" }
 
     // MARK: - Recompute
@@ -688,11 +964,18 @@ struct MetricsView: View {
         if isDay {
             daySegments = Aggregations.daySegments(intervals: all, day: range.start)
             // Stable legend: first appearance order along the day, computed once here.
-            var seen = Set<Int64>()
+            // One entry per GROUP (or per Inbox task), in first-appearance order — a day with
+            // 30 tasks across 5 groups gets 5 chips, not 30.
+            var seenLabels = Set<String>()
             legendItems = daySegments.compactMap { seg in
-                guard !seen.contains(seg.projectID), let p = projectLookup[seg.projectID] else { return nil }
-                seen.insert(seg.projectID)
-                return (p.name, Color(hex: p.colorHex))
+                guard let task = projectLookup[seg.projectID] else { return nil }
+                let group = task.taskProjectID.flatMap { gid in
+                    appState.taskProjects.first { $0.id == gid }
+                }
+                let label = group?.name ?? task.name
+                guard !seenLabels.contains(label) else { return nil }
+                seenLabels.insert(label)
+                return (label, Color(hex: group?.colorHex ?? task.colorHex))
             }
         } else {
             weekdayAvgs = Aggregations.weekdayAverages(intervals: closed, range: range)

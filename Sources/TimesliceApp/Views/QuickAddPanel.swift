@@ -10,17 +10,24 @@ import TimesliceCore
 final class QuickAddPanel {
     private var window: NSPanel?
 
-    /// `onResume(id)` starts an existing task; `onCreate(name)` makes a new one.
+    /// `onResume(id)` starts an existing task; `onCreate(name, group)` makes a new one, in
+    /// `group` when a `/project` token was typed.
     /// `todaySeconds(id)` supplies the time shown on the right of each row.
     func show(search: @escaping (String) -> [TaskMatch],
               todaySeconds: @escaping (Int64) -> TimeInterval,
               onResume: @escaping (Int64) -> Void,
-              onCreate: @escaping (String) -> Void) {
+              onCreate: @escaping (String, String?) -> Void,
+              groups: @escaping () -> [TaskProject],
+              displayColor: @escaping (Int64) -> String,
+              groupName: @escaping (Int64) -> String?) {
         let content = PaletteView(
             search: search,
             todaySeconds: todaySeconds,
             onResume: { [weak self] id in self?.close(); onResume(id) },
-            onCreate: { [weak self] name in self?.close(); onCreate(name) },
+            onCreate: { [weak self] name, group in self?.close(); onCreate(name, group) },
+            groups: groups,
+            displayColor: displayColor,
+            groupName: groupName,
             onCancel: { [weak self] in self?.close() }
         )
         let hosting = NSHostingView(rootView: content)
@@ -102,7 +109,12 @@ private struct PaletteView: View {
     let search: (String) -> [TaskMatch]
     let todaySeconds: (Int64) -> TimeInterval
     let onResume: (Int64) -> Void
-    let onCreate: (String) -> Void
+    let onCreate: (String, String?) -> Void
+    let groups: () -> [TaskProject]
+    /// Colour a task renders in (project shade, or its own in Inbox).
+    let displayColor: (Int64) -> String
+    /// Short project label, nil for Inbox.
+    let groupName: (Int64) -> String?
     let onCancel: () -> Void
 
     @State private var query = ""
@@ -113,13 +125,42 @@ private struct PaletteView: View {
     @State private var keyboardDriving = false
     @FocusState private var focused: Bool
 
+    /// The query split into task name + optional /group token.
+    private var parsed: ParsedQuery { TaskSearch.parse(query) }
+
+    /// Groups to offer while a `/token` is being typed.
+    private var groupSuggestions: [TaskProject] {
+        guard let token = parsed.groupToken else { return [] }
+        return TaskSearch.rankGroups(token: token, groups: groups())
+    }
+
     /// Show a "Create …" row unless the query exactly matches an existing task.
     private var showsCreateRow: Bool {
-        let q = query.trimmingCharacters(in: .whitespaces)
+        let q = parsed.name
         guard !q.isEmpty else { return false }
         return !matches.contains { $0.project.name.caseInsensitiveCompare(q) == .orderedSame }
     }
     private var rowCount: Int { matches.count + (showsCreateRow ? 1 : 0) }
+
+    /// "Create “x”" or "Create “x” in /group" so the destination is visible before committing.
+    private var createRowLabel: String {
+        let base = "Create “\(parsed.name)”"
+        guard let token = parsed.groupToken, !token.isEmpty else { return base }
+        // Show the group we'd actually resolve to, so a partial token reads truthfully.
+        let resolved = groupSuggestions.first?.name ?? token
+        return "\(base) in /\(resolved)"
+    }
+
+    private func commitCreate() {
+        guard !parsed.name.isEmpty else { return }
+        var group = parsed.groupToken
+        if let token = group, !token.isEmpty {
+            // A partial token resolves to the best matching existing group; otherwise it's a
+            // new group by that literal name.
+            group = groupSuggestions.first?.name ?? token
+        }
+        onCreate(parsed.name, (group?.isEmpty ?? true) ? nil : group)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -157,7 +198,8 @@ private struct PaletteView: View {
                 .foregroundStyle(.white)
                 .focused($focused)
                 .onChange(of: query) { _, q in
-                    matches = search(q)
+                    // Match on the name only — the /group token isn't part of any task name.
+                    matches = search(TaskSearch.parse(q).name)
                     selection = 0
                 }
                 .onSubmit(activateSelection)
@@ -178,11 +220,12 @@ private struct PaletteView: View {
                     VStack(spacing: 2) {
                         ForEach(Array(matches.enumerated()), id: \.element.id) { idx, m in
                             row(
-                                color: Color(hex: m.project.colorHex),
+                                color: Color(hex: displayColor(m.project.id)),
                                 name: m.project.name,
                                 badge: statusBadge(m.project),
                                 selected: idx == selection,
-                                time: todaySeconds(m.project.id)
+                                time: todaySeconds(m.project.id),
+                                group: groupName(m.project.id)
                             )
                             .id(idx)
                             .onTapGesture { onResume(m.project.id) }
@@ -207,25 +250,46 @@ private struct PaletteView: View {
                     if case .active = phase { keyboardDriving = false }
                 }
             }
+            if let token = parsed.groupToken, !groupSuggestions.isEmpty {
+                Divider().opacity(0.25)
+                HStack(spacing: 6) {
+                    Text("/").font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
+                    ForEach(groupSuggestions.prefix(4)) { g in
+                        HStack(spacing: 4) {
+                            Circle().fill(Color(hex: g.colorHex)).frame(width: 6, height: 6)
+                            Text(g.name).font(.system(size: 11))
+                                // The first suggestion is the one Return will use.
+                                .foregroundStyle(g.id == groupSuggestions.first?.id
+                                                 ? Color.primary : Color.secondary)
+                        }
+                    }
+                    if token.isEmpty && groupSuggestions.count > 4 {
+                        Text("+\(groupSuggestions.count - 4)")
+                            .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.horizontal, 14).padding(.vertical, 5)
+            }
             if showsCreateRow {
                 Divider().opacity(0.25)
                 let idx = matches.count
                 row(
                     color: .green,
-                    name: "Create “\(query.trimmingCharacters(in: .whitespaces))”",
+                    name: createRowLabel,
                     badge: nil,
                     selected: idx == selection,
                     systemImage: "plus.circle.fill"
                 )
                 .padding(.horizontal, 8).padding(.vertical, 6)
-                .onTapGesture { onCreate(query) }
+                .onTapGesture { commitCreate() }
                 .onHover { if $0 { selection = idx } }
             }
         }
     }
 
     private func row(color: Color, name: String, badge: (String, Color)?, selected: Bool,
-                     time: TimeInterval? = nil, systemImage: String? = nil) -> some View {
+                     time: TimeInterval? = nil, systemImage: String? = nil,
+                     group: String? = nil) -> some View {
         HStack(spacing: 10) {
             if let systemImage {
                 Image(systemName: systemImage).foregroundStyle(color).font(.system(size: 12))
@@ -236,6 +300,14 @@ private struct PaletteView: View {
                 .font(.system(size: 14, weight: selected ? .semibold : .regular))
                 .foregroundStyle(.white)
                 .lineLimit(1)
+            if let group {
+                Text(group)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(.white.opacity(0.10)))
+                    .lineLimit(1)
+            }
             Spacer(minLength: 8)
             if let (text, tint) = badge {
                 Text(text)
@@ -293,7 +365,7 @@ private struct PaletteView: View {
         if selection < matches.count {
             onResume(matches[selection].project.id)
         } else {
-            onCreate(query)
+            commitCreate()
         }
     }
 }

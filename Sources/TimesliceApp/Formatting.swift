@@ -33,6 +33,24 @@ enum Format {
     static func menuBarDuration(_ seconds: TimeInterval) -> String {
         duration(seconds)
     }
+
+    /// Readable magnitude rather than a stopwatch: `45m`, `2h 15m`, `1d 3h`.
+    ///
+    /// H:MM:SS is right for a live timer, where you watch it tick — but for a *total* it forces
+    /// you to parse colons to see whether "25:30:00" is a day of work or half an hour. Seconds
+    /// only appear under a minute, where they're the whole story.
+    static func compact(_ seconds: TimeInterval) -> String {
+        let total = Int(max(0, seconds).rounded())
+        if total < 60 { return "\(total)s" }
+        let minutes = total / 60
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60, remMinutes = minutes % 60
+        if hours < 24 {
+            return remMinutes == 0 ? "\(hours)h" : "\(hours)h \(remMinutes)m"
+        }
+        let days = hours / 24, remHours = hours % 24
+        return remHours == 0 ? "\(days)d" : "\(days)d \(remHours)h"
+    }
 }
 
 extension Color {
@@ -71,6 +89,44 @@ enum Palette {
         let saturation = 0.55
         let brightness = n % 2 == 0 ? 0.78 : 0.62
         return hexString(fromHue: hue, saturation: saturation, brightness: brightness)
+    }
+
+    /// A shade of `baseHex` for the task at `index` within its project.
+    ///
+    /// Keeps the project's hue (so the group still reads as one family at a glance) but varies
+    /// brightness and saturation, so adjacent blocks from different tasks in the same project
+    /// stay tellable apart on the day timeline instead of merging into one band.
+    ///
+    /// `index == 0` returns the base colour unchanged, so the first task in a project matches the
+    /// project's own swatch.
+    static func shade(ofHex baseHex: String, index: Int) -> String {
+        guard index > 0, let hsv = hsv(fromHex: baseHex) else { return baseHex }
+        // Alternate lighter/darker in widening steps: +12%, −12%, +24%, −24%, …
+        let step = (index + 1) / 2
+        let sign: Double = index.isMultiple(of: 2) ? -1 : 1
+        let delta = Double(step) * 0.12 * sign
+        let brightness = min(0.97, max(0.30, hsv.v + delta))
+        // Nudge saturation the other way so light shades don't wash out to near-white.
+        let saturation = min(0.95, max(0.28, hsv.s - delta * 0.35))
+        return hexString(fromHue: hsv.h, saturation: saturation, brightness: brightness)
+    }
+
+    private static func hsv(fromHex hex: String) -> (h: Double, s: Double, v: Double)? {
+        let cleaned = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        guard cleaned.count == 6, let value = Int(cleaned, radix: 16) else { return nil }
+        let r = Double((value >> 16) & 0xFF) / 255
+        let g = Double((value >> 8) & 0xFF) / 255
+        let b = Double(value & 0xFF) / 255
+        let maxV = max(r, g, b), minV = min(r, g, b)
+        let delta = maxV - minV
+        var h = 0.0
+        if delta > 0 {
+            if maxV == r { h = (g - b) / delta / 6 }
+            else if maxV == g { h = (2 + (b - r) / delta) / 6 }
+            else { h = (4 + (r - g) / delta) / 6 }
+            if h < 0 { h += 1 }
+        }
+        return (h, maxV > 0 ? delta / maxV : 0, maxV)
     }
 
     private static func hexString(fromHue h: Double, saturation s: Double, brightness v: Double) -> String {

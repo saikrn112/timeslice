@@ -15,18 +15,83 @@ public struct TaskMatch: Identifiable, Sendable {
 }
 
 /// Spotlight-style search over tasks: subsequence fuzzy match, ranked so live work wins ties.
+/// A palette query split into the task name and an optional trailing `/project` token.
+public struct ParsedQuery: Equatable, Sendable {
+    /// What to match task names against — the `/token` removed.
+    public let name: String
+    /// Group name typed after `/`, if any. Empty string means "`/` typed, nothing after it yet",
+    /// which is the cue to list all groups.
+    public let groupToken: String?
+
+    public init(name: String, groupToken: String?) {
+        self.name = name
+        self.groupToken = groupToken
+    }
+}
+
 public enum TaskSearch {
+
+    /// Split `"profiling /tensor"` into name `"profiling"` + group `"tensor"`.
+    ///
+    /// Only a `/` that starts a word counts, so task names containing slashes (`a/b testing`)
+    /// aren't mangled. The token must be last — it's a suffix, not free-floating syntax.
+    public static func parse(_ query: String) -> ParsedQuery {
+        // Find a "/" that begins a word (start of string, or preceded by whitespace).
+        var slashIndex: String.Index?
+        var i = query.startIndex
+        while i < query.endIndex {
+            if query[i] == "/" {
+                let atStart = i == query.startIndex
+                let afterSpace = !atStart && query[query.index(before: i)].isWhitespace
+                if atStart || afterSpace { slashIndex = i }   // keep the LAST such slash
+            }
+            i = query.index(after: i)
+        }
+        guard let slash = slashIndex else {
+            return ParsedQuery(name: query.trimmingCharacters(in: .whitespaces), groupToken: nil)
+        }
+        let name = String(query[query.startIndex..<slash]).trimmingCharacters(in: .whitespaces)
+        let token = String(query[query.index(after: slash)...]).trimmingCharacters(in: .whitespaces)
+        return ParsedQuery(name: name, groupToken: token)
+    }
+
+    /// Groups matching a `/token`, ranked by the same tiered scoring as tasks. An empty token
+    /// lists everything.
+    public static func rankGroups(token: String, groups: [TaskProject], limit: Int = 8) -> [TaskProject] {
+        let q = token.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return Array(groups.prefix(limit)) }
+        return groups
+            .compactMap { g -> (TaskProject, Int)? in
+                let s = score(query: q, candidate: g.name.lowercased())
+                return s > 0 ? (g, s) : nil
+            }
+            .sorted { $0.1 != $1.1 ? $0.1 > $1.1 : $0.0.name < $1.0.name }
+            .prefix(limit)
+            .map(\.0)
+    }
 
     /// Rank tasks for `query`. Empty query → recents (active first, then recently-done, then
     /// archived). Non-empty → fuzzy subsequence match, same status tiering within equal quality.
+    /// `groupNames` maps task id → its project's name, so a query can match a task by the
+    /// project it belongs to. A project-name hit scores lower than a name hit of the same
+    /// quality, so directly-named tasks still win.
     public static func rank(
-        query: String, projects: [Project], lastActivity: [Int64: Date], limit: Int = 8
+        query: String, projects: [Project], lastActivity: [Int64: Date],
+        groupNames: [Int64: String] = [:], limit: Int = 8
     ) -> [TaskMatch] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
 
         let scored: [TaskMatch] = projects.compactMap { p in
-            let s = q.isEmpty ? 0 : score(query: q, candidate: p.name.lowercased())
-            guard q.isEmpty || s > 0 else { return nil }
+            guard !q.isEmpty else {
+                return TaskMatch(project: p, score: 0, lastActivity: lastActivity[p.id])
+            }
+            var s = score(query: q, candidate: p.name.lowercased())
+            if let group = groupNames[p.id] {
+                // Halved so "task named X" outranks "task in project X".
+                let viaGroup = score(query: q, candidate: group.lowercased()) / 2
+                s = max(s, viaGroup)
+            }
+            guard s > 0 else { return nil }
             return TaskMatch(project: p, score: s, lastActivity: lastActivity[p.id])
         }
 

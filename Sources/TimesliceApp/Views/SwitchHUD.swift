@@ -14,10 +14,13 @@ final class SwitchHUD {
     /// `todaySeconds` maps task id → today's committed seconds. `runningID`/`clock` let the
     /// currently-running task tick live and render green while you keep selecting.
     func showSwitcher(tasks: [Project], selectedID: Int64?, todaySeconds: [Int64: TimeInterval],
-                      runningID: Int64?, clock: TickClock) {
+                      runningID: Int64?, clock: TickClock,
+                      displayColor: ((Int64) -> String)? = nil,
+                      groupName: ((Int64) -> String?)? = nil) {
         dismissWorkItem?.cancel()
         let view = SwitcherList(tasks: tasks, selectedID: selectedID, todaySeconds: todaySeconds,
-                                runningID: runningID, clock: clock)
+                                runningID: runningID, clock: clock,
+                                displayColor: displayColor, groupName: groupName)
         present(AnyView(view), size: switcherSize(count: tasks.count))
     }
 
@@ -94,6 +97,9 @@ private struct SwitcherList: View {
     let todaySeconds: [Int64: TimeInterval]
     let runningID: Int64?
     @ObservedObject var clock: TickClock
+    /// Project shade + short project label; nil-safe so the HUD works without grouping.
+    var displayColor: ((Int64) -> String)?
+    var groupName: ((Int64) -> String?)?
 
     /// Max rows drawn at once. With more tasks than this we window around the selection so rows
     /// stay full-size and readable instead of squashing to fit a fixed-height panel.
@@ -127,15 +133,24 @@ private struct SwitcherList: View {
             ForEach(win.tasks) { task in
                 let isSel = task.id == selectedID
                 let isRunning = task.id == runningID
+                let hex = displayColor?(task.id) ?? task.colorHex
                 HStack(spacing: 11) {
                     // Always the task's own color (green is reserved for the live dot + timer).
-                    Circle().fill(Color(hex: task.colorHex))
+                    Circle().fill(Color(hex: hex))
                         .frame(width: isSel ? 12 : 10, height: isSel ? 12 : 10)
-                        .shadow(color: Color(hex: task.colorHex).opacity(isSel ? 0.6 : 0), radius: 4)
+                        .shadow(color: Color(hex: hex).opacity(isSel ? 0.6 : 0), radius: 4)
                     Text(task.name)
                         .font(.system(size: isSel ? 17 : 14, weight: isSel ? .bold : .medium, design: .rounded))
                         .foregroundStyle(isSel ? Color.white : Color.white.opacity(0.55))
                         .lineLimit(1)
+                    if let group = groupName?(task.id) {
+                        Text(group)
+                            .font(.system(size: isSel ? 11 : 10))
+                            .foregroundStyle(.white.opacity(isSel ? 0.6 : 0.35))
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(.white.opacity(0.10)))
+                            .lineLimit(1)
+                    }
                     if isRunning {
                         Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(.green)
                     }

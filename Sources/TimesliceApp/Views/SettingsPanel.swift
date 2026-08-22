@@ -23,16 +23,37 @@ struct SettingsPanel: View {
                 onInc: { settings.deepBlockMinutes = min(120, settings.deepBlockMinutes + 5) }
             )
 
+            Divider()
+
+            Toggle(isOn: $settings.promptsEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Nudges")
+                    Text("both prompts below; sleep still pauses the timer")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+
             stepperRow(
-                title: "Still-working prompt",
+                title: "Still working?",
                 value: settings.autoPauseMinutes == 0 ? "Off" : "\(settings.autoPauseMinutes)m",
-                caption: "ask after a session runs this long (sleep always pauses regardless)",
+                caption: "ask after a session runs this long, and pause it",
                 onDec: { settings.autoPauseMinutes = max(0, settings.autoPauseMinutes - 15) },
                 onInc: { settings.autoPauseMinutes = min(240, settings.autoPauseMinutes + 15) }
             )
+            .disabled(!settings.promptsEnabled)
+
+            stepperRow(
+                title: "Still paused?",
+                value: settings.idleNudgeMinutes == 0 ? "Off" : "\(settings.idleNudgeMinutes)m",
+                caption: "ask after a task sits paused this long, in case you forgot to resume",
+                onDec: { settings.idleNudgeMinutes = max(0, settings.idleNudgeMinutes - 5) },
+                onInc: { settings.idleNudgeMinutes = min(120, settings.idleNudgeMinutes + 5) }
+            )
+            .disabled(!settings.promptsEnabled)
         }
         .padding(16)
-        .frame(width: 300)
+        .frame(width: 320)
     }
 
     private func stepperRow(title: String, value: String, caption: String? = nil,
