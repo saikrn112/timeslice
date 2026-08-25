@@ -6,6 +6,8 @@ struct MainWindowView: View {
     @ObservedObject var engine: TimerEngine
     @ObservedObject var privacy: PrivacyController
     @ObservedObject var settings: Settings
+    var sync: SyncController? = nil
+    var auth: GoogleAuth? = nil
 
     // Screenshot mode can open straight to the Metrics tab (TIMESLICE_DEMO_TAB=metrics).
     @State private var selectedTab: Tab =
@@ -95,7 +97,7 @@ struct MainWindowView: View {
         .buttonStyle(.borderless)
         .help("Settings")
         .popover(isPresented: $showSettings, arrowEdge: .bottom) {
-            SettingsPanel(settings: settings)
+            SettingsPanel(settings: settings, sync: sync, auth: auth)
         }
     }
 

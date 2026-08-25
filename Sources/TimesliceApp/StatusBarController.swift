@@ -15,7 +15,12 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private let popover = NSPopover()
     private var cancellables: Set<AnyCancellable> = []
 
-    init(appState: AppState, engine: TimerEngine, privacy: PrivacyController, autoPause: AutoPauseController) {
+    /// `sync` is optional-by-nature: nil-safe so the menu bar works identically with sync off.
+    private let sync: SyncController?
+
+    init(appState: AppState, engine: TimerEngine, privacy: PrivacyController,
+         autoPause: AutoPauseController, sync: SyncController? = nil) {
+        self.sync = sync
         self.appState = appState
         self.engine = engine
         self.privacy = privacy
@@ -40,6 +45,14 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         .receive(on: RunLoop.main)
         .sink { [weak self] _ in self?.updateTitle() }
         .store(in: &cancellables)
+        // Redraw when another device starts/stops timing, so the "↳ device" hint appears and
+        // clears without waiting for the next tick.
+        sync?.$takenOverBy
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.lastRenderedTitle = nil
+                self?.updateTitle()
+            }.store(in: &cancellables)
         privacy.$level
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
@@ -129,7 +142,13 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         let live = todayBase + engine.elapsed
         let time = Format.duration(live)
         let name = taskName(displayID)
-        let text = name.isEmpty ? time : "\(name) · \(time)"
+        var text = name.isEmpty ? time : "\(name) · \(time)"
+        // When another device is timing, say so — otherwise a silently-paused pill looks like a
+        // bug rather than a takeover.
+        // Only after an actual takeover — and using the device's friendly name, not its raw id.
+        if paused, let other = sync?.takenOverBy {
+            text += " ↳ \(other)"
+        }
         // Skip redundant redraws: the clock ticks ~10x/sec but the title only shows whole
         // seconds, so rewrite only when the rendered text OR the paused state changes.
         let title = "\(text) "
@@ -144,6 +163,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private var lastRenderedTitle: String?
+
 
     /// Draw (or clear) a solid orange pill on the status button while the current task is PAUSED.
     /// Icon + text go dark for contrast. Visible even in privacy mode (the tinted icon nags).

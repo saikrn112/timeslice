@@ -20,9 +20,11 @@ final class MainWindowController {
                       height: min(wantsShort ? 640 : 920, usable.height - 40))
     }
 
-    init(appState: AppState, engine: TimerEngine, privacy: PrivacyController, settings: Settings) {
+    init(appState: AppState, engine: TimerEngine, privacy: PrivacyController, settings: Settings,
+         sync: SyncController? = nil, auth: GoogleAuth? = nil) {
         self.privacy = privacy
-        let root = MainWindowView(appState: appState, engine: engine, privacy: privacy, settings: settings)
+        let root = MainWindowView(appState: appState, engine: engine, privacy: privacy,
+                                  settings: settings, sync: sync, auth: auth)
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: Self.defaultContentSize.width, height: Self.defaultContentSize.height),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],

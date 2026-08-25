@@ -11,6 +11,13 @@ enum DemoData {
         ProcessInfo.processInfo.environment["TIMESLICE_SCREENSHOT"] == "1"
     }
 
+    /// A sandbox instance (two-device sync testing) should never nag for Accessibility: the
+    /// unsigned debug binary has a different code signature from /Applications/Timeslice.app, so
+    /// the grant can't be shared and the prompt is unactionable.
+    static var isSandboxRun: Bool {
+        ProcessInfo.processInfo.environment["TIMESLICE_SANDBOX_ROLE"] != nil
+    }
+
     static var isRequested: Bool {
         ProcessInfo.processInfo.environment["TIMESLICE_SEED_DEMO"] == "1"
     }

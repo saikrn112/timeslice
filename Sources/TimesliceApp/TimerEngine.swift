@@ -100,8 +100,11 @@ final class TimerEngine: ObservableObject {
     /// `at` lets the close be back-dated — e.g. to when the machine went to sleep or when a
     /// long-session checkpoint fired — so idle/asleep time isn't counted. Clamped to not predate
     /// the interval's start.
+    /// A remote takeover passes another device's clock here, so the cutoff is also clamped to
+    /// *now*: a device running fast would otherwise end the interval in the future, making the
+    /// session longer than the time that actually elapsed.
     func pause(at cutoff: Date = Date()) {
-        let end = max(cutoff, runningSince ?? cutoff)
+        let end = min(max(cutoff, runningSince ?? cutoff), Date())
         do {
             try store.stopOpenInterval(at: end)
             runningProjectID = nil

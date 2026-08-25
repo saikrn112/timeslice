@@ -124,6 +124,9 @@ public enum Aggregations {
 
     /// Bucketed totals across `range` — one entry per day/week/month depending on `range.unit`.
     /// Empty buckets are included (as zeros) so charts show gaps honestly.
+    ///
+    /// Bucket totals are the UNION of their spans: overlapping intervals would otherwise draw a
+    /// bar taller than the time that actually elapsed, sailing past the goal line.
     public static func buckets(
         intervals: [Interval], range: DateRange, deepThreshold: TimeInterval,
         now: Date = Date(), calendar: Calendar = .current
@@ -137,8 +140,9 @@ public enum Aggregations {
             guard let next = calendar.date(byAdding: component, value: 1, to: cursor) else { break }
             cursor = next
         }
-        var total = Dictionary(uniqueKeysWithValues: starts.map { ($0, TimeInterval(0)) })
-        var deep = total
+        let seeded = Set(starts)
+        var spans: [Date: [(start: Date, end: Date)]] = [:]
+        var deepSpans: [Date: [(start: Date, end: Date)]] = [:]
 
         for interval in intervals {
             let end = interval.end ?? now
@@ -146,15 +150,18 @@ public enum Aggregations {
             // Split by day, then fold each day's slice into its bucket — keeps DST/midnight correct.
             forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
                 guard dayStart >= range.start && dayStart < range.end else { return }
-                let secs = segEnd.timeIntervalSince(segStart)
-                guard secs > 0 else { return }
+                guard segEnd > segStart else { return }
                 let key = bucketStart(for: dayStart, component: component, calendar: calendar)
-                guard total[key] != nil else { return }
-                total[key, default: 0] += secs
-                if isDeep { deep[key, default: 0] += secs }
+                guard seeded.contains(key) else { return }
+                spans[key, default: []].append((segStart, segEnd))
+                if isDeep { deepSpans[key, default: []].append((segStart, segEnd)) }
             }
         }
-        return starts.map { Bucket(start: $0, totalSeconds: total[$0] ?? 0, deepSeconds: deep[$0] ?? 0) }
+        return starts.map { key in
+            let t = SpanUnion.coveredSeconds(spans[key] ?? [])
+            let d = SpanUnion.coveredSeconds(deepSpans[key] ?? [])
+            return Bucket(start: key, totalSeconds: t, deepSeconds: min(d, t))
+        }
     }
 
     private static func bucketStart(for date: Date, component: Calendar.Component,
@@ -167,14 +174,18 @@ public enum Aggregations {
     }
 
     /// Headline stats for `range`.
+    ///
+    /// Per-day figures are the UNION of that day's spans, not their sum — overlapping intervals
+    /// (two devices, or older imports) would otherwise inflate a day past what physically elapsed
+    /// and falsely clear the goal line. `deepSeconds` still sums, since "focused time" is about
+    /// individual session lengths.
     public static func summary(
         intervals: [Interval], range: DateRange, deepThreshold: TimeInterval,
         dailyGoalSeconds: TimeInterval, now: Date = Date(), calendar: Calendar = .current
     ) -> RangeSummary {
-        // Per-day totals within the range (day granularity regardless of bucket size).
-        var perDay: [Date: TimeInterval] = [:]
-        var deepTotal: TimeInterval = 0
-        var total: TimeInterval = 0
+        // Collect each day's spans first, then union them per day.
+        var spansByDay: [Date: [(start: Date, end: Date)]] = [:]
+        var deepSpansByDay: [Date: [(start: Date, end: Date)]] = [:]
         var longest: TimeInterval = 0
 
         for interval in intervals {
@@ -184,16 +195,20 @@ public enum Aggregations {
             var withinRange: TimeInterval = 0
             forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
                 guard dayStart >= range.start && dayStart < range.end else { return }
-                let secs = segEnd.timeIntervalSince(segStart)
-                guard secs > 0 else { return }
-                perDay[dayStart, default: 0] += secs
-                withinRange += secs
+                guard segEnd > segStart else { return }
+                spansByDay[dayStart, default: []].append((segStart, segEnd))
+                if isDeep { deepSpansByDay[dayStart, default: []].append((segStart, segEnd)) }
+                withinRange += segEnd.timeIntervalSince(segStart)
             }
             guard withinRange > 0 else { continue }
-            total += withinRange
-            if isDeep { deepTotal += withinRange }
             longest = max(longest, min(full, withinRange))
         }
+
+        let perDay = spansByDay.mapValues { SpanUnion.coveredSeconds($0) }
+        let total = perDay.values.reduce(0, +)
+        // Deep time is also wall-clock (it feeds Focus %, a share of total), so union it too —
+        // otherwise focus could exceed 100%.
+        let deepTotal = deepSpansByDay.values.reduce(0) { $0 + SpanUnion.coveredSeconds($1) }
 
         let switchesInRange = switchesPerDay(intervals: intervals.filter { !$0.isRunning }, calendar: calendar)
             .filter { $0.day >= range.start && $0.day < range.end }
@@ -201,7 +216,7 @@ public enum Aggregations {
 
         return RangeSummary(
             totalSeconds: total,
-            deepSeconds: deepTotal,
+            deepSeconds: min(deepTotal, total),   // can't be more focused than tracked
             activeDays: perDay.values.filter { $0 > 0 }.count,
             daysOnGoal: perDay.values.filter { $0 >= dailyGoalSeconds }.count,
             switches: switchesInRange,
@@ -295,9 +310,67 @@ public enum Aggregations {
             let startHour = clippedStart.timeIntervalSince(dayStart) / 3600
             let endHour = clippedEnd.timeIntervalSince(dayStart) / 3600
             segments.append(DaySegment(id: interval.id, projectID: interval.projectID,
-                                       startHour: startHour, endHour: endHour))
+                                       startHour: startHour, endHour: endHour,
+                                       deviceID: interval.deviceID))
         }
-        return segments.sorted { $0.startHour < $1.startHour }
+        return assignLanes(segments.sorted { $0.startHour < $1.startHour })
+    }
+
+    /// Lane packing so overlapping segments never hide each other on the timeline.
+    ///
+    /// When more than one device contributed to the day, lanes are assigned BY DEVICE — one row per
+    /// machine, in first-appearance order — so a row is a label the UI can name. Packing purely by
+    /// overlap would put a single device's overlapping blocks on separate rows and interleave two
+    /// devices onto one, making "which row is which machine" unanswerable.
+    ///
+    /// With a single device (the normal case) everything lands in lane 0 and the timeline looks
+    /// exactly as before; within that lane, overlaps still fan out so nothing is hidden.
+    public static func assignLanes(_ sorted: [DaySegment]) -> [DaySegment] {
+        let devices = orderedDevices(sorted)
+        guard devices.count > 1 else { return packByOverlap(sorted, baseLane: 0) }
+
+        // Each device gets a contiguous block of lanes, sized to its own internal overlap, so two
+        // devices never share a row and one device's overlaps still stay visible.
+        var out: [DaySegment] = []
+        var nextLane = 0
+        for device in devices {
+            let mine = sorted.filter { $0.deviceID == device }
+            let packed = packByOverlap(mine, baseLane: nextLane)
+            nextLane = (packed.map(\.lane).max() ?? nextLane) + 1
+            out.append(contentsOf: packed)
+        }
+        return out.sorted { $0.startHour < $1.startHour }
+    }
+
+    /// Devices in order of first appearance — a stable, caller-visible row order.
+    /// nil (unattributed) sorts last so named devices keep the top rows.
+    public static func orderedDevices(_ segments: [DaySegment]) -> [String?] {
+        var seen: [String?] = []
+        for seg in segments.sorted(by: { $0.startHour < $1.startHour }) where !seen.contains(seg.deviceID) {
+            seen.append(seg.deviceID)
+        }
+        return seen.filter { $0 != nil } + seen.filter { $0 == nil }
+    }
+
+    /// Greedy first-fit: each segment takes the lowest free lane at or after `baseLane`.
+    private static func packByOverlap(_ segments: [DaySegment], baseLane: Int) -> [DaySegment] {
+        var laneEnds: [Double] = []          // last end-hour per lane
+        return segments.sorted { $0.startHour < $1.startHour }.map { seg in
+            var placed = seg
+            if let lane = laneEnds.firstIndex(where: { $0 <= seg.startHour }) {
+                laneEnds[lane] = seg.endHour
+                placed.lane = baseLane + lane
+            } else {
+                laneEnds.append(seg.endHour)
+                placed.lane = baseLane + laneEnds.count - 1
+            }
+            return placed
+        }
+    }
+
+    /// How many lanes `segments` needs — 1 when nothing overlaps.
+    public static func laneCount(_ segments: [DaySegment]) -> Int {
+        (segments.map(\.lane).max() ?? 0) + 1
     }
 
     /// Per-day stats for every day in the calendar month containing `month`, including future

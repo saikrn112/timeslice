@@ -60,6 +60,9 @@ below follows it. Hover any bar for the numbers; the solid inner bar is focused 
   → asks whether you forgot to resume. Sleeping pauses too. One switch silences all of it.
 - **Metrics**: day timeline, hours-per-day vs a goal, focus %, and where your time went — grouped
   by task or project. Drag across the timeline to measure working vs idle in any stretch.
+- **Sync across devices** (optional): sign in with Google and your devices stay in step through
+  your *own* Drive — no account with us, no server we run. Off by default; see
+  [docs/google-setup.md](docs/google-setup.md).
 - **Screen-share safe**: one toggle (**Fn + ⌘ + ⇧ + P**) hides everything at once — the menu-bar
   task name, the switcher, and the windows themselves (they stay visible to you but come out
   blank in any capture, including full-screen). The timer keeps running the whole time.

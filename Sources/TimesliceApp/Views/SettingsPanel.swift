@@ -3,6 +3,9 @@ import SwiftUI
 /// Compact settings for the metrics: daily goal, deep-block threshold, trend window.
 struct SettingsPanel: View {
     @ObservedObject var settings: Settings
+    /// nil when the app is running without sync wired up (tests, previews).
+    var sync: SyncController? = nil
+    var auth: GoogleAuth? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -51,9 +54,23 @@ struct SettingsPanel: View {
                 onInc: { settings.idleNudgeMinutes = min(120, settings.idleNudgeMinutes + 5) }
             )
             .disabled(!settings.promptsEnabled)
+
+            Divider()
+            syncSection
         }
         .padding(16)
-        .frame(width: 320)
+        .frame(width: 360)
+    }
+
+    /// Delegates to an observing child: `@ObservedObject` can't be optional, and a plain `var`
+    /// silently skips redraws when the controller publishes a change.
+    @ViewBuilder
+    private var syncSection: some View {
+        if let sync, let auth {
+            SyncSettingsSection(settings: settings, sync: sync, auth: auth)
+        } else {
+            Text("Sync unavailable").font(.caption2).foregroundStyle(.tertiary)
+        }
     }
 
     private func stepperRow(title: String, value: String, caption: String? = nil,

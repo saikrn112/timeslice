@@ -39,6 +39,13 @@ struct MetricsView: View {
     /// Project lookup + the timeline legend, both computed once per recompute so hovering can't
     /// trigger DB reads or reshuffle the labels.
     @State private var projectLookup: [Int64: Project] = [:]
+    /// Session block awaiting delete confirmation. Deleting removes recorded time with no undo,
+    /// so the ✕ arms a confirm step rather than destroying it on a single stray click.
+    @State private var pendingDelete: DaySegment?
+
+    /// device_id -> human label, for the timeline lane titles and the Sessions device column.
+    /// Loaded with the other data so hovering never triggers a DB read.
+    @State private var deviceLabels: [String: String] = [:]
     @State private var legendItems: [(String, Color)] = []
 
     /// Roll "Where time went" up to groups instead of listing every task.
@@ -173,12 +180,22 @@ struct MetricsView: View {
             if daySegments.isEmpty {
                 placeholder("Nothing tracked on this day")
             } else {
+                let lanes = Aggregations.laneCount(daySegments)
+                HStack(spacing: 6) {
+                    // Vertical device names down the left edge, one per lane, so each row of the
+                    // timeline says which machine it came from. Only shown when a day actually has
+                    // more than one device — otherwise the label is noise.
+                    if timelineDevices.count > 1 {
+                        deviceLaneLabels(lanes: lanes)
+                    }
                 Chart(daySegments) { seg in
+                    // One lane per device when several contributed; a single device keeps one full
+                    // -height row, with internal overlaps fanned out so nothing is hidden.
                     BarMark(
                         xStart: .value("From", seg.startHour),
                         xEnd: .value("To", seg.endHour),
-                        y: .value("Day", ""),
-                        height: .fixed(110)
+                        y: .value("Lane", lanes > 1 ? "\(seg.lane)" : ""),
+                        height: .fixed(lanes > 1 ? max(24, 110 / Double(lanes)) : 110)
                     )
                     .foregroundStyle(colorForProject(seg.projectID))
                     .opacity(hoveredSegment == nil || hoveredSegment?.id == seg.id ? 1 : 0.35)
@@ -288,10 +305,45 @@ struct MetricsView: View {
                     }
                 }
                 .frame(height: 150)
+                }
                 if let summary = windowSummary { selectionReadout(summary) }
                 timelineLegend
             }
         }
+    }
+
+    /// Devices contributing to this day, in the same first-appearance order the lanes use.
+    private var timelineDevices: [String?] { Aggregations.orderedDevices(daySegments) }
+
+    /// Short display name for a device: its user-set label, else the raw id, else "unknown" for
+    /// rows recorded before device attribution existed.
+    private func deviceName(_ id: String?) -> String {
+        guard let id else { return "unknown" }
+        return deviceLabels[id] ?? id
+    }
+
+    /// Rotated device names down the left edge of the timeline, aligned to their lanes. Each lane
+    /// gets an equal share of the plot height, matching the fixed BarMark heights above.
+    private func deviceLaneLabels(lanes: Int) -> some View {
+        // Lane -> device, taken from the segments themselves so a label can never drift from the
+        // row it names (a device may span several lanes when its own blocks overlap).
+        var owner: [Int: String?] = [:]
+        for seg in daySegments where owner[seg.lane] == nil { owner[seg.lane] = seg.deviceID }
+        return VStack(spacing: 0) {
+            ForEach(0..<lanes, id: \.self) { lane in
+                Text(deviceName(owner[lane] ?? nil))
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .rotationEffect(.degrees(-90))
+                    .frame(maxHeight: .infinity)
+                    .help(deviceName(owner[lane] ?? nil))
+            }
+        }
+        .frame(width: 14, height: 110)
+        // Nudge down so the labels line up with the plot area rather than the axis strip.
+        .padding(.bottom, 22)
     }
 
     // MARK: - Drag-selection on the day timeline
@@ -329,7 +381,10 @@ struct MetricsView: View {
             let s = max(seg.startHour, r.lowerBound)
             let e = min(seg.endHour, r.upperBound)
             guard e > s else { return nil }
-            return DaySegment(id: seg.id, projectID: seg.projectID, startHour: s, endHour: e)
+            // Carry lane and deviceID: this rebuilds the segment, and dropping them showed every
+            // clipped block as "unknown" and collapsed the per-device lanes inside a selection.
+            return DaySegment(id: seg.id, projectID: seg.projectID, startHour: s, endHour: e,
+                              lane: seg.lane, deviceID: seg.deviceID)
         }
     }
 
@@ -467,6 +522,11 @@ struct MetricsView: View {
     // MARK: - Session list (day range)
 
     /// The day's blocks in order — the detail the single-bar charts couldn't give.
+    /// True once the data involves more than one device, so the column earns its width.
+    private var showDeviceColumn: Bool {
+        deviceLabels.count > 1 || Set(daySegments.map(\.deviceID)).count > 1
+    }
+
     private var sessionList: some View {
         let segs = hasSelection ? segmentsInSelection : daySegments
         return section("Sessions", subtitle: "\(segs.count) blocks\(hasSelection ? " in selection" : "")") {
@@ -484,6 +544,18 @@ struct MetricsView: View {
                             .font(.system(size: 11, design: .monospaced)).monospacedDigit()
                             .foregroundStyle(.secondary)
                             .frame(width: 54, alignment: .trailing)
+                        // Which machine recorded the block. Only worth a column once more than
+                        // one device has ever synced — on a single-device setup it's the same
+                        // answer on every row.
+                        if showDeviceColumn {
+                            Text(deviceName(seg.deviceID))
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1).truncationMode(.tail)
+                                .frame(width: 74, alignment: .trailing)
+                                .help(deviceName(seg.deviceID))
+                        }
+                        deleteControl(for: seg)
                     }
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(
@@ -492,9 +564,59 @@ struct MetricsView: View {
                                   ? Color.accentColor.opacity(0.15)
                                   : Color(nsColor: .controlBackgroundColor))
                     )
-                    .onHover { inside in hoveredSegment = inside ? seg : nil }
+                    .onHover { inside in
+                        hoveredSegment = inside ? seg : nil
+                        // Leaving the row cancels an armed delete, so a confirm can't sit waiting
+                        // on a row you've moved away from.
+                        if !inside, pendingDelete?.id == seg.id { pendingDelete = nil }
+                    }
                 }
             }
+        }
+    }
+
+    /// ✕ to remove a session, shown on hover; a second click confirms.
+    ///
+    /// Two steps because this destroys recorded time and there is no undo. A selection clips
+    /// segments to its edges, so deleting one there would remove the WHOLE underlying interval,
+    /// not the visible slice — the control is disabled in that case rather than lying about scope.
+    @ViewBuilder
+    private func deleteControl(for seg: DaySegment) -> some View {
+        let armed = pendingDelete?.id == seg.id
+        let clipped = hasSelection
+        if hoveredSegment?.id == seg.id || armed {
+            Button {
+                if clipped { return }
+                if armed {
+                    deleteSession(seg)
+                } else {
+                    pendingDelete = seg
+                }
+            } label: {
+                Image(systemName: armed ? "trash.fill" : "xmark")
+                    .font(.system(size: armed ? 9 : 8, weight: .semibold))
+                    .foregroundStyle(clipped ? Color.secondary : (armed ? Color.red : Color.secondary))
+                    .frame(width: 16, height: 16)
+                    .background(Circle().fill(Color.secondary.opacity(armed ? 0.28 : 0.16)))
+            }
+            .buttonStyle(.plain)
+            .disabled(clipped)
+            .help(clipped
+                  ? "Clear the timeline selection to delete a session — a clipped block isn't the whole interval"
+                  : (armed ? "Click again to delete this session permanently" : "Remove this session"))
+        } else {
+            // Reserve the width so rows don't shift horizontally as the cursor moves down the list.
+            Color.clear.frame(width: 16, height: 16)
+        }
+    }
+
+    private func deleteSession(_ seg: DaySegment) {
+        pendingDelete = nil
+        // seg.id IS the source interval id (daySegments carries it through), so no lookup needed.
+        if (try? appState.storeForEditing.deleteInterval(id: seg.id)) == true {
+            hoveredSegment = nil
+            appState.reload()      // totals, today's tiles and the task list all read this
+            recompute()            // charts + this list
         }
     }
 
@@ -949,6 +1071,7 @@ struct MetricsView: View {
         let closed = all.filter { !$0.isRunning }
         let allProjects = (try? store.listProjects(includeArchived: true)) ?? []
         projectLookup = Dictionary(uniqueKeysWithValues: allProjects.map { ($0.id, $0) })
+        deviceLabels = (try? store.deviceLabels()) ?? [:]
 
         summary = Aggregations.summary(
             intervals: all, range: range,

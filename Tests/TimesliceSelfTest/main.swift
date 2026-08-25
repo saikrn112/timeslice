@@ -250,6 +250,749 @@ func testTaskSearch() {
     }
 }
 
+// MARK: - Google OAuth / PKCE
+
+func testOAuthPKCE() {
+    print("OAuth PKCE:")
+
+    do { // SHA-256 against RFC 7636's own test vector — a wrong hash fails PKCE in a way that
+        // looks like an OAuth misconfiguration, so pin it.
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        let expected = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        var hash = [UInt8](repeating: 0, count: 32)
+        SHA256Public.hash(Array(verifier.utf8), into: &hash)
+        let challenge = Data(hash).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        check(challenge == expected, "S256 matches the RFC 7636 test vector")
+    }
+
+    do { // SHA-256 of the empty string, the classic boundary case
+        var hash = [UInt8](repeating: 0, count: 32)
+        SHA256Public.hash([], into: &hash)
+        let hex = hash.map { String(format: "%02x", $0) }.joined()
+        check(hex == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "SHA-256 of empty input is correct")
+    }
+
+    do { // a long input crosses the 64-byte block boundary
+        var hash = [UInt8](repeating: 0, count: 32)
+        SHA256Public.hash(Array(String(repeating: "a", count: 200).utf8), into: &hash)
+        let hex = hash.map { String(format: "%02x", $0) }.joined()
+        check(hex.count == 64 && hex != String(repeating: "0", count: 64),
+              "multi-block input hashes without error")
+    }
+
+    do { // verifiers are per-attempt and within RFC length limits
+        let a = GoogleOAuth.PKCE(), b = GoogleOAuth.PKCE()
+        check(a.verifier != b.verifier, "each attempt gets a fresh verifier")
+        check(a.verifier.count >= 43 && a.verifier.count <= 128, "verifier length is RFC-legal")
+        check(!a.challenge.contains("=") && !a.challenge.contains("+") && !a.challenge.contains("/"),
+              "challenge is base64url with no padding")
+    }
+
+    do { // the consent URL carries what Google needs
+        let url = GoogleOAuth.authorizationURL(pkce: GoogleOAuth.PKCE(), port: 51789, state: "st")
+        let s = url.absoluteString
+        check(s.hasPrefix(GoogleOAuth.authEndpoint), "points at Google's auth endpoint")
+        check(s.contains("code_challenge_method=S256"), "declares S256")
+        check(s.contains("127.0.0.1:51789"), "loopback redirect on the chosen port")
+        // The scope MUST match the space DriveAPI uses (appDataFolder). Requesting drive.file
+        // while calling spaces=appDataFolder produced 403s that looked like "not signed in".
+        check(s.contains("drive.appdata"), "requests the app-data scope, matching spaces=appDataFolder")
+        check(!s.contains("client_secret"), "no secret in the URL (public client)")
+    }
+
+    do { // redirect parsing, success and failure
+        let ok = GoogleOAuth.parseRedirect(requestLine: "GET /?code=4%2Fabc&state=xyz HTTP/1.1")
+        check(ok.code == "4/abc", "authorization code extracted and unescaped")
+        check(ok.state == "xyz", "state extracted, so CSRF can be checked")
+        check(ok.error == nil, "no error on success")
+
+        let denied = GoogleOAuth.parseRedirect(requestLine: "GET /?error=access_denied HTTP/1.1")
+        check(denied.error == "access_denied", "user denial surfaces as an error")
+        check(denied.code == nil, "...with no code")
+    }
+
+    do { // token bodies must carry BOTH the verifier and the secret.
+        // Google rejects the exchange with "client_secret is missing." even for a Desktop client
+        // using PKCE. Omitting it made sign-in fail silently, so pin both here.
+        let body = String(decoding: GoogleOAuth.tokenRequestBody(
+            code: "c", pkce: GoogleOAuth.PKCE(), port: 1), as: UTF8.self)
+        check(body.contains("code_verifier="), "exchange sends the PKCE verifier")
+        check(body.contains("client_secret="), "exchange sends client_secret (Google requires it)")
+        check(body.contains("grant_type=authorization_code"), "correct grant for the exchange")
+
+        let refresh = String(decoding: GoogleOAuth.refreshRequestBody(refreshToken: "r"),
+                            as: UTF8.self)
+        check(refresh.contains("grant_type=refresh_token"), "refresh uses the right grant")
+        check(refresh.contains("client_secret="), "refresh also needs client_secret")
+
+        // The AUTH url must never carry the secret — that would leak it into browser history.
+        let authURL = GoogleOAuth.authorizationURL(pkce: GoogleOAuth.PKCE(), port: 1, state: "s")
+        check(!authURL.absoluteString.contains("client_secret"),
+              "secret stays out of the authorization URL")
+        // Credentials are supplied at runtime (env or ~/.config/timeslice/env), never committed,
+        // so a bare checkout legitimately has none. Assert the plumbing, not the value.
+        if GoogleOAuth.isConfigured {
+            check(!GoogleOAuth.clientSecret.isEmpty, "configured secret is non-empty")
+            check(body.contains("client_secret="), "configured secret reaches the exchange")
+        } else {
+            check(GoogleOAuth.clientID.isEmpty, "unconfigured build reports no client id")
+        }
+    }
+}
+
+// MARK: - Takeover policy (one timer across devices)
+
+func testTakeoverPolicy() {
+    print("Takeover policy:")
+
+    let t0 = Date(timeIntervalSince1970: 1000)
+    func marker(_ device: String, since: TimeInterval) -> RunningMarker {
+        RunningMarker(deviceID: device, taskUID: "u", since: since)
+    }
+
+    do { // not timing locally → nothing to stop
+        check(TakeoverPolicy.decide(localRunningSince: nil,
+                                    markers: [marker("B", since: 2000)], now: Date(timeIntervalSince1970: 3000)) == nil,
+              "idle device isn't affected by a remote timer")
+    }
+
+    do { // remote started LATER → it wins
+        let d = TakeoverPolicy.decide(localRunningSince: t0,
+                                      markers: [marker("laptop", since: 2000)],
+                                      now: Date(timeIntervalSince1970: 3000))
+        check(d != nil, "later remote start takes over")
+        check(d?.byDeviceID == "laptop", "reports which device took over")
+        check(d?.pauseAt == Date(timeIntervalSince1970: 2000), "back-dated to the remote start")
+    }
+
+    do { // remote started EARLIER → we keep running (we're the newer intent)
+        let d = TakeoverPolicy.decide(localRunningSince: Date(timeIntervalSince1970: 5000),
+                                      markers: [marker("B", since: 2000)],
+                                      now: Date(timeIntervalSince1970: 6000))
+        check(d == nil, "an older remote timer doesn't stop a newer local one")
+    }
+
+    do { // clock skew: a remote clock ahead of us must not end the interval in the future
+        let d = TakeoverPolicy.decide(localRunningSince: t0,
+                                      markers: [marker("fastclock", since: 99_999)],
+                                      now: Date(timeIntervalSince1970: 3000))
+        check(d?.pauseAt == Date(timeIntervalSince1970: 3000), "future timestamp clamped to now")
+    }
+
+    do { // remote start before our own start would make a negative interval
+        let d = TakeoverPolicy.decide(localRunningSince: Date(timeIntervalSince1970: 5000),
+                                      markers: [marker("B", since: 5500)],
+                                      now: Date(timeIntervalSince1970: 9000))
+        check((d?.pauseAt.timeIntervalSince1970 ?? 0) >= 5000, "cutoff never predates our start")
+    }
+
+    do { // THE case that was broken in the field: both devices timing, later start wins.
+        // The bug wasn't here — this always returned a decision — it was that a running device
+        // stopped polling, so it never fetched the other's marker to feed in.
+        let older = Date(timeIntervalSince1970: 1000)
+        let d = TakeoverPolicy.decide(localRunningSince: older,
+                                      markers: [marker("other", since: 1500)],
+                                      now: Date(timeIntervalSince1970: 2000))
+        check(d != nil, "both running → the older device yields")
+        check(d?.pauseAt == Date(timeIntervalSince1970: 1500),
+              "older device's session ends when the newer one began, so time isn't double-counted")
+
+        // And the newer device, evaluating the same pair, must NOT stop itself.
+        let reverse = TakeoverPolicy.decide(localRunningSince: Date(timeIntervalSince1970: 1500),
+                                            markers: [marker("other", since: 1000)],
+                                            now: Date(timeIntervalSince1970: 2000))
+        check(reverse == nil, "newer device keeps running — exactly one of the pair stops")
+    }
+
+    do { // three devices → the most recent start wins
+        let d = TakeoverPolicy.decide(localRunningSince: t0,
+                                      markers: [marker("B", since: 2000), marker("C", since: 2500)],
+                                      now: Date(timeIntervalSince1970: 3000))
+        check(d?.byDeviceID == "C", "latest starter wins among several")
+    }
+
+    do { // no markers at all
+        check(TakeoverPolicy.decide(localRunningSince: t0, markers: [],
+                                    now: Date(timeIntervalSince1970: 3000)) == nil,
+              "no remote timers → keep running")
+    }
+
+    do { // exact tie keeps the local timer, avoiding pointless churn
+        check(TakeoverPolicy.decide(localRunningSince: t0,
+                                    markers: [marker("B", since: 1000)],
+                                    now: Date(timeIntervalSince1970: 3000)) == nil,
+              "identical start times don't trigger a takeover")
+    }
+}
+
+// MARK: - Field-level sync coverage
+//
+// A guard against the failure mode that produced every sync bug so far: a field exists on the
+// model, the UI can change it, but somebody forgot to include it in the payload or the LWW UPDATE.
+// Symptoms were always the same — everything syncs EXCEPT one thing, discovered by hand weeks later.
+//
+// These tests mutate each field individually and assert it survives a real store→payload→merge
+// round trip. Adding a syncable field without wiring it up should fail here, not in production.
+
+func testFieldLevelSyncCoverage() throws {
+    print("Field-level sync coverage:")
+
+    /// Mutate one field on A, merge into B, and assert B observes the change.
+    func roundTrip(
+        _ label: String,
+        mutate: (IntervalStore, Int64) throws -> Void,
+        expect: (Project) -> Bool
+    ) throws {
+        let (a, ua) = try makeStore(); let (b, ub) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let ea = SyncEngine(store: a, deviceID: "A")
+        let eb = SyncEngine(store: b, deviceID: "B")
+
+        let task = try a.createProject(name: "baseline", colorHex: "#888888")
+        _ = try eb.merge(try ea.buildPayload())          // B learns about the task
+        guard try b.listProjects(includeArchived: true).count == 1 else {
+            check(false, "\(label): setup — B should have the task"); return
+        }
+
+        // updated_at has 1s resolution in places; make the edit unambiguously newer.
+        Thread.sleep(forTimeInterval: 0.02)
+        try mutate(a, task)
+        _ = try eb.merge(try ea.buildPayload())
+
+        guard let onB = try b.listProjects(includeArchived: true).first else {
+            check(false, "\(label): task vanished on B"); return
+        }
+        check(expect(onB), "\(label) propagates to the other device")
+    }
+
+    try roundTrip("rename",
+                  mutate: { store, id in try store.renameProject(id: id, name: "renamed") },
+                  expect: { $0.name == "renamed" })
+
+    try roundTrip("colour change",
+                  mutate: { store, id in try store.setProjectColor(id: id, colorHex: "#123456") },
+                  expect: { $0.colorHex == "#123456" })
+
+    try roundTrip("archive",
+                  mutate: { store, id in try store.setProjectArchived(id: id, archived: true) },
+                  expect: { $0.archived })
+
+    try roundTrip("finish",
+                  mutate: { store, id in try store.setProjectFinished(id: id, finished: true) },
+                  expect: { $0.finished && $0.finishedAt != nil })
+
+    try roundTrip("un-finish",
+                  mutate: { store, id in
+                      try store.setProjectFinished(id: id, finished: true)
+                      Thread.sleep(forTimeInterval: 0.02)
+                      try store.setProjectFinished(id: id, finished: false)
+                  },
+                  expect: { !$0.finished })
+
+    // The one that was actually broken: moving a task between projects.
+    try roundTrip("project assignment",
+                  mutate: { store, id in
+                      let g = try store.upsertTaskProject(name: "moved-into", colorHex: "#0f0")
+                      try store.setTaskProject(taskID: id, taskProjectID: g)
+                  },
+                  expect: { $0.taskProjectID != nil })
+
+    try roundTrip("move back to Inbox",
+                  mutate: { store, id in
+                      let g = try store.upsertTaskProject(name: "temp", colorHex: "#0f0")
+                      try store.setTaskProject(taskID: id, taskProjectID: g)
+                      Thread.sleep(forTimeInterval: 0.02)
+                      try store.setTaskProject(taskID: id, taskProjectID: nil)
+                  },
+                  expect: { $0.taskProjectID == nil })
+
+    do { // Payload completeness: every mutable field on Project must appear in TaskRecord.
+        // Reflection-based, so a newly added property fails this until it's carried in the payload.
+        let task = Project(id: 1, name: "x", colorHex: "#fff", sortOrder: 3, archived: true,
+                           finished: true, finishedAt: Date(), taskProjectID: 9)
+        let modelFields = Set(Mirror(reflecting: task).children.compactMap(\.label))
+        let record = SyncPayload.TaskRecord(
+            uid: "u", name: "x", colorHex: "#fff", sortOrder: 3, archived: true, finished: true,
+            finishedAt: 0, projectUID: "p", updatedAt: 0)
+        var recordFields = Set(Mirror(reflecting: record).children.compactMap(\.label))
+        // `taskProjectID` travels as `projectUID` (ids differ per device); `id` is device-local.
+        recordFields.insert("taskProjectID")
+        let missing = modelFields.subtracting(recordFields).subtracting(["id"])
+        check(missing.isEmpty,
+              "every syncable Project field is in the payload (missing: \(missing.sorted()))")
+    }
+
+    do { // Same for projects/groups.
+        let group = TaskProject(id: 1, name: "g", colorHex: "#fff", sortOrder: 2)
+        let modelFields = Set(Mirror(reflecting: group).children.compactMap(\.label))
+        let record = SyncPayload.ProjectRecord(uid: "u", name: "g", colorHex: "#fff",
+                                               sortOrder: 2, updatedAt: 0)
+        let recordFields = Set(Mirror(reflecting: record).children.compactMap(\.label))
+        let missing = modelFields.subtracting(recordFields).subtracting(["id"])
+        check(missing.isEmpty,
+              "every syncable TaskProject field is in the payload (missing: \(missing.sorted()))")
+    }
+
+    do { // Same for intervals. `deviceID` was added to Interval and initially wasn't carried in
+        // the payload, so merged rows lost their attribution — exactly what this guard catches.
+        let interval = Interval(id: 1, projectID: 2, start: Date(), end: Date(), deviceID: "d")
+        let modelFields = Set(Mirror(reflecting: interval).children.compactMap(\.label))
+        let record = SyncPayload.IntervalRecord(uid: "u", taskUID: "t", start: 0, end: 0,
+                                               deviceID: "d")
+        var recordFields = Set(Mirror(reflecting: record).children.compactMap(\.label))
+        // `projectID` travels as `taskUID` (ids differ per device); `id` is device-local.
+        recordFields.insert("projectID")
+        let missing = modelFields.subtracting(recordFields).subtracting(["id"])
+        check(missing.isEmpty,
+              "every syncable Interval field is in the payload (missing: \(missing.sorted()))")
+    }
+
+    do { // Project (group) edits propagate too — rename and recolour.
+        let (a, ua) = try makeStore(); let (b, ub) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let ea = SyncEngine(store: a, deviceID: "A")
+        let eb = SyncEngine(store: b, deviceID: "B")
+        let g = try a.upsertTaskProject(name: "original", colorHex: "#aaaaaa")
+        let t = try a.createProject(name: "task", colorHex: "#fff")
+        try a.setTaskProject(taskID: t, taskProjectID: g)
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listTaskProjects().first?.name == "original", "B received the project")
+
+        Thread.sleep(forTimeInterval: 0.02)
+        try a.renameTaskProject(id: g, name: "renamed group")
+        _ = try eb.merge(try ea.buildPayload())
+        // Matched by uid, so the rename REPLACES the name rather than adding a second project.
+        let names = try b.listTaskProjects().map(\.name).sorted()
+        check(names == ["renamed group"],
+              "renamed project is renamed on the other device, not duplicated (got \(names))")
+        check(try b.listTaskProjects().count == 1, "no duplicate project left behind")
+
+        // And a recolour propagates the same way.
+        Thread.sleep(forTimeInterval: 0.02)
+        try a.setTaskProjectColor(id: g, colorHex: "#bbbbbb")
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listTaskProjects().first?.colorHex == "#bbbbbb", "recolour propagates")
+    }
+}
+
+// MARK: - Sync engine (two devices, no network)
+
+func testSyncEngine() throws {
+    print("Sync engine:")
+
+    func twoDevices() throws -> (IntervalStore, IntervalStore, URL, URL, SyncEngine, SyncEngine) {
+        let (a, ua) = try makeStore()
+        let (b, ub) = try makeStore()
+        return (a, b, ua, ub, SyncEngine(store: a, deviceID: "A"), SyncEngine(store: b, deviceID: "B"))
+    }
+
+    do { // intervals flow both ways and nothing is lost
+        let (a, b, ua, ub, ea, eb) = try twoDevices()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let t1 = try a.createProject(name: "deep work", colorHex: "#f00")
+        try a.switchTo(projectID: t1, at: Date(timeIntervalSince1970: 1000))
+        try a.stopOpenInterval(at: Date(timeIntervalSince1970: 4600))
+
+        let t2 = try b.createProject(name: "ncu", colorHex: "#0f0")
+        try b.switchTo(projectID: t2, at: Date(timeIntervalSince1970: 5000))
+        try b.stopOpenInterval(at: Date(timeIntervalSince1970: 8600))
+
+        let r = try eb.merge(try ea.buildPayload())
+        check(r.tasksAdded == 1 && r.intervalsAdded == 1, "B gained A's task + interval")
+        check(try b.listProjects(includeArchived: true).count == 2, "B now has both tasks")
+        check(try b.intervals().count == 2, "B now has both intervals")
+
+        try ea.merge(try eb.buildPayload())
+        check(try a.intervals().count == 2, "A gained B's interval too")
+    }
+
+    do { // merging twice is a no-op — the property that makes a dumb transport safe
+        let (a, b, ua, ub, ea, eb) = try twoDevices()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let t = try a.createProject(name: "x", colorHex: "#f00")
+        try a.switchTo(projectID: t); try a.stopOpenInterval()
+
+        let payload = try ea.buildPayload()
+        _ = try eb.merge(payload)
+        let after1 = (try b.listProjects().count, try b.intervals().count)
+        let second = try eb.merge(payload)
+        let after2 = (try b.listProjects().count, try b.intervals().count)
+        check(after1 == after2, "second merge adds nothing")
+        check(second.isEmpty, "...and reports no changes")
+    }
+
+    do { // projects with the SAME NAME merge into one; tasks with the same name do not
+        let (a, b, ua, ub, ea, eb) = try twoDevices()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let ga = try a.upsertTaskProject(name: "personal", colorHex: "#f00")
+        let ta = try a.createProject(name: "gym", colorHex: "#f00")
+        try a.setTaskProject(taskID: ta, taskProjectID: ga)
+
+        // B independently created a project with the same name, different uid.
+        let gb = try b.upsertTaskProject(name: "Personal", colorHex: "#0f0")   // different case
+        let tb = try b.createProject(name: "gym", colorHex: "#0f0")            // same task name!
+        try b.setTaskProject(taskID: tb, taskProjectID: gb)
+
+        let r = try eb.merge(try ea.buildPayload())
+        check(try b.listTaskProjects().count == 1, "same-named projects merged into one")
+        check(r.projectsMergedByName.count == 1, "...and the report says so")
+        check(try b.listProjects().count == 2, "same-named TASKS stay separate (no time fusion)")
+    }
+
+    do { // same-named projects converge on ONE colour, and BOTH devices pick the same one.
+        // Colours come from a per-device index, so each device generated its own hue for
+        // "personal" and kept it — the same project looked different on each machine.
+        let (a, b, ua, ub, ea, eb) = try twoDevices()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        _ = try a.upsertTaskProject(name: "personal", colorHex: "#FF0000")   // lexically larger
+        _ = try b.upsertTaskProject(name: "personal", colorHex: "#00FF00")   // lexically smaller
+
+        _ = try eb.merge(try ea.buildPayload())
+        _ = try ea.merge(try eb.buildPayload())
+
+        let colourA = try a.listTaskProjects().first?.colorHex
+        let colourB = try b.listTaskProjects().first?.colorHex
+        check(colourA == colourB, "both devices end up with the same project colour")
+        check(colourA == "#00FF00", "the stable rule (smaller hex) decides, not merge order")
+        check(try a.listTaskProjects().count == 1, "still one project, not a duplicate")
+    }
+
+    do { // convergence must not depend on WHICH device merges first
+        let (a, b, ua, ub, ea, eb) = try twoDevices()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        _ = try a.upsertTaskProject(name: "work", colorHex: "#AAAAAA")
+        _ = try b.upsertTaskProject(name: "work", colorHex: "#111111")
+        // Reverse order from the previous case.
+        _ = try ea.merge(try eb.buildPayload())
+        _ = try eb.merge(try ea.buildPayload())
+        check(try a.listTaskProjects().first?.colorHex == "#111111", "same winner either order (A)")
+        check(try b.listTaskProjects().first?.colorHex == "#111111", "same winner either order (B)")
+    }
+
+    do { // last-write-wins on a metadata edit
+        let (a, b, ua, ub, ea, eb) = try twoDevices()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let t = try a.createProject(name: "original", colorHex: "#f00")
+        try a.switchTo(projectID: t); try a.stopOpenInterval()
+        _ = try eb.merge(try ea.buildPayload())
+
+        // A renames later than B's copy → A wins.
+        Thread.sleep(forTimeInterval: 0.02)
+        try a.renameProject(id: t, name: "renamed on A")
+        let r = try eb.merge(try ea.buildPayload())
+        check(r.taskEditsApplied == 1, "newer remote edit applied")
+        check(try b.listProjects().first?.name == "renamed on A", "B took A's newer name")
+
+        // Now B edits even later; A must NOT clobber it on the next merge.
+        Thread.sleep(forTimeInterval: 0.02)
+        let localID = try b.listProjects().first!.id
+        try b.renameProject(id: localID, name: "newer on B")
+        let r2 = try eb.merge(try ea.buildPayload())
+        check(r2.taskEditsApplied == 0, "stale remote edit rejected")
+        check(try b.listProjects().first?.name == "newer on B", "B's newer edit survives")
+    }
+
+    do { // editing a task created ELSEWHERE propagates back, including its project assignment
+        let (a, b, ua, ub, ea, eb) = try twoDevices()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        // A creates a task in a project; B pulls both in.
+        let ga = try a.upsertTaskProject(name: "work", colorHex: "#111111")
+        let t = try a.createProject(name: "ncu", colorHex: "#f00")
+        try a.setTaskProject(taskID: t, taskProjectID: ga)
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listProjects().first?.taskProjectID != nil, "B received it inside a project")
+
+        // B — which did NOT create it — moves it to a different project and renames it.
+        let localTask = try b.listProjects().first!.id
+        let gb = try b.upsertTaskProject(name: "personal", colorHex: "#222222")
+        Thread.sleep(forTimeInterval: 0.02)
+        try b.setTaskProject(taskID: localTask, taskProjectID: gb)
+        try b.renameProject(id: localTask, name: "ncu profiling")
+
+        // A merges B's newer edit: both the rename AND the move must land.
+        _ = try ea.merge(try eb.buildPayload())
+        let onA = try a.listProjects().first
+        check(onA?.name == "ncu profiling", "rename by the non-creating device wins (newer)")
+        let personalOnA = try a.taskProject(named: "personal")
+        check(onA?.taskProjectID == personalOnA?.id,
+              "project MOVE propagates too — this field was previously left out of LWW")
+    }
+
+    do { // a delete propagates and does NOT come back on the next merge
+        let (a, b, ua, ub, ea, eb) = try twoDevices()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let t = try a.createProject(name: "doomed", colorHex: "#f00")
+        try a.switchTo(projectID: t); try a.stopOpenInterval()
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listProjects().count == 1, "B has the task")
+
+        try a.deleteProject(id: t)
+        let r = try eb.merge(try ea.buildPayload())
+        check(r.deletionsApplied >= 1, "delete propagated")
+        check(try b.listProjects().isEmpty, "task gone on B")
+        check(try b.intervals().isEmpty, "...and so are its intervals")
+
+        // The killer case: B re-publishes, A merges back — the row must not resurrect.
+        _ = try ea.merge(try eb.buildPayload())
+        check(try a.listProjects().isEmpty, "deleted task does not come back on A")
+    }
+
+    do { // a RUNNING interval is never published as a fact
+        let (a, _, ua, ub, ea, eb) = try twoDevices()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let t = try a.createProject(name: "live", colorHex: "#f00")
+        try a.switchTo(projectID: t)   // left running
+        let payload = try ea.buildPayload()
+        check(payload.intervals.isEmpty, "running interval excluded from the payload")
+        _ = eb
+    }
+
+    do { // a device ignores its own file
+        let (a, _, ua, ub, ea, _) = try twoDevices()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let t = try a.createProject(name: "x", colorHex: "#f00")
+        try a.switchTo(projectID: t); try a.stopOpenInterval()
+        let r = try ea.merge(try ea.buildPayload())
+        check(r.isEmpty, "merging our own payload is a no-op")
+    }
+
+    do { // end-to-end through a real folder: two stores, one directory, no network
+        let (a, ua) = try makeStore(); let (b, ub) = try makeStore()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ts-sync-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: ua)
+            try? FileManager.default.removeItem(at: ub)
+            try? FileManager.default.removeItem(at: dir)
+        }
+        let transport = try FolderSyncTransport(root: dir)
+        let ea = SyncEngine(store: a, deviceID: "A")
+        let eb = SyncEngine(store: b, deviceID: "B")
+
+        let t = try a.createProject(name: "shared", colorHex: "#f00")
+        try a.switchTo(projectID: t, at: Date(timeIntervalSince1970: 1000))
+        try a.stopOpenInterval(at: Date(timeIntervalSince1970: 4600))
+
+        // A publishes; B reads and merges.
+        try transport.put(payload: try JSONEncoder().encode(try ea.buildPayload()), deviceID: "A")
+        let others = try transport.fetchOthers(excluding: "B")
+        check(others.count == 1, "B sees exactly A's file")
+        for data in others {
+            _ = try eb.merge(try JSONDecoder().decode(SyncPayload.self, from: data))
+        }
+        check(try b.intervals().count == 1, "B merged A's interval through the folder")
+
+        // A must not read its own file back.
+        check(try transport.fetchOthers(excluding: "A").isEmpty, "a device ignores its own payload")
+
+        // Running markers: presence, not history.
+        let marker = RunningMarker(deviceID: "A", taskUID: "u1", since: 5000)
+        try transport.putRunning(try JSONEncoder().encode(marker), deviceID: "A")
+        check(try transport.fetchOtherRunning(excluding: "B").count == 1, "B sees A is timing")
+        try transport.putRunning(nil, deviceID: "A")
+        check(try transport.fetchOtherRunning(excluding: "B").isEmpty, "clearing the marker works")
+    }
+
+    do { // payload survives a JSON round trip (what a transport actually moves)
+        let (a, _, ua, ub, ea, _) = try twoDevices()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let g = try a.upsertTaskProject(name: "grp", colorHex: "#00f")
+        let t = try a.createProject(name: "x", colorHex: "#f00")
+        try a.setTaskProject(taskID: t, taskProjectID: g)
+        try a.switchTo(projectID: t); try a.stopOpenInterval()
+
+        let payload = try ea.buildPayload()
+        let data = try JSONEncoder().encode(payload)
+        let back = try JSONDecoder().decode(SyncPayload.self, from: data)
+        check(back == payload, "payload round-trips through JSON unchanged")
+    }
+}
+
+// MARK: - Overlap safety (two devices, or old imports)
+
+func testOverlapSafety() {
+    print("Overlap safety:")
+
+    let day = date(2026, 3, 10, 0, 0)
+    let r = DateRange(unit: .day, start: day,
+                      end: cal.date(byAdding: .day, value: 1, to: day)!)
+
+    // Two devices each logged a session; they overlap 10:00–11:00.
+    let ivs = [
+        Interval(id: 1, projectID: 1, start: date(2026, 3, 10, 9, 0), end: date(2026, 3, 10, 11, 0)),
+        Interval(id: 2, projectID: 2, start: date(2026, 3, 10, 10, 0), end: date(2026, 3, 10, 12, 0)),
+    ]
+
+    do { // summary: wall-clock is 9→12 = 3h, NOT 2h + 2h = 4h
+        let s = Aggregations.summary(intervals: ivs, range: r, deepThreshold: 25 * 60,
+                                     dailyGoalSeconds: 8 * 3600, now: date(2026, 3, 10, 23, 0), calendar: cal)
+        check(approx(s.totalSeconds, 3 * 3600), "summary unions overlap: 3h, not 4h")
+        check(approx(s.bestDaySeconds, 3 * 3600), "best day also unioned")
+        check(s.totalSeconds <= 24 * 3600, "a day can never exceed 24h")
+        check(s.deepSeconds <= s.totalSeconds, "focused time can't exceed tracked time")
+    }
+
+    do { // a day of overlap must not falsely clear the goal
+        let s = Aggregations.summary(intervals: ivs, range: r, deepThreshold: 25 * 60,
+                                     dailyGoalSeconds: 4 * 3600, now: date(2026, 3, 10, 23, 0), calendar: cal)
+        check(s.daysOnGoal == 0, "3h real work doesn't clear a 4h goal (summing would have)")
+    }
+
+    do { // buckets: the bar height is wall-clock too
+        let b = Aggregations.buckets(intervals: ivs, range: r, deepThreshold: 25 * 60,
+                                     now: date(2026, 3, 10, 23, 0), calendar: cal)
+        let onDay = b.first { cal.isDate($0.start, inSameDayAs: day) }
+        check(onDay != nil, "found the day's bucket")
+        check(approx(onDay?.totalSeconds ?? 0, 3 * 3600), "bucket unions overlap: 3h, not 4h")
+        check((onDay?.deepSeconds ?? 0) <= (onDay?.totalSeconds ?? 0), "deep ≤ total in a bucket")
+    }
+
+    do { // per-TASK totals still sum — "how long on task 1" is 2h regardless of overlap
+        let t = Aggregations.totals(projects: [project(1), project(2)], intervals: ivs, range: r,
+                                    now: date(2026, 3, 10, 23, 0))
+        let byID = Dictionary(uniqueKeysWithValues: t.map { ($0.project.id, $0.seconds) })
+        check(approx(byID[1] ?? 0, 2 * 3600), "task 1 = 2h (per-task sums, by design)")
+        check(approx(byID[2] ?? 0, 2 * 3600), "task 2 = 2h")
+        let sum = t.reduce(0.0) { $0 + $1.seconds }
+        check(sum > 3 * 3600, "Σ per-task (4h) exceeds wall-clock (3h) — expected, not a bug")
+    }
+
+    do { // fully-enclosed span adds nothing
+        let nested = [
+            Interval(id: 1, projectID: 1, start: date(2026, 3, 10, 9, 0), end: date(2026, 3, 10, 12, 0)),
+            Interval(id: 2, projectID: 2, start: date(2026, 3, 10, 10, 0), end: date(2026, 3, 10, 11, 0)),
+        ]
+        let s = Aggregations.summary(intervals: nested, range: r, deepThreshold: 25 * 60,
+                                     dailyGoalSeconds: 8 * 3600, now: date(2026, 3, 10, 23, 0), calendar: cal)
+        check(approx(s.totalSeconds, 3 * 3600), "enclosed span doesn't inflate the day")
+    }
+
+    do { // no overlap → everything in lane 0, timeline unchanged
+        func seg(_ id: Int64, _ from: Double, _ to: Double) -> DaySegment {
+            DaySegment(id: id, projectID: 1, startHour: from, endHour: to)
+        }
+        let laid = Aggregations.assignLanes([seg(1, 9, 10), seg(2, 10, 11), seg(3, 11, 12)])
+        check(laid.allSatisfy { $0.lane == 0 }, "non-overlapping segments all use lane 0")
+        check(Aggregations.laneCount(laid) == 1, "one lane needed")
+    }
+
+    do { // overlap → separate lanes so neither is hidden
+        func seg(_ id: Int64, _ from: Double, _ to: Double) -> DaySegment {
+            DaySegment(id: id, projectID: id, startHour: from, endHour: to)
+        }
+        let laid = Aggregations.assignLanes([seg(1, 9, 11), seg(2, 10, 12)])
+        check(laid[0].lane != laid[1].lane, "overlapping segments get different lanes")
+        check(Aggregations.laneCount(laid) == 2, "two lanes needed")
+    }
+
+    do { // a lane is REUSED once free — three sessions, only two overlap at a time
+        func seg(_ id: Int64, _ from: Double, _ to: Double) -> DaySegment {
+            DaySegment(id: id, projectID: id, startHour: from, endHour: to)
+        }
+        let laid = Aggregations.assignLanes([seg(1, 9, 11), seg(2, 10, 12), seg(3, 12, 13)])
+        check(Aggregations.laneCount(laid) == 2, "third segment reuses lane 0, not a third lane")
+        check(laid.first { $0.id == 3 }?.lane == 0, "...specifically lane 0")
+    }
+
+    do { // three-way overlap
+        func seg(_ id: Int64, _ from: Double, _ to: Double) -> DaySegment {
+            DaySegment(id: id, projectID: id, startHour: from, endHour: to)
+        }
+        let laid = Aggregations.assignLanes([seg(1, 9, 12), seg(2, 10, 12), seg(3, 11, 12)])
+        check(Aggregations.laneCount(laid) == 3, "three concurrent segments need three lanes")
+        check(Set(laid.map(\.lane)).count == 3, "...all distinct")
+    }
+
+    do { // touching (not overlapping) segments share a lane — 10:00 end, 10:00 start
+        func seg(_ id: Int64, _ from: Double, _ to: Double) -> DaySegment {
+            DaySegment(id: id, projectID: id, startHour: from, endHour: to)
+        }
+        let laid = Aggregations.assignLanes([seg(1, 9, 10), seg(2, 10, 11)])
+        check(Aggregations.laneCount(laid) == 1, "back-to-back sessions aren't treated as overlap")
+    }
+
+    do { // SpanUnion directly: identical spans, and out-of-order input
+        let a = date(2026, 3, 10, 9, 0), b = date(2026, 3, 10, 10, 0)
+        check(approx(SpanUnion.coveredSeconds([(a, b), (a, b)]), 3600), "duplicate spans count once")
+        let c = date(2026, 3, 10, 11, 0), d = date(2026, 3, 10, 12, 0)
+        check(approx(SpanUnion.coveredSeconds([(c, d), (a, b)]), 7200), "unsorted input handled")
+        check(approx(SpanUnion.coveredSeconds([]), 0), "no spans → 0")
+        check(approx(SpanUnion.coveredSeconds([(b, a)]), 0), "inverted span ignored")
+    }
+}
+
+// MARK: - Sync groundwork (uid / updated_at / tombstones)
+
+func testSyncGroundwork() throws {
+    print("Sync groundwork:")
+
+    do { // every new row gets a unique uid — local AUTOINCREMENT ids collide across devices
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let a = try store.createProject(name: "A", colorHex: "#f00")
+        let b = try store.createProject(name: "B", colorHex: "#0f0")
+        try store.switchTo(projectID: a); try store.stopOpenInterval()
+        try store.switchTo(projectID: b); try store.stopOpenInterval()
+        let g = try store.upsertTaskProject(name: "grp", colorHex: "#00f")
+
+        check(try store.uidCount(table: "projects") == 2, "both tasks got a uid")
+        check(try store.uidCount(table: "intervals") == 2, "both intervals got a uid")
+        check(try store.uidCount(table: "task_projects") == 1, "the project got a uid")
+        check(try store.distinctUIDCount(table: "intervals") == 2, "interval uids are distinct")
+        _ = g
+    }
+
+    do { // metadata edits stamp updated_at so LWW can order them
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let a = try store.createProject(name: "A", colorHex: "#f00")
+        let first = try store.updatedAt(table: "projects", id: a)
+        check(first != nil, "created rows have updated_at")
+
+        // Rename later and confirm the stamp moves forward.
+        Thread.sleep(forTimeInterval: 0.01)
+        try store.renameProject(id: a, name: "A2")
+        let second = try store.updatedAt(table: "projects", id: a)
+        check((second ?? 0) > (first ?? 0), "rename advances updated_at")
+
+        Thread.sleep(forTimeInterval: 0.01)
+        try store.setProjectFinished(id: a, finished: true)
+        let third = try store.updatedAt(table: "projects", id: a)
+        check((third ?? 0) > (second ?? 0), "finishing advances updated_at")
+    }
+
+    do { // deletes leave tombstones, or a merge silently resurrects the row
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let a = try store.createProject(name: "A", colorHex: "#f00")
+        try store.switchTo(projectID: a); try store.stopOpenInterval()
+        try store.deleteProject(id: a)
+        check(try store.tombstoneUIDs(kind: "task").count == 1, "deleting a task tombstones it")
+        check(try store.tombstoneUIDs(kind: "interval").count == 1, "...and its intervals")
+    }
+
+    do { // resetting time tombstones the intervals but not the task
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let a = try store.createProject(name: "A", colorHex: "#f00")
+        try store.switchTo(projectID: a); try store.stopOpenInterval()
+        try store.resetProjectIntervals(id: a)
+        check(try store.tombstoneUIDs(kind: "interval").count == 1, "reset tombstones the intervals")
+        check(try store.tombstoneUIDs(kind: "task").isEmpty, "...but keeps the task alive")
+    }
+
+    do { // deleting a project tombstones it; its tasks survive (they fall back to Inbox)
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let a = try store.createProject(name: "A", colorHex: "#f00")
+        let g = try store.upsertTaskProject(name: "grp", colorHex: "#0f0")
+        try store.setTaskProject(taskID: a, taskProjectID: g)
+        try store.deleteTaskProject(id: g)
+        check(try store.tombstoneUIDs(kind: "task_project").count == 1, "project tombstoned")
+        check(try store.tombstoneUIDs(kind: "task").isEmpty, "its task is NOT deleted")
+        check(try store.listProjects().count == 1, "...and still exists locally")
+    }
+}
+
 // MARK: - Task projects (grouping above tasks)
 
 func testTaskProjects() throws {
@@ -602,6 +1345,307 @@ func testNudgePolicy() {
           "an overdue threshold still fires (never a negative delay)")
 }
 
+// MARK: - Device attribution
+
+func testDeviceAttribution() throws {
+    print("Device attribution:")
+
+    do { // writes self-stamp, and reads carry the device back
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let id = try store.createProject(name: "a", colorHex: "#fff")
+        store.localDeviceID = "mac-1"
+        try store.insertClosedInterval(projectID: id, start: date(2026, 8, 1, 9, 0),
+                                       end: date(2026, 8, 1, 10, 0))
+        let rows = try store.intervals()
+        check(rows.count == 1 && rows[0].deviceID == "mac-1",
+              "an interval records the device that wrote it")
+    }
+
+    do { // an explicit device wins over the local one (replay/import), and nil stays nil
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let id = try store.createProject(name: "a", colorHex: "#fff")
+        store.localDeviceID = "mac-1"
+        try store.insertClosedInterval(projectID: id, start: date(2026, 8, 1, 9, 0),
+                                       end: date(2026, 8, 1, 10, 0), deviceID: "mac-2")
+        store.localDeviceID = nil
+        try store.insertClosedInterval(projectID: id, start: date(2026, 8, 1, 11, 0),
+                                       end: date(2026, 8, 1, 12, 0))
+        let rows = try store.intervals().sorted { $0.start < $1.start }
+        check(rows[0].deviceID == "mac-2", "an explicit deviceID overrides the local one")
+        check(rows[1].deviceID == nil, "no local device leaves the row unattributed, not guessed")
+    }
+
+    do { // a merged interval keeps its ORIGINATING device, not the merging one
+        let (a, ua) = try makeStore(); defer { try? FileManager.default.removeItem(at: ua) }
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        a.localDeviceID = "mac-a"; b.localDeviceID = "mac-b"
+        let ida = try a.createProject(name: "shared", colorHex: "#fff")
+        try a.insertClosedInterval(projectID: ida, start: date(2026, 8, 1, 9, 0),
+                                   end: date(2026, 8, 1, 10, 0))
+        let ea = SyncEngine(store: a, deviceID: "mac-a", deviceLabel: "Air")
+        let eb = SyncEngine(store: b, deviceID: "mac-b", deviceLabel: "Pro")
+        _ = try eb.merge(try ea.buildPayload())
+        let merged = try b.intervals()
+        check(merged.count == 1 && merged[0].deviceID == "mac-a",
+              "a merged interval stays attributed to the device that recorded it")
+        check((try b.deviceLabels())["mac-a"] == "Air",
+              "merging remembers the sender's label so offline devices stay nameable")
+    }
+
+    do { // the backfill's guess gets repaired by the owner on the next sync
+        let (a, ua) = try makeStore(); defer { try? FileManager.default.removeItem(at: ua) }
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        a.localDeviceID = "mac-a"; b.localDeviceID = "mac-b"
+        let ida = try a.createProject(name: "shared", colorHex: "#fff")
+        try a.insertClosedInterval(projectID: ida, start: date(2026, 8, 1, 9, 0),
+                                   end: date(2026, 8, 1, 10, 0))
+        let ea = SyncEngine(store: a, deviceID: "mac-a")
+        let eb = SyncEngine(store: b, deviceID: "mac-b")
+        let payload = try ea.buildPayload()
+        _ = try eb.merge(payload)
+
+        // Simulate the one-time backfill mis-stamping a merged row as local.
+        let uid = try b.intervalsWithUIDs().first!.uid
+        try b.reattributeInterval(uid: uid, deviceID: "mac-b")
+        check(try b.intervals()[0].deviceID == "mac-b", "precondition: the row is mis-attributed")
+
+        let report = try eb.merge(payload)
+        check(report.intervalsReattributed == 1, "the owner's payload repairs the attribution")
+        check(try b.intervals()[0].deviceID == "mac-a", "the row is restored to its real device")
+
+        // And it's idempotent: a third merge finds nothing left to fix.
+        check(try eb.merge(payload).intervalsReattributed == 0,
+              "re-attribution is idempotent, so it doesn't churn every poll")
+    }
+
+    do { // labels persist and a label-less payload doesn't blank a known name
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        try store.rememberDevice(id: "mac-1", label: "Air")
+        try store.rememberDevice(id: "mac-1", label: nil)
+        check((try store.deviceLabels())["mac-1"] == "Air",
+              "a payload with no label keeps the previously-known name")
+    }
+}
+
+// MARK: - Device-aware timeline lanes
+
+func testDeviceLanes() {
+    print("Device lanes:")
+
+    let day = date(2026, 8, 1, 0, 0)
+    func iv(_ id: Int64, _ h1: Int, _ h2: Int, _ dev: String?) -> Interval {
+        Interval(id: id, projectID: 1, start: date(2026, 8, 1, h1, 0),
+                 end: date(2026, 8, 1, h2, 0), deviceID: dev)
+    }
+
+    do { // one device: everything stays on lane 0, as before
+        let segs = Aggregations.daySegments(
+            intervals: [iv(1, 9, 10, "a"), iv(2, 11, 12, "a")], day: day, calendar: cal)
+        check(Aggregations.laneCount(segs) == 1, "a single device keeps one lane")
+    }
+
+    do { // two devices: one lane each, even when their blocks DON'T overlap
+        let segs = Aggregations.daySegments(
+            intervals: [iv(1, 9, 10, "a"), iv(2, 11, 12, "b")], day: day, calendar: cal)
+        check(Aggregations.laneCount(segs) == 2, "two devices get a lane each")
+        let laneOf = Dictionary(uniqueKeysWithValues: segs.map { ($0.id, $0.lane) })
+        check(laneOf[1] != laneOf[2], "non-overlapping blocks from different devices don't share a row")
+    }
+
+    do { // a device's own blocks never land on another device's row
+        let segs = Aggregations.daySegments(
+            intervals: [iv(1, 9, 12, "a"), iv(2, 10, 11, "a"), iv(3, 9, 10, "b")],
+            day: day, calendar: cal)
+        var lanesByDevice: [String: Set<Int>] = [:]
+        for seg in segs { lanesByDevice[seg.deviceID ?? "?", default: []].insert(seg.lane) }
+        check(lanesByDevice["a"]!.isDisjoint(with: lanesByDevice["b"]!),
+              "each device owns its own lanes, so a row always names one machine")
+        check(lanesByDevice["a"]!.count == 2, "a device's overlapping blocks still fan out")
+    }
+
+    do { // a DaySegment rebuilt with fewer arguments silently loses its device — the Sessions list
+        // clipped segments to the selection this way and showed every row as "unknown".
+        // Reflection-based so a newly added property fails this until it's carried too.
+        let seg = DaySegment(id: 1, projectID: 2, startHour: 9, endHour: 10, lane: 3, deviceID: "d")
+        let fields = Set(Mirror(reflecting: seg).children.compactMap(\.label))
+        // Rebuild the way a clip does, then check nothing was dropped.
+        let clipped = DaySegment(id: seg.id, projectID: seg.projectID,
+                                 startHour: max(seg.startHour, 9.5), endHour: seg.endHour,
+                                 lane: seg.lane, deviceID: seg.deviceID)
+        let preserved = Set(Mirror(reflecting: clipped).children.compactMap { child -> String? in
+            guard let label = child.label else { return nil }
+            // Positions legitimately change when clipping; everything else must survive.
+            if label == "startHour" || label == "endHour" { return label }
+            let before = Mirror(reflecting: seg).children.first { $0.label == label }?.value
+            return "\(child.value)" == "\(before ?? "")" ? label : nil
+        })
+        check(fields == preserved,
+              "clipping a segment preserves every non-positional field (lost: \(fields.subtracting(preserved).sorted()))")
+    }
+
+    do { // ordering is stable and named devices come before unattributed rows
+        let segs = Aggregations.daySegments(
+            intervals: [iv(1, 9, 10, nil), iv(2, 11, 12, "b")], day: day, calendar: cal)
+        check(Aggregations.orderedDevices(segs) == ["b", nil],
+              "unattributed rows sort last so named devices keep the top lanes")
+    }
+}
+
+// MARK: - Paused presence
+
+func testPausedPresence() {
+    print("Paused presence:")
+
+    let t0 = date(2026, 8, 1, 9, 0)
+    check(RunningMarker(deviceID: "a", taskUID: "t", since: 0).claimsTimer,
+          "a marker with no flag is treated as running (older builds only published those)")
+    check(!RunningMarker(deviceID: "a", taskUID: "t", since: 0, isRunning: false).claimsTimer,
+          "a paused marker is presence, not a timer claim")
+
+    // A paused remote marker must NOT stop the local timer.
+    let paused = RunningMarker(deviceID: "b", taskUID: "t", since: t0.addingTimeInterval(60).timeIntervalSince1970,
+                              isRunning: false)
+    check(TakeoverPolicy.decide(localRunningSince: t0, markers: [paused]) == nil,
+          "a paused device never takes over a running one")
+
+    // A running one still does.
+    let running = RunningMarker(deviceID: "b", taskUID: "t", since: t0.addingTimeInterval(60).timeIntervalSince1970,
+                               isRunning: true)
+    check(TakeoverPolicy.decide(localRunningSince: t0, markers: [running]) != nil,
+          "a later running device still takes over")
+
+    // A paused marker alongside a running one doesn't shadow it.
+    check(TakeoverPolicy.decide(localRunningSince: t0, markers: [paused, running]) != nil,
+          "a paused marker doesn't mask a real claim")
+}
+
+// MARK: - Task name reuse
+
+func testTaskNameReuse() throws {
+    print("Task name reuse:")
+
+    do { // same name in the same group reuses, case-insensitively
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let a = try store.createProject(name: "outsideworld", colorHex: "#fff")
+        let b = try store.createProject(name: "OutsideWorld", colorHex: "#000")
+        check(a == b, "re-adding a name reuses the task instead of forking its history")
+        check(try store.listProjects(includeArchived: true).count == 1, "no twin row is created")
+    }
+
+    do { // the same name in DIFFERENT groups is two different tasks
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let work = try store.upsertTaskProject(name: "work", colorHex: "#fff")
+        let home = try store.upsertTaskProject(name: "home", colorHex: "#000")
+        let a = try store.createProject(name: "review", colorHex: "#fff", inGroup: work)
+        try store.setTaskProject(taskID: a, taskProjectID: work)
+        let b = try store.createProject(name: "review", colorHex: "#fff", inGroup: home)
+        check(a != b, "the same name under two projects stays two distinct tasks")
+    }
+
+    do { // Inbox only matches Inbox
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let g = try store.upsertTaskProject(name: "work", colorHex: "#fff")
+        let grouped = try store.createProject(name: "review", colorHex: "#fff", inGroup: g)
+        try store.setTaskProject(taskID: grouped, taskProjectID: g)
+        let inbox = try store.createProject(name: "review", colorHex: "#fff")
+        check(grouped != inbox, "a grouped task isn't reused by an Inbox add")
+    }
+
+    do { // re-adding a FINISHED task reopens it rather than forking
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let a = try store.createProject(name: "dentist", colorHex: "#fff")
+        try store.setProjectFinished(id: a, finished: true)
+        let b = try store.createProject(name: "dentist", colorHex: "#fff")
+        check(a == b, "a finished task is reused, not duplicated")
+        let reopened = try store.listProjects(includeArchived: true).first { $0.id == a }
+        check(reopened?.finished == false, "reusing a finished task reopens it")
+    }
+
+    do { // an ARCHIVED task is left alone — archiving means "out of the way"
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let a = try store.createProject(name: "old", colorHex: "#fff")
+        try store.setProjectArchived(id: a, archived: true)
+        let b = try store.createProject(name: "old", colorHex: "#fff")
+        check(a != b, "an archived task is not silently resurrected")
+    }
+
+    do { // reuse keeps the interval history attached to one task
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let a = try store.createProject(name: "t", colorHex: "#fff")
+        try store.insertClosedInterval(projectID: a, start: date(2026, 8, 1, 9, 0),
+                                       end: date(2026, 8, 1, 10, 0))
+        let b = try store.createProject(name: "t", colorHex: "#fff")
+        try store.insertClosedInterval(projectID: b, start: date(2026, 8, 2, 9, 0),
+                                       end: date(2026, 8, 2, 10, 0))
+        check(try store.intervals().allSatisfy { $0.projectID == a },
+              "both sessions land on one task, so totals aren't split across twins")
+    }
+}
+
+// MARK: - Deleting one session
+
+func testDeleteInterval() throws {
+    print("Delete session:")
+
+    do { // deletes the row, leaves the task and the other intervals alone
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let t = try store.createProject(name: "t", colorHex: "#fff")
+        try store.insertClosedInterval(projectID: t, start: date(2026, 8, 1, 9, 0),
+                                       end: date(2026, 8, 1, 10, 0))
+        try store.insertClosedInterval(projectID: t, start: date(2026, 8, 1, 11, 0),
+                                       end: date(2026, 8, 1, 12, 0))
+        let victim = try store.intervals().first { $0.start == date(2026, 8, 1, 9, 0) }!
+        check(try store.deleteInterval(id: victim.id), "deleting an existing session succeeds")
+        let left = try store.intervals()
+        check(left.count == 1 && left[0].start == date(2026, 8, 1, 11, 0),
+              "only that session goes; the other survives")
+        check(try store.listProjects(includeArchived: true).count == 1, "the task itself stays")
+    }
+
+    do { // a tombstone is written, else the peer's log re-adds it on the next sync
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let t = try store.createProject(name: "t", colorHex: "#fff")
+        try store.insertClosedInterval(projectID: t, start: date(2026, 8, 1, 9, 0),
+                                       end: date(2026, 8, 1, 10, 0))
+        let iv = try store.intervals()[0]
+        let uid = try store.uid(table: "intervals", id: iv.id)!
+        try store.deleteInterval(id: iv.id)
+        check(try store.tombstoneUIDs().contains(uid), "the delete leaves a tombstone")
+    }
+
+    do { // and the delete survives a merge from the device that still has the row
+        let (a, ua) = try makeStore(); defer { try? FileManager.default.removeItem(at: ua) }
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        let ta = try a.createProject(name: "shared", colorHex: "#fff")
+        try a.insertClosedInterval(projectID: ta, start: date(2026, 8, 1, 9, 0),
+                                   end: date(2026, 8, 1, 10, 0))
+        let ea = SyncEngine(store: a, deviceID: "A")
+        let eb = SyncEngine(store: b, deviceID: "B")
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.intervals().count == 1, "precondition: B has the interval")
+
+        try b.deleteInterval(id: try b.intervals()[0].id)
+        _ = try eb.merge(try ea.buildPayload())   // A still has it and re-sends
+        check(try b.intervals().isEmpty, "a deleted session doesn't come back on the next sync")
+    }
+
+    do { // the RUNNING interval is refused — the timer would tick against a missing row
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let t = try store.createProject(name: "t", colorHex: "#fff")
+        try store.switchTo(projectID: t, at: date(2026, 8, 1, 9, 0))
+        let running = try store.openInterval()!
+        check(try store.deleteInterval(id: running.id) == false,
+              "the running session can't be deleted out from under the timer")
+        check(try store.openInterval() != nil, "the timer is still running")
+    }
+
+    do { // a missing id is a no-op, not a crash or a stray tombstone
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        check(try store.deleteInterval(id: 9_999) == false, "deleting a missing session is a no-op")
+        check(try store.tombstoneUIDs().isEmpty, "and writes no tombstone")
+    }
+}
+
 // MARK: - Run
 
 do {
@@ -609,10 +1653,21 @@ do {
     testAggregations()
     testFinishedVisibility()
     testTaskSearch()
+    testOAuthPKCE()
+    testTakeoverPolicy()
+    try testFieldLevelSyncCoverage()
+    try testSyncEngine()
+    testOverlapSafety()
+    try testSyncGroundwork()
     try testTaskProjects()
     testQueryParsing()
     testWindowSummary()
     testNudgePolicy()
+    try testDeviceAttribution()
+    testDeviceLanes()
+    testPausedPresence()
+    try testTaskNameReuse()
+    try testDeleteInterval()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1

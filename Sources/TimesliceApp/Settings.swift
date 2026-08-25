@@ -35,6 +35,34 @@ final class Settings: ObservableObject {
         didSet { defaults.set(promptsEnabled, forKey: Keys.promptsEnabled) }
     }
 
+    /// Sync is OFF unless a folder is chosen — the app stays local-first, no account, no network,
+    /// for anyone who doesn't opt in. A folder inside Dropbox/iCloud Drive is all it takes.
+    @Published var syncFolderPath: String {
+        didSet { defaults.set(syncFolderPath, forKey: Keys.syncFolderPath) }
+    }
+
+    /// Sync backend. Google Drive is the primary one — it needs no third-party app installed and
+    /// is the only option that can reach an iPhone.
+    enum SyncMode: String {
+        case off, googleDrive, folder
+    }
+
+    @Published var syncMode: SyncMode {
+        didSet { defaults.set(syncMode.rawValue, forKey: Keys.syncMode) }
+    }
+
+    /// What this device calls itself in the device list. Empty = derive from the machine.
+    @Published var deviceLabel: String {
+        didSet { defaults.set(deviceLabel, forKey: Keys.deviceLabel) }
+    }
+
+    var syncEnabled: Bool { syncMode != .off }
+
+    var syncFolderURL: URL? {
+        guard syncEnabled else { return nil }
+        return URL(fileURLWithPath: (syncFolderPath as NSString).expandingTildeInPath)
+    }
+
     var deepBlockSeconds: TimeInterval { TimeInterval(deepBlockMinutes * 60) }
     var dailyGoalSeconds: TimeInterval { dailyGoalHours * 3600 }
 
@@ -56,6 +84,18 @@ final class Settings: ObservableObject {
         autoPauseMinutes = defaults.object(forKey: Keys.autoPauseMinutes) as? Int ?? 60
         idleNudgeMinutes = defaults.object(forKey: Keys.idleNudgeMinutes) as? Int ?? 15
         promptsEnabled = defaults.object(forKey: Keys.promptsEnabled) as? Bool ?? true
+        // A sandbox run can point both instances at one folder without touching real settings.
+        deviceLabel = defaults.string(forKey: Keys.deviceLabel) ?? ""
+        syncFolderPath = ProcessInfo.processInfo.environment["TIMESLICE_SYNC_FOLDER"]
+            ?? defaults.string(forKey: Keys.syncFolderPath) ?? ""
+        // A sandbox run forces folder mode so two local instances can pair without OAuth.
+        if ProcessInfo.processInfo.environment["TIMESLICE_SYNC_DRIVE"] == "1" {
+            syncMode = .googleDrive
+        } else if ProcessInfo.processInfo.environment["TIMESLICE_SYNC_FOLDER"] != nil {
+            syncMode = .folder
+        } else {
+            syncMode = SyncMode(rawValue: defaults.string(forKey: Keys.syncMode) ?? "") ?? .off
+        }
     }
 
     private enum Keys {
@@ -64,5 +104,8 @@ final class Settings: ObservableObject {
         static let autoPauseMinutes = "autoPauseMinutes"
         static let idleNudgeMinutes = "idleNudgeMinutes"
         static let promptsEnabled = "promptsEnabled"
+        static let syncFolderPath = "syncFolderPath"
+        static let syncMode = "syncMode"
+        static let deviceLabel = "deviceLabel"
     }
 }

@@ -18,3 +18,9 @@ Package.resolved
 
 # Raw screen recordings (only the exported GIFs are tracked)
 docs/media/*.mov
+
+# Local OAuth credentials — never commit. The client id is baked into the build at release
+# time; the secret stays on this machine.
+/tmp
+*.client_secret.json
+client_secret*.json

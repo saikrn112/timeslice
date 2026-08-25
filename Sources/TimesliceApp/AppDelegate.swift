@@ -15,6 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hud = SwitchHUD()
     private let quickAdd = QuickAddPanel()
     private var autoPause: AutoPauseController?
+    private var sync: SyncController?
+    private let googleAuth = GoogleAuth()
     private var cancellables: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -50,7 +52,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         autoPause.openMainWindow = { [weak self] in self?.showMainWindow() }
         self.autoPause = autoPause
 
-        statusBar = StatusBarController(appState: appState, engine: engine, privacy: privacy, autoPause: autoPause)
+        // Sync stays inert unless a folder is configured — no account, no network by default.
+        sync = SyncController(store: store, engine: engine, appState: appState,
+                              settings: settings, auth: googleAuth)
+
+        statusBar = StatusBarController(appState: appState, engine: engine, privacy: privacy,
+                                        autoPause: autoPause, sync: sync)
 
         installMainMenu()
         setupHotkeys()
@@ -107,7 +114,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         hotkeys.onActivate = { [weak self] in
             guard let self, !self.switcherSuppressed else { return }
-            let selectable = self.appState.selectableProjects
+            // Recency order, frozen for this hold: the task you were previously on is one press
+            // away instead of wherever it sits in the list.
+            let selectable = self.appState.beginSwitcherSession()
             // Begin cycling from the running task if it's still selectable; otherwise ensure the
             // selection lands on a selectable (unfinished) task so the HUD highlights something.
             if let running = self.engine.runningProjectID, selectable.contains(where: { $0.id == running }) {
@@ -124,7 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeys.onCycle = { [weak self] delta in
             guard let self, !self.switcherSuppressed else { return }
             self.appState.moveSelection(by: delta)   // \ forward (+1), ] reverse (-1)
-            self.hud.showSwitcher(tasks: self.appState.selectableProjects, selectedID: self.appState.selectedProjectID, todaySeconds: self.appState.todaySecondsByID, runningID: self.engine.runningProjectID, clock: self.engine.clock,
+            self.hud.showSwitcher(tasks: self.appState.switcherProjects, selectedID: self.appState.selectedProjectID, todaySeconds: self.appState.todaySecondsByID, runningID: self.engine.runningProjectID, clock: self.engine.clock,
                                  displayColor: { [weak self] id in self?.appState.displayColorHex(forTaskID: id) ?? "#8E8E93" },
                                  groupName: { [weak self] id in self?.appState.shortGroupName(forTaskID: id) })
         }
@@ -140,6 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.engine.switchTo(projectID: selected)  // pauses previous, starts selected
             }
             self.switcherStartID = nil
+            self.appState.endSwitcherSession()
             self.showHUDForRunning()
         }
 
@@ -169,7 +179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Requires Accessibility permission. If not yet granted, guide the user, then poll.
         // Only a screenshot run skips this — the modal would sit on top of the window being
         // captured. Plain demo mode still prompts, so hotkeys can be tested against demo data.
-        if !hotkeys.register() && !DemoData.isScreenshotRun {
+        if !hotkeys.register() && !DemoData.isScreenshotRun && !DemoData.isSandboxRun {
             promptForAccessibility()
             pollForAccessibility()
         }
@@ -245,7 +255,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showMainWindow() {
         if mainWindowController == nil {
-            mainWindowController = MainWindowController(appState: appState, engine: engine, privacy: privacy, settings: settings)
+            mainWindowController = MainWindowController(appState: appState, engine: engine,
+                                                       privacy: privacy, settings: settings,
+                                                       sync: sync, auth: googleAuth)
         }
         mainWindowController?.show()
         NSApp.activate(ignoringOtherApps: true)

@@ -80,12 +80,15 @@ public struct Interval: Identifiable, Hashable, Sendable {
     public let projectID: Int64
     public let start: Date
     public let end: Date?
+    /// Which device recorded this. nil for rows written before device attribution existed.
+    public let deviceID: String?
 
-    public init(id: Int64, projectID: Int64, start: Date, end: Date?) {
+    public init(id: Int64, projectID: Int64, start: Date, end: Date?, deviceID: String? = nil) {
         self.id = id
         self.projectID = projectID
         self.start = start
         self.end = end
+        self.deviceID = deviceID
     }
 
     public var isRunning: Bool { end == nil }
@@ -153,12 +156,20 @@ public struct DaySegment: Hashable, Sendable, Identifiable {
     public let projectID: Int64
     public let startHour: Double    // 0…24, local
     public let endHour: Double      // 0…24, local (> startHour)
+    /// Which horizontal sub-lane to draw in. 0 unless this segment overlaps another, in which
+    /// case overlapping segments get distinct lanes so neither hides the other on the timeline.
+    public var lane: Int = 0
+    /// Device that recorded it; nil for rows predating device attribution.
+    public let deviceID: String?
 
-    public init(id: Int64, projectID: Int64, startHour: Double, endHour: Double) {
+    public init(id: Int64, projectID: Int64, startHour: Double, endHour: Double, lane: Int = 0,
+                deviceID: String? = nil) {
         self.id = id
+        self.lane = lane
         self.projectID = projectID
         self.startHour = startHour
         self.endHour = endHour
+        self.deviceID = deviceID
     }
 }
 
