@@ -1483,11 +1483,48 @@ func testDeviceLanes() {
               "clipping a segment preserves every non-positional field (lost: \(fields.subtracting(preserved).sorted()))")
     }
 
+    do { // per-device time UNIONS that device's own overlaps instead of summing them
+        let day = date(2026, 8, 1, 0, 0)
+        // Two blocks from one device overlapping 9:30-10:00: 9-10 plus 9:30-11 is 2h, not 2.5h.
+        let segs = Aggregations.daySegments(
+            intervals: [iv(1, 9, 10, "a"),
+                        Interval(id: 2, projectID: 1, start: date(2026, 8, 1, 9, 30),
+                                 end: date(2026, 8, 1, 11, 0), deviceID: "a")],
+            day: day, calendar: cal)
+        let spans = segs.filter { $0.deviceID == "a" }.map {
+            (start: day.addingTimeInterval($0.startHour * 3600),
+             end: day.addingTimeInterval($0.endHour * 3600))
+        }
+        check(approx(SpanUnion.coveredSeconds(spans) / 3600, 2.0),
+              "a device's overlapping blocks count once, not twice")
+    }
+
     do { // ordering is stable and named devices come before unattributed rows
         let segs = Aggregations.daySegments(
             intervals: [iv(1, 9, 10, nil), iv(2, 11, 12, "b")], day: day, calendar: cal)
         check(Aggregations.orderedDevices(segs) == ["b", nil],
               "unattributed rows sort last so named devices keep the top lanes")
+    }
+
+    do { // the reported bug: a device's row must not move when an EARLIER block syncs in later.
+        // Order used to follow first appearance, so whichever device had the earliest known block
+        // took the top lane — and that changed as data arrived.
+        let early = Aggregations.daySegments(intervals: [iv(1, 11, 12, "work")], day: day, calendar: cal)
+        let laneOfWorkBefore = early.first { $0.deviceID == "work" }?.lane
+        // now a peer's EARLIER block arrives
+        let later = Aggregations.daySegments(
+            intervals: [iv(1, 11, 12, "work"), iv(2, 8, 9, "personal")], day: day, calendar: cal)
+        let laneOfWorkAfter = later.first { $0.deviceID == "work" }?.lane
+        check(laneOfWorkBefore == 0, "precondition: sole device is on lane 0")
+        check(laneOfWorkAfter == 1,
+              "with two devices the order is by id (personal < work), not by who appeared first")
+        // The point: the SAME inputs always give the same order, whatever order they arrive in.
+        let shuffled = Aggregations.daySegments(
+            intervals: [iv(2, 8, 9, "personal"), iv(1, 11, 12, "work")], day: day, calendar: cal)
+        check(Aggregations.orderedDevices(later) == Aggregations.orderedDevices(shuffled),
+              "lane order doesn't depend on input order")
+        check(Aggregations.orderedDevices(later) == ["personal", "work"],
+              "and is a fixed, predictable sequence rather than arrival-dependent")
     }
 }
 
@@ -1646,6 +1683,213 @@ func testDeleteInterval() throws {
     }
 }
 
+// MARK: - Marker liveness
+
+func testMarkerLiveness() {
+    print("Marker liveness:")
+
+    let t0 = date(2026, 8, 1, 9, 0)
+    let cutoff = TakeoverPolicy.livenessCutoff
+
+    func marker(since: Date, writtenAt: Date?, running: Bool = true) -> RunningMarker {
+        RunningMarker(deviceID: "b", taskUID: "t", since: since.timeIntervalSince1970,
+                      isRunning: running, writtenAt: writtenAt?.timeIntervalSince1970)
+    }
+
+    do { // the bug: an abandoned claim starts LATER than our timer, so it used to win forever
+        let now = t0.addingTimeInterval(3 * 3600)
+        let abandoned = marker(since: t0.addingTimeInterval(60),
+                               writtenAt: t0.addingTimeInterval(120))   // last refreshed hours ago
+        check(TakeoverPolicy.decide(localRunningSince: t0.addingTimeInterval(2 * 3600),
+                                    markers: [abandoned], now: now) == nil,
+              "a stale claim no longer pauses a timer started after it")
+    }
+
+    do { // a device refreshing normally still takes over
+        let now = t0.addingTimeInterval(600)
+        let live = marker(since: t0.addingTimeInterval(300), writtenAt: now.addingTimeInterval(-20))
+        check(TakeoverPolicy.decide(localRunningSince: t0, markers: [live], now: now) != nil,
+              "a freshly-refreshed claim still takes over")
+    }
+
+    do { // right at the boundary: just inside is live, just outside is dead
+        let now = t0.addingTimeInterval(3600)
+        let justLive = marker(since: t0.addingTimeInterval(60), writtenAt: now.addingTimeInterval(-cutoff + 5))
+        let justDead = marker(since: t0.addingTimeInterval(60), writtenAt: now.addingTimeInterval(-cutoff - 5))
+        check(TakeoverPolicy.decide(localRunningSince: t0, markers: [justLive], now: now) != nil,
+              "a claim just inside the cutoff is honoured")
+        check(TakeoverPolicy.decide(localRunningSince: t0, markers: [justDead], now: now) == nil,
+              "a claim just outside the cutoff is ignored")
+    }
+
+    do { // an older build sends no heartbeat: treat as live, since assuming dead would let two
+        // timers run at once and double-count
+        let now = t0.addingTimeInterval(3600)
+        let legacy = marker(since: t0.addingTimeInterval(60), writtenAt: nil)
+        check(legacy.isFresh(now: now, cutoff: cutoff), "a marker with no heartbeat counts as live")
+        check(TakeoverPolicy.decide(localRunningSince: t0, markers: [legacy], now: now) != nil,
+              "so an older build can still take over")
+    }
+
+    do { // the transport's timestamp WINS over the marker's self-report (one clock, not N)
+        let now = t0.addingTimeInterval(3600)
+        // Marker claims it was just written, but Drive says the file is hours old — trust Drive.
+        let lying = marker(since: t0.addingTimeInterval(60), writtenAt: now.addingTimeInterval(-1))
+        check(!lying.isFresh(now: now, cutoff: cutoff, observedAt: t0),
+              "the transport timestamp overrides a marker that misreports its own freshness")
+        check(TakeoverPolicy.decide(localRunningSince: t0, markers: [lying], now: now,
+                                    observedAt: ["b": t0]) == nil,
+              "and the takeover is skipped on that basis")
+    }
+
+    do { // a clock AHEAD of ours must not read as stale
+        let now = t0.addingTimeInterval(600)
+        let ahead = marker(since: t0.addingTimeInterval(60), writtenAt: now.addingTimeInterval(120))
+        check(ahead.isFresh(now: now, cutoff: cutoff),
+              "a future timestamp means the peer's clock is ahead, not that it's dead")
+    }
+
+    do { // staleness doesn't resurrect a paused marker into a claim
+        let now = t0.addingTimeInterval(600)
+        let paused = marker(since: t0.addingTimeInterval(60), writtenAt: now, running: false)
+        check(TakeoverPolicy.decide(localRunningSince: t0, markers: [paused], now: now) == nil,
+              "a fresh paused marker is still not a claim")
+    }
+}
+
+// MARK: - Deleting a group across devices
+
+func testRemoteGroupDelete() throws {
+    print("Remote group delete:")
+
+    do { // A deletes a group; B still has a task in it. B must not hit a FOREIGN KEY error.
+        let (a, ua) = try makeStore(); defer { try? FileManager.default.removeItem(at: ua) }
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        let ea = SyncEngine(store: a, deviceID: "A")
+        let eb = SyncEngine(store: b, deviceID: "B")
+
+        // Both know one group with one task in it.
+        let g = try a.upsertTaskProject(name: "work", colorHex: "#aaaaaa")
+        let t = try a.createProject(name: "profiling", colorHex: "#fff")
+        try a.setTaskProject(taskID: t, taskProjectID: g)
+        _ = try eb.merge(try ea.buildPayload())
+        let bTask = try b.listProjects(includeArchived: true).first { $0.name == "profiling" }
+        check(bTask?.taskProjectID != nil, "precondition: B has the task inside the group")
+
+        // A deletes the group (its task falls back to Inbox there).
+        try a.deleteTaskProject(id: g)
+
+        // B merges the tombstone. This is where SQLITE_CONSTRAINT (19) fired: B's task still
+        // referenced the group, and the DELETE had nothing clearing the reference first.
+        _ = try eb.merge(try ea.buildPayload())
+
+        let after = try b.listProjects(includeArchived: true).first { $0.name == "profiling" }
+        check(after != nil, "the task survives — deleting a grouping must not delete tracked time")
+        check(after?.taskProjectID == nil, "and falls back to Inbox, matching a local delete")
+        check(try b.listTaskProjects().isEmpty, "the group itself is gone on B")
+    }
+
+    do { // the task's INTERVALS survive too — a group delete must never lose time
+        let (a, ua) = try makeStore(); defer { try? FileManager.default.removeItem(at: ua) }
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        let ea = SyncEngine(store: a, deviceID: "A")
+        let eb = SyncEngine(store: b, deviceID: "B")
+        let g = try a.upsertTaskProject(name: "work", colorHex: "#aaaaaa")
+        let t = try a.createProject(name: "profiling", colorHex: "#fff")
+        try a.setTaskProject(taskID: t, taskProjectID: g)
+        try a.insertClosedInterval(projectID: t, start: date(2026, 8, 1, 9, 0),
+                                   end: date(2026, 8, 1, 10, 0))
+        _ = try eb.merge(try ea.buildPayload())
+        try a.deleteTaskProject(id: g)
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.intervals().count == 1, "the tracked hour is still there after the group went")
+    }
+
+    do { // the tombstone itself only touches tasks pointing AT the deleted group.
+        // Applied directly, isolated from the task-edit LWW that also runs during a full merge.
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        let doomed = try b.upsertTaskProject(name: "work", colorHex: "#aaaaaa")
+        let keep = try b.upsertTaskProject(name: "home", colorHex: "#bbbbbb")
+        let inDoomed = try b.createProject(name: "profiling", colorHex: "#fff")
+        let inKeep = try b.createProject(name: "errands", colorHex: "#fff")
+        try b.setTaskProject(taskID: inDoomed, taskProjectID: doomed)
+        try b.setTaskProject(taskID: inKeep, taskProjectID: keep)
+        let doomedUID = try b.uid(table: "task_projects", id: doomed)!
+
+        try b.applyRemoteTombstone(uid: doomedUID, kind: "task_project",
+                                   deletedAt: Date().timeIntervalSince1970)
+        let all = try b.listProjects(includeArchived: true)
+        check(all.first { $0.id == inDoomed }?.taskProjectID == nil,
+              "a task in the deleted group falls back to Inbox")
+        check(all.first { $0.id == inKeep }?.taskProjectID == keep,
+              "a task in a DIFFERENT group is untouched by the tombstone")
+    }
+
+    do { // LWW still governs the assignment: a move made AFTER the delete survives the merge.
+        let (a, ua) = try makeStore(); defer { try? FileManager.default.removeItem(at: ua) }
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        let ea = SyncEngine(store: a, deviceID: "A")
+        let eb = SyncEngine(store: b, deviceID: "B")
+        let doomed = try a.upsertTaskProject(name: "work", colorHex: "#aaaaaa")
+        let t = try a.createProject(name: "profiling", colorHex: "#fff")
+        try a.setTaskProject(taskID: t, taskProjectID: doomed)
+        _ = try eb.merge(try ea.buildPayload())
+
+        // Delete on A happens FIRST; B then deliberately files the task somewhere else.
+        try a.deleteTaskProject(id: doomed)
+        let keep = try b.upsertTaskProject(name: "home", colorHex: "#bbbbbb")
+        let bTaskID = try b.listProjects(includeArchived: true).first { $0.name == "profiling" }!.id
+        try b.setTaskProject(taskID: bTaskID, taskProjectID: keep)
+
+        _ = try eb.merge(try ea.buildPayload())
+        let after = try b.listProjects(includeArchived: true).first { $0.name == "profiling" }
+        check(after?.taskProjectID == keep,
+              "the newer local move wins over the older remote clear")
+        check(try b.listTaskProjects().map(\.name) == ["home"],
+              "and the deleted group is still gone")
+    }
+}
+
+// MARK: - Duplicate Drive files
+
+func testDuplicateFileCollapse() {
+    print("Duplicate Drive files:")
+
+    func f(_ name: String, _ minutesAgo: Int?) -> DriveAPI.RemoteFile {
+        DriveAPI.RemoteFile(id: "\(name)-\(minutesAgo ?? -1)", name: name,
+                            modifiedTime: minutesAgo.map { date(2026, 8, 1, 9, 0).addingTimeInterval(Double($0) * 60) })
+    }
+
+    do { // the reported bug: one device, many payload copies -> ONE entry
+        let dupes = (0..<15).map { f("device-personal.json", $0) }
+        let kept = DriveAPI.newestPerName(dupes)
+        check(kept.count == 1, "fifteen copies of one file collapse to a single entry")
+        check(kept[0].id == "device-personal.json-14", "and the newest copy is the one kept")
+    }
+
+    do { // distinct devices are untouched
+        let files = [f("device-work.json", 1), f("device-personal.json", 2)]
+        check(DriveAPI.newestPerName(files).count == 2, "different devices both survive")
+    }
+
+    do { // a missing modifiedTime never beats a real one
+        let kept = DriveAPI.newestPerName([f("a.json", nil), f("a.json", 5), f("a.json", nil)])
+        check(kept.count == 1 && kept[0].id == "a.json-5",
+              "a file with no timestamp loses to one that has it")
+    }
+
+    do { // all timestamps missing: still collapses rather than duplicating
+        check(DriveAPI.newestPerName([f("a.json", nil), f("a.json", nil)]).count == 1,
+              "duplicates with no timestamps still collapse to one")
+    }
+
+    do { // stable order regardless of input order
+        let a = DriveAPI.newestPerName([f("b.json", 1), f("a.json", 1)]).map(\.name)
+        let b = DriveAPI.newestPerName([f("a.json", 1), f("b.json", 1)]).map(\.name)
+        check(a == b && a == ["a.json", "b.json"], "output order is stable")
+    }
+}
+
 // MARK: - Run
 
 do {
@@ -1668,6 +1912,9 @@ do {
     testPausedPresence()
     try testTaskNameReuse()
     try testDeleteInterval()
+    testMarkerLiveness()
+    try testRemoteGroupDelete()
+    testDuplicateFileCollapse()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1

@@ -507,6 +507,21 @@ public final class IntervalStore {
                     try step(d)
                     sqlite3_finalize(d)
                 }
+                if table == "task_projects" {
+                    // Release tasks still sitting in this group BEFORE removing it, mirroring
+                    // `deleteTaskProject`. Without this the DELETE violated
+                    // projects.task_project_id -> task_projects(id) and threw SQLITE_CONSTRAINT,
+                    // aborting the whole merge transaction — so one deleted group anywhere stopped
+                    // that device syncing at all until the group came back.
+                    //
+                    // Only rows pointing AT this group are touched, so a task moved elsewhere in
+                    // the meantime keeps its new group.
+                    let clear = try prepare("UPDATE projects SET task_project_id = NULL, updated_at = ? WHERE task_project_id = ?")
+                    sqlite3_bind_double(clear, 1, Date().timeIntervalSince1970)
+                    sqlite3_bind_int64(clear, 2, id)
+                    try step(clear)
+                    sqlite3_finalize(clear)
+                }
                 let del = try prepare("DELETE FROM \(table) WHERE id = ?")
                 sqlite3_bind_int64(del, 1, id)
                 try step(del)

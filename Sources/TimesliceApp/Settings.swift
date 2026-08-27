@@ -35,6 +35,21 @@ final class Settings: ObservableObject {
         didSet { defaults.set(promptsEnabled, forKey: Keys.promptsEnabled) }
     }
 
+    /// Whether hovering one view highlights the matching rows/blocks in the others (breakdown ⇄
+    /// timeline ⇄ sessions). On by default; off for anyone who finds the movement distracting.
+    @Published var highlightLinking: Bool {
+        didSet { defaults.set(highlightLinking, forKey: Keys.highlightLinking) }
+    }
+
+    /// How far non-matching items fade while something is highlighted, as a percentage.
+    /// 0 = no dimming at all (matches are picked out only by what tints), 90 = nearly invisible.
+    @Published var highlightDimPercent: Int {
+        didSet { defaults.set(highlightDimPercent, forKey: Keys.highlightDimPercent) }
+    }
+
+    /// Opacity to draw non-matching items at.
+    var highlightDimOpacity: Double { 1 - Double(highlightDimPercent) / 100 }
+
     /// Sync is OFF unless a folder is chosen — the app stays local-first, no account, no network,
     /// for anyone who doesn't opt in. A folder inside Dropbox/iCloud Drive is all it takes.
     @Published var syncFolderPath: String {
@@ -84,6 +99,8 @@ final class Settings: ObservableObject {
         autoPauseMinutes = defaults.object(forKey: Keys.autoPauseMinutes) as? Int ?? 60
         idleNudgeMinutes = defaults.object(forKey: Keys.idleNudgeMinutes) as? Int ?? 15
         promptsEnabled = defaults.object(forKey: Keys.promptsEnabled) as? Bool ?? true
+        highlightLinking = defaults.object(forKey: Keys.highlightLinking) as? Bool ?? true
+        highlightDimPercent = defaults.object(forKey: Keys.highlightDimPercent) as? Int ?? 85
         // A sandbox run can point both instances at one folder without touching real settings.
         deviceLabel = defaults.string(forKey: Keys.deviceLabel) ?? ""
         syncFolderPath = ProcessInfo.processInfo.environment["TIMESLICE_SYNC_FOLDER"]
@@ -104,6 +121,8 @@ final class Settings: ObservableObject {
         static let autoPauseMinutes = "autoPauseMinutes"
         static let idleNudgeMinutes = "idleNudgeMinutes"
         static let promptsEnabled = "promptsEnabled"
+        static let highlightLinking = "highlightLinking"
+        static let highlightDimPercent = "highlightDimPercent"
         static let syncFolderPath = "syncFolderPath"
         static let syncMode = "syncMode"
         static let deviceLabel = "deviceLabel"

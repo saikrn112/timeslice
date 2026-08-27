@@ -31,8 +31,9 @@ final class AutoPauseController: ObservableObject {
 
     private var checkpointTimer: Timer?
     private var nagTimer: Timer?
-    /// The task+time to offer resuming after a sleep-triggered pause.
-    private var resumeAfterWake: (projectID: Int64, name: String)?
+    /// The task to offer resuming after an absence-triggered pause, plus why it was paused so the
+    /// prompt can say "your Mac slept" or "your screen turned off" accurately.
+    private var resumeAfterWake: (projectID: Int64, name: String, because: String)?
     private var cancellables: Set<AnyCancellable> = []
 
     /// Opens/focuses the main window before prompting — a normal titled window is what actually
@@ -47,6 +48,12 @@ final class AutoPauseController: ObservableObject {
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
         nc.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
+        // The DISPLAY going dark is its own event — system sleep may be hours later, or never
+        // (a running timer holds .idleSystemSleepDisabled, so the Mac won't idle-sleep on its own).
+        // A blank screen after the idle timeout means nobody is at the keyboard, so the timer
+        // shouldn't keep counting.
+        nc.addObserver(self, selector: #selector(screensDidSleep), name: NSWorkspace.screensDidSleepNotification, object: nil)
+        nc.addObserver(self, selector: #selector(screensDidWake), name: NSWorkspace.screensDidWakeNotification, object: nil)
 
         // (Re)arm the long-session checkpoint whenever the running task or the threshold changes.
         // @Published fires in willSet (before the value updates), so hop to the next runloop tick
@@ -73,20 +80,84 @@ final class AutoPauseController: ObservableObject {
 
     // MARK: - Sleep / wake
 
+    /// How long the screen must stay dark before the timer is paused.
+    ///
+    /// Not instant, because the display-sleep timeout can be very short (2 minutes on battery is a
+    /// common default) and reading something on screen without touching the keyboard is real work.
+    /// Waking inside this window cancels the pause entirely, so a brief blank costs nothing; stay
+    /// away longer and the pause is back-dated to the moment the screen went dark, so the grace
+    /// period itself is never counted either way.
+    private static let blankGraceSeconds: TimeInterval = 60
+
+    /// When the display went dark with a timer running, and the pending pause for it.
+    private var blankedAt: Date?
+    private var blankPauseTimer: Timer?
+
     @objc private func willSleep() {
+        // Full sleep is unambiguous — pause now, back-dated to the blank if the screen went dark
+        // first (the grace timer can't fire while the machine is asleep).
+        let at = blankedAt ?? Date()
+        cancelPendingBlankPause()
+        pauseForAbsence(at: at, because: "your Mac slept")
+    }
+
+    @objc private func screensDidSleep() {
+        guard engine.isRunning, blankedAt == nil else { return }
+        let at = Date()
+        blankedAt = at
+        blankPauseTimer = Timer.scheduledTimer(withTimeInterval: Self.blankGraceSeconds,
+                                               repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.blankPauseTimer = nil
+                self.pauseForAbsence(at: at, because: "your screen turned off")
+            }
+        }
+    }
+
+    private func cancelPendingBlankPause() {
+        blankPauseTimer?.invalidate(); blankPauseTimer = nil
+        blankedAt = nil
+    }
+
+    /// Pause because the machine stopped being used. Not gated on `promptsEnabled`: that switch
+    /// governs whether we ASK things, while this is about not recording time nobody worked. The
+    /// wake-side prompt is gated.
+    ///
+    /// A no-op when nothing is running, so a display sleep that follows an already-paused timer
+    /// (or a system sleep after a display sleep) can't overwrite the pending resume.
+    private func pauseForAbsence(at when: Date, because reason: String) {
         guard let id = engine.runningProjectID else { return }
         let name = appState.projects.first { $0.id == id }?.name ?? "task"
-        // Back-date the pause to now (moment of sleep) — asleep time won't be counted.
-        engine.pause(at: Date())
-        resumeAfterWake = (id, name)
+        // Never back-date before the interval's own start, which would make it negative.
+        let at = max(when, engine.runningSince ?? when)
+        engine.pause(at: min(at, Date()))
+        resumeAfterWake = (id, name, reason)
+        blankedAt = nil
         dismissPrompt()
     }
 
     @objc private func didWake() {
+        cancelPendingBlankPause()
+        handleReturn()
+    }
+
+    @objc private func screensDidWake() {
+        // Back inside the grace window: the pause never happened, so there's nothing to resume and
+        // nothing to ask about. Silently carry on — this is the "I was just reading" case.
+        let wasPending = blankPauseTimer != nil
+        cancelPendingBlankPause()
+        guard !wasPending else { return }
+        handleReturn()
+    }
+
+    private func handleReturn() {
         // The run loop is suspended during sleep, so the menu bar's deferred state refresh can be
         // missed — the paused task ends up without its orange pill. Nudge a refresh on wake.
         NotificationCenter.default.post(name: TimesliceNotifications.dataDidChange, object: nil)
 
+        // Cleared before any early return below, so a screen wake followed by a system wake can't
+        // prompt twice for the same pause.
         guard let resume = resumeAfterWake else { return }
         resumeAfterWake = nil
         // Prompts fully disabled → stay silent. Sleep still paused the timer (that's about
@@ -94,7 +165,7 @@ final class AutoPauseController: ObservableObject {
         guard settings.promptsEnabled else { return }
         // Only offer if that task still exists and isn't archived/finished.
         guard appState.selectableProjects.contains(where: { $0.id == resume.projectID }) else { return }
-        promptResume(projectID: resume.projectID, name: resume.name)
+        promptResume(projectID: resume.projectID, name: resume.name, because: resume.because)
     }
 
     // MARK: - Long-session checkpoint
@@ -248,10 +319,10 @@ final class AutoPauseController: ObservableObject {
         }
     }
 
-    private func promptResume(projectID: Int64, name: String) {
+    private func promptResume(projectID: Int64, name: String, because reason: String) {
         showPrompt(
             title: "Welcome back — resume “\(name)”?",
-            message: "Timeslice paused it when your Mac slept. Resume timing, or leave it paused?",
+            message: "Timeslice paused it when \(reason). Resume timing, or leave it paused?",
             primary: "Resume",
             secondary: "Leave paused"
         ) { [weak self] resume in

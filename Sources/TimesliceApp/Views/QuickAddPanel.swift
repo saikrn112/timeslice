@@ -9,6 +9,9 @@ import TimesliceCore
 @MainActor
 final class QuickAddPanel {
     private var window: NSPanel?
+    /// Reused across shows — see the note in SwitchHUD: rebuilding the hosting view each time was
+    /// the main cost before the palette appeared.
+    private var hosting: NSHostingView<AnyView>?
 
     /// `onResume(id)` starts an existing task; `onCreate(name, group)` makes a new one, in
     /// `group` when a `/project` token was typed.
@@ -30,13 +33,18 @@ final class QuickAddPanel {
             groupName: groupName,
             onCancel: { [weak self] in self?.close() }
         )
-        let hosting = NSHostingView(rootView: content)
-        hosting.frame = NSRect(x: 0, y: 0, width: 460, height: 340)
-
         let panel = window ?? makePanel()
-        panel.contentView = hosting
-        center(panel)
         window = panel
+        if let hosting {
+            hosting.rootView = AnyView(content)
+        } else {
+            let h = NSHostingView(rootView: AnyView(content))
+            h.frame = NSRect(x: 0, y: 0, width: 460, height: 340)
+            h.autoresizingMask = [.width, .height]
+            hosting = h
+            panel.contentView = h
+        }
+        center(panel)
 
         isPresenting = true
         // No NSApp.activate: it raises *every* window the app owns, which is what dragged an
@@ -85,6 +93,19 @@ final class QuickAddPanel {
         // Normally excluded from screen capture; in demo mode leave it visible for recordings.
         panel.sharingType = ProcessInfo.processInfo.environment["TIMESLICE_SEED_DEMO"] == "1" ? .readOnly : .none
         return panel
+    }
+
+    /// Build the panel and its SwiftUI hierarchy up front so the first fn+⌘+⇧+A doesn't pay for it.
+    func prewarm() {
+        guard window == nil else { return }
+        let panel = makePanel()
+        window = panel
+        let h = NSHostingView(rootView: AnyView(EmptyView()))
+        h.frame = NSRect(x: 0, y: 0, width: 460, height: 340)
+        h.autoresizingMask = [.width, .height]
+        hosting = h
+        panel.contentView = h
+        h.layoutSubtreeIfNeeded()
     }
 
     /// Truly centred, matching the switcher HUD — the two panels appear in the same place so

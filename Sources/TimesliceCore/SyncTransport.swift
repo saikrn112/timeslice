@@ -12,6 +12,12 @@ public protocol SyncTransport {
     func putRunning(_ marker: Data?, deviceID: String) throws
     /// Other devices' running markers.
     func fetchOtherRunning(excluding deviceID: String) throws -> [Data]
+    /// Markers paired with the transport's own last-modified time, when it has one.
+    ///
+    /// Used to judge whether a running claim is still being refreshed. A transport-side timestamp is
+    /// preferred over the marker's self-reported heartbeat because it's a single clock for all
+    /// devices, whereas trusting each peer's clock inherits the skew weakness LWW already has.
+    func fetchOtherRunningWithTimes(excluding deviceID: String) throws -> [(data: Data, modified: Date?)]
     /// Remove a device's payload — used to clean up self-test probes and retired devices.
     func deletePayload(deviceID: String) throws
     /// Delete payload files whose contents don't decode. They can't be addressed by device id
@@ -93,5 +99,13 @@ public struct FolderSyncTransport: SyncTransport {
             .filter { !$0.lastPathComponent.hasSuffix(".tmp") }
             .filter { !$0.lastPathComponent.hasPrefix(mine) }
             .compactMap { try? Data(contentsOf: $0) }
+    }
+}
+
+public extension SyncTransport {
+    /// Default for transports with no notion of a server timestamp (e.g. a plain folder): fall back
+    /// to the marker's own heartbeat by reporting no observation time.
+    func fetchOtherRunningWithTimes(excluding deviceID: String) throws -> [(data: Data, modified: Date?)] {
+        try fetchOtherRunning(excluding: deviceID).map { ($0, nil) }
     }
 }

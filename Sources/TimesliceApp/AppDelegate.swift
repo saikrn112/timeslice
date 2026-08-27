@@ -14,6 +14,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotkeys: GlobalHotkeyManager!
     private let hud = SwitchHUD()
     private let quickAdd = QuickAddPanel()
+
+    /// Keeps App Nap off for the app's whole lifetime, so a global hotkey is answered promptly.
+    ///
+    /// TimerEngine holds its own assertion, but only WHILE a timer ticks — so a paused or idle
+    /// Timeslice sitting in the background was nap-eligible, and the first fn+⌘+⇧+\ had to wake a
+    /// throttled process before it could draw anything.
+    ///
+    /// Deliberately `.userInitiatedAllowingIdleSystemSleep`, NOT `.userInitiated`: the latter
+    /// implies `.idleSystemSleepDisabled` and would stop the Mac sleeping on its own for as long as
+    /// Timeslice is open. Responsiveness shouldn't cost you idle sleep.
+    private var responsivenessActivity: NSObjectProtocol?
     private var autoPause: AutoPauseController?
     private var sync: SyncController?
     private let googleAuth = GoogleAuth()
@@ -61,6 +72,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         installMainMenu()
         setupHotkeys()
+
+        // Build the two hotkey panels now, while we're already doing launch work, so the first
+        // fn+⌘+⇧+\ or +A doesn't wait on SwiftUI construction. Nothing is shown.
+        hud.prewarm()
+        quickAdd.prewarm()
+
+        responsivenessActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep],
+            reason: "Global hotkeys must respond promptly"
+        )
 
         NotificationCenter.default.publisher(for: .openMainWindow)
             .sink { [weak self] _ in self?.showMainWindow() }

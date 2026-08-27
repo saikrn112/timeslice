@@ -106,9 +106,36 @@ public struct RunningMarker: Codable, Equatable, Sendable {
     /// Only a RUNNING marker can trigger a takeover. A paused one is presence, not a claim.
     public var claimsTimer: Bool { isRunning ?? true }
 
-    public init(deviceID: String, taskUID: String, since: TimeInterval, isRunning: Bool? = nil) {
+    /// Heartbeat: when this marker was last WRITTEN, as opposed to when the timer started.
+    ///
+    /// `since` never advances, so a marker abandoned by a crashed or sleeping device looks exactly
+    /// like one being actively maintained. Worse, a takeover picks the LATEST `since`, so an
+    /// abandoned claim keeps beating any timer started before it and pauses this device forever.
+    /// The publishing device already rewrites its marker on every poll, so liveness is being
+    /// transmitted — it just wasn't recorded anywhere comparable.
+    ///
+    /// Optional: markers from older builds have none, and those are treated as fresh rather than
+    /// dead, since assuming dead would let two timers run at once.
+    public var writtenAt: TimeInterval?
+
+    public init(deviceID: String, taskUID: String, since: TimeInterval, isRunning: Bool? = nil,
+                writtenAt: TimeInterval? = nil) {
         self.deviceID = deviceID; self.taskUID = taskUID; self.since = since
         self.isRunning = isRunning
+        self.writtenAt = writtenAt
+    }
+
+    /// Whether this claim is recent enough to act on, given when it was observed.
+    ///
+    /// `observedAt` lets a caller substitute the TRANSPORT's timestamp (Drive's server-side
+    /// modifiedTime) for the marker's self-reported one: comparing a peer's clock against ours has
+    /// the same skew weakness as LWW, and one server clock beats N device clocks.
+    public func isFresh(now: Date, cutoff: TimeInterval, observedAt: Date? = nil) -> Bool {
+        guard let stamp = observedAt ?? writtenAt.map({ Date(timeIntervalSince1970: $0) }) else {
+            return true      // no heartbeat available: treat as live, never invent a takeover
+        }
+        // A stamp in the future means the other clock is ahead, not that it's stale.
+        return now.timeIntervalSince(stamp) <= cutoff
     }
 }
 

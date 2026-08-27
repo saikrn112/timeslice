@@ -28,6 +28,15 @@ struct MetricsView: View {
     @State private var hoverHour: Double?
     @State private var hoveredSegment: DaySegment?
 
+    /// A "Where time went" row being hovered, which lights up every matching block on the day
+    /// timeline. Answers "when did that actually happen?" — the breakdown gives a total, but not
+    /// how it was spread across the day.
+    private enum TimelineFocus: Equatable {
+        case task(Int64)
+        case group(Int64?)      // nil = Inbox, matching a task's own nil taskProjectID
+    }
+    @State private var focus: TimelineFocus?
+
     // Drag-select on the day timeline: the anchor where the drag began and the live edge.
     // Both non-nil while dragging or while a completed selection is being shown.
     @State private var selectionAnchor: Double?
@@ -182,9 +191,9 @@ struct MetricsView: View {
             } else {
                 let lanes = Aggregations.laneCount(daySegments)
                 HStack(spacing: 6) {
-                    // Vertical device names down the left edge, one per lane, so each row of the
-                    // timeline says which machine it came from. Only shown when a day actually has
-                    // more than one device — otherwise the label is noise.
+                    // Device names down the left edge, one per lane, so each row says which machine
+                    // it came from. Names only — the times live on their own line below, where
+                    // there's room to read them.
                     if timelineDevices.count > 1 {
                         deviceLaneLabels(lanes: lanes)
                     }
@@ -198,10 +207,18 @@ struct MetricsView: View {
                         height: .fixed(lanes > 1 ? max(24, 110 / Double(lanes)) : 110)
                     )
                     .foregroundStyle(colorForProject(seg.projectID))
-                    .opacity(hoveredSegment == nil || hoveredSegment?.id == seg.id ? 1 : 0.35)
+                    .opacity(segmentOpacity(seg))
                     .cornerRadius(3)
                 }
                 .chartXScale(domain: 0...24)
+                // Pin the lane order. The y value is a STRING category, so Swift Charts otherwise
+                // orders lanes by FIRST APPEARANCE in the data — and the day's first block belongs
+                // to whichever device started earliest, not to lane 0. That put the lanes in a
+                // different order than the label column beside them, which reads 0,1,2 downwards,
+                // so the two devices' names appeared swapped.
+                //
+                // First element renders at the top, matching `ForEach(0..<lanes)` in the labels.
+                .chartYScale(domain: lanes > 1 ? (0..<lanes).map(String.init) : [""])
                 .chartXAxis {
                     AxisMarks(values: [0, 3, 6, 9, 12, 15, 18, 21, 24]) { value in
                         AxisGridLine()
@@ -306,9 +323,35 @@ struct MetricsView: View {
                 }
                 .frame(height: 150)
                 }
+                deviceTotals
                 if let summary = windowSummary { selectionReadout(summary) }
                 timelineLegend
             }
+        }
+    }
+
+    /// How prominent a timeline block should be.
+    ///
+    /// A hovered breakdown row wins over the cursor's own block: you're asking "where is this task",
+    /// so every instance of it should read at full strength and everything else recede. Dimmed
+    /// harder than the plain cursor case (0.12 vs 0.35) because the matches can be thin slivers that
+    /// otherwise don't stand out.
+    private func segmentOpacity(_ seg: DaySegment) -> Double {
+        if focus != nil, settings.highlightLinking {
+            return matchesFocus(seg) ? 1 : settings.highlightDimOpacity
+        }
+        return hoveredSegment == nil || hoveredSegment?.id == seg.id ? 1 : 0.35
+    }
+
+    private func matchesFocus(_ seg: DaySegment) -> Bool {
+        switch focus {
+        case .task(let id):
+            return seg.projectID == id
+        case .group(let groupID):
+            // Compare the OPTIONALS directly so Inbox (nil) matches only Inbox tasks.
+            return projectLookup[seg.projectID]?.taskProjectID == groupID
+        case nil:
+            return true
         }
     }
 
@@ -322,28 +365,89 @@ struct MetricsView: View {
         return deviceLabels[id] ?? id
     }
 
-    /// Rotated device names down the left edge of the timeline, aligned to their lanes. Each lane
-    /// gets an equal share of the plot height, matching the fixed BarMark heights above.
+    /// Rotated device names down the left edge, aligned to their lanes.
+    ///
+    /// Name only: the per-lane time made these long enough to be unreadable sideways, so the totals
+    /// moved to their own line under the plot.
     private func deviceLaneLabels(lanes: Int) -> some View {
-        // Lane -> device, taken from the segments themselves so a label can never drift from the
-        // row it names (a device may span several lanes when its own blocks overlap).
+        // Lane -> device taken from the segments themselves, so a label can't drift from the row it
+        // names (one device may span several lanes when its own blocks overlap).
         var owner: [Int: String?] = [:]
         for seg in daySegments where owner[seg.lane] == nil { owner[seg.lane] = seg.deviceID }
         return VStack(spacing: 0) {
             ForEach(0..<lanes, id: \.self) { lane in
-                Text(deviceName(owner[lane] ?? nil))
+                let device = owner[lane] ?? nil
+                Text(deviceName(device))
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .fixedSize()
                     .rotationEffect(.degrees(-90))
                     .frame(maxHeight: .infinity)
-                    .help(deviceName(owner[lane] ?? nil))
+                    .help("\(deviceName(device)) — \(compactDuration(deviceSeconds(device)))")
             }
         }
         .frame(width: 14, height: 110)
-        // Nudge down so the labels line up with the plot area rather than the axis strip.
+        // Nudge down so the labels line up with the plot area, not the axis strip.
         .padding(.bottom, 22)
+    }
+
+    /// Per-device totals as one quiet line under the timeline, in the same order as the lanes.
+    ///
+    /// Replaces rotated names down the plot edge: sideways text was hard to read and crowded the
+    /// chart. Row identity now comes from hovering a block (the tooltip names the device), so the
+    /// plot itself stays clean.
+    ///
+    /// Hidden for a single device, where every block has the same answer.
+    @ViewBuilder
+    private var deviceTotals: some View {
+        let devices = timelineDevices
+        if devices.count > 1 {
+            HStack(spacing: 10) {
+                ForEach(Array(devices.enumerated()), id: \.offset) { _, device in
+                    HStack(spacing: 4) {
+                        Text(deviceName(device))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Text(compactDuration(deviceSeconds(device)))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    /// A device's covered time in the visible range, honouring a selection like everything else.
+    ///
+    /// UNIONed per device rather than summed: a device's own blocks can overlap (that's why one
+    /// device may occupy several lanes), and summing would count those minutes twice. Note the
+    /// per-device figures can still exceed Tracked, which unions across ALL devices — two machines
+    /// timing the same minutes is one minute of wall-clock but a minute on each.
+    private func deviceSeconds(_ device: String?) -> TimeInterval {
+        let segs = (hasSelection ? segmentsInSelection : daySegments)
+            .filter { $0.deviceID == device }
+        let day = range.start
+        return SpanUnion.coveredSeconds(segs.map {
+            (start: day.addingTimeInterval($0.startHour * 3600),
+             end: day.addingTimeInterval($0.endHour * 3600))
+        })
+    }
+
+    /// Tight duration for the rotated lane labels, where horizontal room is ~14pt: `45s`, `12m`,
+    /// `6h`, `1d`. Deliberately coarser than `durationLabel` — "6h 41m" doesn't fit and the lane
+    /// label is a glance, not a readout (the tooltip and Sessions have the precise figures).
+    private func compactDuration(_ seconds: TimeInterval) -> String {
+        if seconds < 60 { return "\(Int(seconds.rounded()))s" }
+        let mins = seconds / 60
+        if mins < 60 { return "\(Int(mins.rounded()))m" }
+        let hours = mins / 60
+        if hours < 24 {
+            // One decimal below 10h so 6.7h doesn't read as a flat 6h, which loses too much.
+            return hours < 10 ? String(format: "%.1fh", hours) : "\(Int(hours.rounded()))h"
+        }
+        return String(format: "%.1fd", hours / 24)
     }
 
     // MARK: - Drag-selection on the day timeline
@@ -479,6 +583,12 @@ struct MetricsView: View {
                 .foregroundStyle(.secondary)
             Text(spanLabel(from: seg.startHour, to: seg.endHour))
                 .font(.system(size: 9)).foregroundStyle(.tertiary)
+            // Which machine recorded it — this is how a lane is identified now that the rows
+            // aren't labelled. Only when more than one device is in play.
+            if showDeviceColumn {
+                Text(deviceName(seg.deviceID))
+                    .font(.system(size: 9)).foregroundStyle(.tertiary)
+            }
         }
         .padding(.horizontal, 6).padding(.vertical, 3)
         .background(
@@ -522,6 +632,41 @@ struct MetricsView: View {
     // MARK: - Session list (day range)
 
     /// The day's blocks in order — the detail the single-bar charts couldn't give.
+    /// Tint for a "Where time went" row.
+    ///
+    /// The reverse of the timeline highlight: hovering a block on the timeline or a row in Sessions
+    /// lights up the task (or project) it belongs to here, so you can go from "when was that?" back
+    /// to "what was it, and how much in total?".
+    ///
+    /// Also tints the row under the cursor itself, so hovering gives feedback in both directions.
+    private func breakdownTint(taskID: Int64) -> Color {
+        // The row under the cursor still tints with linking off — that's plain hover feedback, not
+        // a cross-view link.
+        var hit = focus == .task(taskID)
+        if settings.highlightLinking { hit = hit || hoveredSegment?.projectID == taskID }
+        return hit ? Color.accentColor.opacity(0.15) : .clear
+    }
+
+    private func breakdownTint(groupID: Int64?) -> Color {
+        var hit = focus == .group(groupID)
+        if settings.highlightLinking, let seg = hoveredSegment {
+            // Compare the OPTIONALS directly so Inbox matches only ungrouped tasks.
+            hit = hit || projectLookup[seg.projectID]?.taskProjectID == groupID
+        }
+        return hit ? Color.accentColor.opacity(0.15) : .clear
+    }
+
+    /// Row background: tints every block belonging to a hovered "Where time went" row, so the
+    /// breakdown, the timeline and the session list all point at the same thing at once.
+    /// Falls back to the plain cursor highlight when nothing is focused.
+    private func sessionRowTint(_ seg: DaySegment) -> Color {
+        let plain = Color(nsColor: .controlBackgroundColor)
+        if focus != nil, settings.highlightLinking {
+            return matchesFocus(seg) ? Color.accentColor.opacity(0.15) : plain
+        }
+        return hoveredSegment?.id == seg.id ? Color.accentColor.opacity(0.15) : plain
+    }
+
     /// True once the data involves more than one device, so the column earns its width.
     private var showDeviceColumn: Bool {
         deviceLabels.count > 1 || Set(daySegments.map(\.deviceID)).count > 1
@@ -557,12 +702,12 @@ struct MetricsView: View {
                         }
                         deleteControl(for: seg)
                     }
+                    .opacity(focus == nil || !settings.highlightLinking || matchesFocus(seg)
+                             ? 1 : settings.highlightDimOpacity)
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(
                         RoundedRectangle(cornerRadius: 6)
-                            .fill(hoveredSegment?.id == seg.id
-                                  ? Color.accentColor.opacity(0.15)
-                                  : Color(nsColor: .controlBackgroundColor))
+                            .fill(sessionRowTint(seg))
                     )
                     .onHover { inside in
                         hoveredSegment = inside ? seg : nil
@@ -779,14 +924,14 @@ struct MetricsView: View {
                 // Rollup runs on the SAME totals, so grouped and ungrouped views always agree.
                 let rolled = Aggregations.rollUp(totals: totals, taskProjects: appState.taskProjects)
                 let maxSeconds = rolled.map(\.seconds).max() ?? 1
-                VStack(spacing: 8) {
+                VStack(spacing: 2) {
                     ForEach(rolled) { row in
                         groupRow(row, fraction: maxSeconds > 0 ? row.seconds / maxSeconds : 0)
                     }
                 }
             } else {
                 let maxSeconds = totals.map(\.seconds).max() ?? 1
-                VStack(spacing: 8) {
+                VStack(spacing: 2) {
                     ForEach(totals) { total in
                         rankRow(total, fraction: maxSeconds > 0 ? total.seconds / maxSeconds : 0)
                     }
@@ -835,6 +980,10 @@ struct MetricsView: View {
                 .font(.system(.caption, design: .monospaced)).monospacedDigit()
                 .foregroundStyle(.secondary).frame(width: 70, alignment: .trailing)
         }
+        .padding(.horizontal, 6).padding(.vertical, 3)
+        .background(RoundedRectangle(cornerRadius: 6).fill(breakdownTint(groupID: row.project?.id)))
+        .contentShape(Rectangle())
+        .onHover { inside in focus = inside ? .group(row.project?.id) : nil }
     }
 
     private func rankRow(_ total: ProjectTotal, fraction: Double) -> some View {
@@ -854,6 +1003,11 @@ struct MetricsView: View {
                 .font(.system(.caption, design: .monospaced)).monospacedDigit()
                 .foregroundStyle(.secondary).frame(width: 70, alignment: .trailing)
         }
+        .padding(.horizontal, 6).padding(.vertical, 3)
+        .background(RoundedRectangle(cornerRadius: 6).fill(breakdownTint(taskID: total.project.id)))
+        // contentShape so the gaps between elements are hoverable too, not just the text.
+        .contentShape(Rectangle())
+        .onHover { inside in focus = inside ? .task(total.project.id) : nil }
     }
 
     // MARK: - Bucket hover

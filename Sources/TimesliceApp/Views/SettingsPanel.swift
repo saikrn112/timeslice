@@ -56,6 +56,26 @@ struct SettingsPanel: View {
             .disabled(!settings.promptsEnabled)
 
             Divider()
+
+            Toggle(isOn: $settings.highlightLinking) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Linked highlighting")
+                    Text("hovering a task lights up its blocks in the timeline and sessions")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+
+            stepperRow(
+                title: "Dim others",
+                value: "\(settings.highlightDimPercent)%",
+                caption: "how far everything else fades while one task is highlighted",
+                onDec: { settings.highlightDimPercent = max(0, settings.highlightDimPercent - 5) },
+                onInc: { settings.highlightDimPercent = min(95, settings.highlightDimPercent + 5) }
+            )
+            .disabled(!settings.highlightLinking)
+
+            Divider()
             syncSection
         }
         .padding(16)

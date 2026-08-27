@@ -9,6 +9,10 @@ import TimesliceCore
 final class SwitchHUD {
     private var window: NSPanel?
     private var dismissWorkItem: DispatchWorkItem?
+    /// Built once and reused. A fresh `NSHostingView` per show meant every invocation — and every
+    /// cycle keystroke — paid SwiftUI tree construction and a first layout pass, which is the bulk
+    /// of the delay before the HUD appears.
+    private var hosting: NSHostingView<AnyView>?
 
     /// Show the revolver list while cycling. Stays up (no auto-dismiss) until commit/hide.
     /// `todaySeconds` maps task id → today's committed seconds. `runningID`/`clock` let the
@@ -50,14 +54,39 @@ final class SwitchHUD {
     }
 
     private func present(_ view: AnyView, size: NSSize) {
-        let hosting = NSHostingView(rootView: view)
-        hosting.frame = NSRect(origin: .zero, size: size)
         let panel = window ?? makePanel()
-        panel.setContentSize(size)
-        panel.contentView = hosting
+        window = panel
+        if let hosting {
+            // Swapping rootView reuses the existing view tree and its layout.
+            hosting.rootView = view
+            panel.setContentSize(size)
+        } else {
+            let h = NSHostingView(rootView: view)
+            h.frame = NSRect(origin: .zero, size: size)
+            h.autoresizingMask = [.width, .height]
+            hosting = h
+            panel.setContentSize(size)
+            panel.contentView = h
+        }
         center(panel)
         panel.orderFrontRegardless()
+    }
+
+    /// Build the panel and its SwiftUI hierarchy ahead of time, so the first hotkey press doesn't
+    /// pay for it. Cheap: nothing is ordered front, so nothing appears on screen.
+    func prewarm() {
+        guard window == nil else { return }
+        let panel = makePanel()
         window = panel
+        let size = switcherSize(count: 1)
+        let h = NSHostingView(rootView: AnyView(EmptyView()))
+        h.frame = NSRect(origin: .zero, size: size)
+        h.autoresizingMask = [.width, .height]
+        hosting = h
+        panel.setContentSize(size)
+        panel.contentView = h
+        // Force the hierarchy to lay out now rather than on first show.
+        h.layoutSubtreeIfNeeded()
     }
 
     private func makePanel() -> NSPanel {

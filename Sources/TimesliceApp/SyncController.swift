@@ -39,6 +39,8 @@ final class SyncController: ObservableObject {
         let currentTask: String?
         /// True when that task is actively timing; false when paused on it.
         let isRunning: Bool
+        /// The device stopped refreshing its marker, so what it reports can't be trusted as current.
+        let isStale: Bool
 
         /// Kept for call sites that only care about live timing.
         var runningTask: String? { isRunning ? currentTask : nil }
@@ -46,7 +48,7 @@ final class SyncController: ObservableObject {
         /// Green while timing, orange while paused on a task (the paused-highlight colour),
         /// grey when the device has no current task at all.
         var stateColor: Color {
-            if currentTask == nil { return Color.secondary.opacity(0.4) }
+            if currentTask == nil || isStale { return Color.secondary.opacity(0.4) }
             return isRunning ? .green : .orange
         }
 
@@ -393,9 +395,22 @@ final class SyncController: ObservableObject {
                     skipped += 1
                     continue
                 }
-                discovered.append(Peer(id: payload.deviceID, label: payload.deviceLabel,
-                                       lastSeen: Date(timeIntervalSince1970: payload.writtenAt),
-                                       isThisDevice: false, currentTask: nil, isRunning: false))
+                // One row per device even if Drive holds several files for it. Dedupe the DISPLAY
+                // only — the payload is still merged below, since skipping it could drop data if
+                // the copies differ. Keep the most recently written one's label/timestamp.
+                let seenAt = Date(timeIntervalSince1970: payload.writtenAt)
+                if let i = discovered.firstIndex(where: { $0.id == payload.deviceID }) {
+                    if seenAt > discovered[i].lastSeen {
+                        discovered[i] = Peer(id: payload.deviceID, label: payload.deviceLabel,
+                                             lastSeen: seenAt, isThisDevice: false,
+                                             currentTask: nil, isRunning: false, isStale: false)
+                    }
+                } else {
+                    discovered.append(Peer(id: payload.deviceID, label: payload.deviceLabel,
+                                           lastSeen: seenAt,
+                                           isThisDevice: false, currentTask: nil, isRunning: false,
+                                           isStale: false))
+                }
                 // Store writes must happen on the main actor — that's where the store lives.
                 let r = try await MainActor.run { try engineSync.merge(payload) }
                 combined.tasksAdded += r.tasksAdded
@@ -408,9 +423,16 @@ final class SyncController: ObservableObject {
                 combined.deletionsApplied += r.deletionsApplied
             }
 
-            // Takeover + presence need remote markers, fetched off-actor.
-            let markerData = try transport.fetchOtherRunning(excluding: deviceID)
-            let markers = markerData.compactMap { try? JSONDecoder().decode(RunningMarker.self, from: $0) }
+            // Takeover + presence need remote markers, fetched off-actor. Paired with Drive's own
+            // modifiedTime so staleness is judged against ONE clock rather than each peer's.
+            let markerData = try transport.fetchOtherRunningWithTimes(excluding: deviceID)
+            var markers: [RunningMarker] = []
+            var observedAt: [String: Date] = [:]
+            for (data, modified) in markerData {
+                guard let m = try? JSONDecoder().decode(RunningMarker.self, from: data) else { continue }
+                markers.append(m)
+                if let modified { observedAt[m.deviceID] = modified }
+            }
             let payload = try await MainActor.run { try engineSync.buildPayload() }
             let presence = await MainActor.run { self.currentPresenceMarker() }
 
@@ -447,8 +469,11 @@ final class SyncController: ObservableObject {
         // Running: the timer is live and this is a claim other devices must yield to.
         if let since = engine.runningSince, let taskID = engine.runningProjectID,
            let uid = ((try? store.uid(table: "projects", id: taskID)) ?? nil) {
+            // writtenAt is stamped NOW, not at `since`: it's a heartbeat, so other devices can tell
+            // an actively-maintained claim from one abandoned by a crash or sleep.
             return RunningMarker(deviceID: deviceID, taskUID: uid,
-                                 since: since.timeIntervalSince1970, isRunning: true)
+                                 since: since.timeIntervalSince1970, isRunning: true,
+                                 writtenAt: Date().timeIntervalSince1970)
         }
         // Paused: still publish, flagged not-running, so other devices can show what this one was
         // last on. Previously the marker was deleted here, so a paused device was indistinguishable
@@ -457,14 +482,17 @@ final class SyncController: ObservableObject {
            let uid = ((try? store.uid(table: "projects", id: taskID)) ?? nil) {
             let at = engine.pausedSince ?? Date()
             return RunningMarker(deviceID: deviceID, taskUID: uid,
-                                 since: at.timeIntervalSince1970, isRunning: false)
+                                 since: at.timeIntervalSince1970, isRunning: false,
+                                 writtenAt: Date().timeIntervalSince1970)
         }
         return nil   // genuinely idle: no current task at all
     }
 
     /// Peer list + takeover, given already-fetched markers.
-    private func applyMarkers(_ markers: [RunningMarker], discovered: [Peer]) {
-        var taskByDevice: [String: (name: String, running: Bool)] = [:]
+    private func applyMarkers(_ markers: [RunningMarker], discovered: [Peer],
+                              observedAt: [String: Date] = [:]) {
+        let now = Date()
+        var taskByDevice: [String: (name: String, running: Bool, live: Bool)] = [:]
         for m in markers {
             let name: String
             if let id = ((try? store.localID(table: "projects", uid: m.taskUID)) ?? nil),
@@ -473,7 +501,11 @@ final class SyncController: ObservableObject {
             } else {
                 name = "a task"   // not merged yet
             }
-            taskByDevice[m.deviceID] = (name, m.claimsTimer)
+            // A stale RUNNING marker must not read as "timing now" — that's the green row that
+            // lingered for a device which had already stopped.
+            let live = m.isFresh(now: now, cutoff: TakeoverPolicy.livenessCutoff,
+                                 observedAt: observedAt[m.deviceID])
+            taskByDevice[m.deviceID] = (name, m.claimsTimer && live, live)
         }
         let myTask = (engine.runningProjectID ?? engine.currentProjectID).flatMap { id in
             appState.projects.first { $0.id == id }?.name
@@ -481,15 +513,22 @@ final class SyncController: ObservableObject {
         let mine = Peer(id: deviceID,
                         label: settings.deviceLabel.isEmpty ? nil : settings.deviceLabel,
                         lastSeen: Date(), isThisDevice: true,
-                        currentTask: myTask, isRunning: engine.runningSince != nil)
+                        currentTask: myTask, isRunning: engine.runningSince != nil,
+                        isStale: false)
         peers = [mine] + discovered
             .map { Peer(id: $0.id, label: $0.label, lastSeen: $0.lastSeen, isThisDevice: false,
                         currentTask: taskByDevice[$0.id]?.name,
-                        isRunning: taskByDevice[$0.id]?.running ?? false) }
+                        isRunning: taskByDevice[$0.id]?.running ?? false,
+                        isStale: taskByDevice[$0.id].map { !$0.live } ?? false) }
             .sorted { $0.lastSeen > $1.lastSeen }
-        runningElsewhere = markers.filter(\.claimsTimer).max(by: { $0.since < $1.since })?.deviceID
+        runningElsewhere = markers
+            .filter { $0.claimsTimer && $0.isFresh(now: now, cutoff: TakeoverPolicy.livenessCutoff,
+                                                   observedAt: observedAt[$0.deviceID]) }
+            .max(by: { $0.since < $1.since })?.deviceID
 
-        if let decision = TakeoverPolicy.decide(localRunningSince: engine.runningSince, markers: markers) {
+        if let decision = TakeoverPolicy.decide(localRunningSince: engine.runningSince,
+                                               markers: markers, now: now,
+                                               observedAt: observedAt) {
             engine.pause(at: decision.pauseAt)
             // Prefer the device's own published label over its raw id.
             let label = peers.first { $0.id == decision.byDeviceID }?.displayName
@@ -503,12 +542,23 @@ final class SyncController: ObservableObject {
     /// Stop our timer if another device started one later. Silent by design — you're already
     /// working on the other machine, so a dialog here interrupts nothing.
     private func applyTakeover(_ transport: SyncTransport) throws {
-        let markers = try transport.fetchOtherRunning(excluding: deviceID).compactMap {
-            try? JSONDecoder().decode(RunningMarker.self, from: $0)
+        // Same freshness rule as the polling path: an abandoned marker outranks any earlier timer,
+        // so without this a crashed device would pause this one on every check.
+        let now = Date()
+        var markers: [RunningMarker] = []
+        var observedAt: [String: Date] = [:]
+        for (data, modified) in try transport.fetchOtherRunningWithTimes(excluding: deviceID) {
+            guard let m = try? JSONDecoder().decode(RunningMarker.self, from: data) else { continue }
+            markers.append(m)
+            if let modified { observedAt[m.deviceID] = modified }
         }
-        runningElsewhere = markers.filter(\.claimsTimer).max(by: { $0.since < $1.since })?.deviceID
+        runningElsewhere = markers
+            .filter { $0.claimsTimer && $0.isFresh(now: now, cutoff: TakeoverPolicy.livenessCutoff,
+                                                   observedAt: observedAt[$0.deviceID]) }
+            .max(by: { $0.since < $1.since })?.deviceID
         guard let decision = TakeoverPolicy.decide(
-            localRunningSince: engine.runningSince, markers: markers) else { return }
+            localRunningSince: engine.runningSince, markers: markers, now: now,
+            observedAt: observedAt) else { return }
         engine.pause(at: decision.pauseAt)
         appState.reload()
     }

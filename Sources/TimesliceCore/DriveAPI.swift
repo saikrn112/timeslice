@@ -57,24 +57,57 @@ public struct DriveAPI: Sendable {
     }
 
     /// Everything this app has stored, newest first.
+    /// Collapse repeated names to one entry each, keeping the most recently modified.
+    ///
+    /// Drive permits duplicate names, so one logical file can exist several times over — which is
+    /// what made a single device appear once per copy in the device list. Pure and public so the
+    /// rule is testable without a network.
+    public static func newestPerName(_ files: [RemoteFile]) -> [RemoteFile] {
+        var best: [String: RemoteFile] = [:]
+        for file in files {
+            if let existing = best[file.name],
+               (existing.modifiedTime ?? .distantPast) >= (file.modifiedTime ?? .distantPast) {
+                continue
+            }
+            best[file.name] = file
+        }
+        // Sorted by name so callers get a stable order regardless of dictionary iteration.
+        return best.values.sorted { $0.name < $1.name }
+    }
+
+    /// Everything this app has stored.
+    ///
+    /// Pages to the end rather than taking the first 100. A truncated listing is silently harmful
+    /// here: a file that falls off the page looks absent, so `upsert` would create yet another copy
+    /// of it — the failure compounds itself once duplicates start accumulating.
     public func list() async throws -> [RemoteFile] {
-        var c = URLComponents(string: Self.filesBase)!
-        c.queryItems = [
-            .init(name: "spaces", value: "appDataFolder"),
-            .init(name: "fields", value: "files(id,name,modifiedTime)"),
-            .init(name: "pageSize", value: "100"),
-        ]
-        let data = try await get(c.url!)
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let files = root["files"] as? [[String: Any]] else {
-            throw DriveError.malformed("files list")
-        }
         let iso = ISO8601DateFormatter()
-        return files.compactMap { f in
-            guard let id = f["id"] as? String, let name = f["name"] as? String else { return nil }
-            return RemoteFile(id: id, name: name,
-                              modifiedTime: (f["modifiedTime"] as? String).flatMap(iso.date(from:)))
+        var out: [RemoteFile] = []
+        var pageToken: String?
+        // Bounded so a malformed nextPageToken loop can't spin forever.
+        for _ in 0..<50 {
+            var c = URLComponents(string: Self.filesBase)!
+            var items: [URLQueryItem] = [
+                .init(name: "spaces", value: "appDataFolder"),
+                .init(name: "fields", value: "nextPageToken,files(id,name,modifiedTime)"),
+                .init(name: "pageSize", value: "1000"),
+            ]
+            if let pageToken { items.append(.init(name: "pageToken", value: pageToken)) }
+            c.queryItems = items
+            let data = try await get(c.url!)
+            guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let files = root["files"] as? [[String: Any]] else {
+                throw DriveError.malformed("files list")
+            }
+            out += files.compactMap { f in
+                guard let id = f["id"] as? String, let name = f["name"] as? String else { return nil }
+                return RemoteFile(id: id, name: name,
+                                  modifiedTime: (f["modifiedTime"] as? String).flatMap(iso.date(from:)))
+            }
+            guard let next = root["nextPageToken"] as? String, !next.isEmpty else { break }
+            pageToken = next
         }
+        return out
     }
 
     public func download(id: String) async throws -> Data {

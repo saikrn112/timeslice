@@ -345,11 +345,15 @@ public enum Aggregations {
     /// Devices in order of first appearance — a stable, caller-visible row order.
     /// nil (unattributed) sorts last so named devices keep the top rows.
     public static func orderedDevices(_ segments: [DaySegment]) -> [String?] {
-        var seen: [String?] = []
-        for seg in segments.sorted(by: { $0.startHour < $1.startHour }) where !seen.contains(seg.deviceID) {
-            seen.append(seg.deviceID)
-        }
-        return seen.filter { $0 != nil } + seen.filter { $0 == nil }
+        // Sorted by id, NOT by first appearance. First-appearance order changed as soon as an
+        // earlier block arrived from a peer, so a device's row moved on its own between syncs —
+        // whichever device happened to have the earliest synced block took the top lane. Sorting by
+        // a fixed key keeps a device on the same row all day, regardless of what has arrived yet.
+        //
+        // nil (unattributed, pre-attribution rows) sorts last so named devices keep the top lanes.
+        let ids = Set(segments.map(\.deviceID))
+        return ids.compactMap { $0 }.sorted().map { Optional($0) }
+            + (ids.contains(nil) ? [nil] : [])
     }
 
     /// Greedy first-fit: each segment takes the lowest free lane at or after `baseLane`.

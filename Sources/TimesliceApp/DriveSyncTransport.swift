@@ -49,6 +49,15 @@ final class DriveSyncTransport: SyncTransport {
         try fetch(suffix: ".running", excluding: deviceID)
     }
 
+    /// Markers paired with Drive's own last-modified time.
+    ///
+    /// The server timestamp is preferable to the marker's self-reported heartbeat for judging
+    /// staleness: comparing against a peer's clock inherits the same skew weakness as LWW, whereas
+    /// this is one clock for all devices. Falls back to the in-marker value when Drive omits it.
+    func fetchOtherRunningWithTimes(excluding deviceID: String) throws -> [(data: Data, modified: Date?)] {
+        try fetchWithTimes(suffix: ".running", excluding: deviceID)
+    }
+
     func deleteUnreadablePayloads(excluding deviceID: String) -> Int {
         let mine = "device-\(deviceID)"
         guard let files = try? blocking({ try await self.api.list() }) else { return 0 }
@@ -65,24 +74,42 @@ final class DriveSyncTransport: SyncTransport {
         return removed
     }
 
+    /// Remove every file belonging to `deviceID` — all payload copies and its marker.
+    ///
+    /// Deletes by listing rather than by cached id: the id cache holds one id per NAME, so
+    /// duplicates were invisible to it and retiring a device left the extra copies behind (each
+    /// still showing as its own row).
     func deletePayload(deviceID: String) throws {
-        let name = payloadName(deviceID)
-        guard let id = try lookup(name: name) else { return }
-        try blocking { try await self.api.delete(id: id) }
-        cacheLock.lock(); idCache[name] = nil; cacheLock.unlock()
+        let prefix = "device-\(deviceID)"
+        let files = try blocking { try await self.api.list() }
+        for file in files where file.name.hasPrefix(prefix) {
+            try? blocking { try await self.api.delete(id: file.id) }
+            cacheLock.lock(); idCache[file.name] = nil; cacheLock.unlock()
+        }
     }
 
     // MARK: - Helpers
 
     private func fetch(suffix: String, excluding deviceID: String) throws -> [Data] {
+        try fetchWithTimes(suffix: suffix, excluding: deviceID).map(\.data)
+    }
+
+    /// One entry per logical file, newest kept when duplicates share a name.
+    ///
+    /// Duplicates are possible because Drive permits repeated names, so a single device can own
+    /// several payload files. Without collapsing them the same payload is downloaded and merged
+    /// once per copy, and the device shows up once per copy in the device list.
+    private func fetchWithTimes(suffix: String, excluding deviceID: String) throws
+        -> [(data: Data, modified: Date?)] {
         let mine = "device-\(deviceID)"
         let files = try blocking { try await self.api.list() }
         refreshCache(files)
-        return try files
-            .filter { $0.name.hasSuffix(suffix) && !$0.name.hasPrefix(mine) }
-            .compactMap { file in
-                try? blocking { try await self.api.download(id: file.id) }
-            }
+        let mineExcluded = files.filter { $0.name.hasSuffix(suffix) && !$0.name.hasPrefix(mine) }
+        return DriveAPI.newestPerName(mineExcluded).compactMap { file in
+            guard let data = try? blocking({ try await self.api.download(id: file.id) })
+            else { return nil }
+            return (data, file.modifiedTime)
+        }
     }
 
     /// Create on first write, PATCH thereafter — Drive allows duplicate names, so without the id
@@ -92,10 +119,15 @@ final class DriveSyncTransport: SyncTransport {
             do {
                 try blocking { try await self.api.update(id: id, contents: contents) }
                 return
-            } catch {
-                // The cached id can outlive the file — deleting it elsewhere (cleanup, another
-                // device, the Drive UI) leaves us PATCHing something gone, which Drive answers
-                // with 404. Forget the id and fall through to creating it again.
+            } catch DriveAPI.DriveError.notFound {
+                // ONLY a 404 means the file is genuinely gone (deleted by cleanup, another device,
+                // or the Drive UI); recreating it is then correct.
+                //
+                // Every other failure must rethrow. Catching them all treated a transient error as
+                // "file missing" and created a SECOND file — and Drive allows duplicate names, so a
+                // stale token (401) or a network blip silently forked another copy every publish.
+                // That is how one device ended up with a dozen payload files and appeared a dozen
+                // times in the device list.
                 cacheLock.lock(); idCache[name] = nil; cacheLock.unlock()
             }
         }

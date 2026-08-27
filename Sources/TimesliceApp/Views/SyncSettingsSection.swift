@@ -202,7 +202,16 @@ struct SyncSettingsSection: View {
                 }
             }
             Spacer(minLength: 6)
-            if let task = peer.currentTask {
+            if let task = peer.currentTask, peer.isStale {
+                // The device stopped refreshing its marker (crash, sleep, quit mid-timer). Show
+                // what it was on, but greyed and past-tense — it used to sit here in green
+                // indefinitely, reading as though it were still timing.
+                Text("was on \(task)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .help("No update in a while — this device may be asleep or closed")
+            } else if let task = peer.currentTask {
                 // Green = timing now, orange = paused on it, matching the menu-bar paused pill. A
                 // paused device used to show nothing at all, so there was no way to tell what it
                 // had been on.
