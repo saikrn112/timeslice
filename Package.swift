@@ -5,6 +5,11 @@ let package = Package(
     name: "Timeslice",
     platforms: [
         .macOS("14.0"),
+        // iOS 17 is the floor the Action Button sets (iPhone 15 Pro); Live Activities themselves
+        // only need 16.1. Only `TimesliceCore` is expected to build for iOS — the `TimesliceApp`
+        // executable is AppKit and stays Mac-only, and Xcode never builds it because the iOS
+        // targets depend on the `TimesliceCore` product alone.
+        .iOS("17.0"),
     ],
     products: [
         .library(name: "TimesliceCore", targets: ["TimesliceCore"]),
