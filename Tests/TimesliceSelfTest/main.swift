@@ -2533,6 +2533,60 @@ func testInlineBarContrast() {
     }
 }
 
+
+// MARK: - TaskOrdering (shared recency order)
+
+/// Hoisted out of the Mac's `AppState` so the phone's task list and Action Button wheel order tasks
+/// identically. The rules are subtle enough that a second implementation would drift, so they're
+/// pinned here rather than trusted to two call sites agreeing.
+func testTaskOrdering() {
+    print("\nTask ordering:")
+
+    func p(_ id: Int64) -> Project {
+        Project(id: id, name: "t\(id)", colorHex: "#4E79A7", sortOrder: Int(id), archived: false)
+    }
+    let display = [p(1), p(2), p(3), p(4)]
+    let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
+    do { // more recent first
+        let order = TaskOrdering.recencyOrdered(
+            display: display,
+            lastActivity: [1: t0, 2: t0.addingTimeInterval(100), 3: t0.addingTimeInterval(50)],
+            current: nil).map(\.id)
+        check(order.prefix(3).elementsEqual([2, 3, 1]), "most recently worked comes first")
+        check(order.last == 4, "never-tracked task sinks to the tail")
+    }
+
+    do { // the current task is PINNED to index 0, even when another is more recent
+        let order = TaskOrdering.recencyOrdered(
+            display: display,
+            lastActivity: [1: t0, 2: t0.addingTimeInterval(999)],
+            current: 1).map(\.id)
+        check(order.first == 1, "current task is pinned to index 0")
+        check(order.dropFirst().first == 2, "index 1 is the task you came from — alt-tab behaviour")
+    }
+
+    do { // A -> B leaves both with the SAME activity time; pinning is what breaks the tie correctly
+        let same = t0
+        let order = TaskOrdering.recencyOrdered(
+            display: display, lastActivity: [1: same, 2: same], current: 2).map(\.id)
+        check(order.first == 2,
+              "equal timestamps: the current task still leads, so one press returns to the other")
+        check(order.dropFirst().first == 1, "...and the one just left sits at index 1")
+    }
+
+    do { // untracked tasks keep DISPLAY order among themselves, rather than interleaving randomly
+        let order = TaskOrdering.recencyOrdered(
+            display: [p(9), p(3), p(7)], lastActivity: [:], current: nil).map(\.id)
+        check(order == [9, 3, 7], "all-untracked keeps displayed order (stable, not arbitrary)")
+    }
+
+    do { // ordering must be a no-op on an empty list rather than trapping
+        check(TaskOrdering.recencyOrdered(display: [], lastActivity: [:], current: 5).isEmpty,
+              "empty input yields empty output")
+    }
+}
+
 // MARK: - Run
 
 do {
@@ -2565,6 +2619,7 @@ do {
     testTargetMath()
     testPalette()
     testInlineBarContrast()
+    testTaskOrdering()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1

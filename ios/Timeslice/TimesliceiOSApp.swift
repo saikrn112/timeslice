@@ -6,7 +6,7 @@ struct TimesliceiOSApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
         }
         .onChange(of: scenePhase) { _, phase in
             // Re-read on foreground rather than keeping a ticking clock alive: elapsed time is

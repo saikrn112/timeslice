@@ -167,12 +167,9 @@ final class AppState: ObservableObject {
         let all = (try? store.listProjects(includeArchived: false)) ?? []
         let activity = (try? store.lastActivityByProject()) ?? [:]
         // Also match a task by its PROJECT's name — typing "inference" should surface the tasks
-        // in that project, not just tasks literally called that.
-        var groupNames: [Int64: String] = [:]
-        for task in all {
-            if let gid = task.taskProjectID,
-               let g = taskProjects.first(where: { $0.id == gid }) { groupNames[task.id] = g.name }
-        }
+        // in that project, not just tasks literally called that. Built in Core so the phone's
+        // search field uses the identical mapping.
+        let groupNames = TaskSearch.groupNames(tasks: all, groups: taskProjects)
         return TaskSearch.rank(query: query, projects: all, lastActivity: activity,
                                groupNames: groupNames, limit: limit)
     }
@@ -404,31 +401,14 @@ final class AppState: ObservableObject {
 
     /// Tasks most-recently-worked first — the switcher's order.
     ///
-    /// This makes `\` behave like alt-tab: index 0 is the current task, index 1 is the one you were
-    /// on before it, so a single press lands on the task you just came from. Tasks you bounce
-    /// between stay at the front; ones you haven't touched in weeks sink to the back instead of
-    /// sitting in the middle of the cycle because of where they happen to appear in the list.
-    ///
-    /// Never-tracked tasks have no recency at all, so they keep displayed order behind the rest
-    /// (an arbitrary-but-stable tail beats interleaving them randomly).
+    /// The rules live in `TaskOrdering.recencyOrdered` (Core) because the phone's task list and
+    /// Action Button wheel need the identical ordering; see that function for why the current task
+    /// is pinned and why untracked tasks form a stable tail.
     var recencyOrderedProjects: [Project] {
-        let activity = (try? store.lastActivityByProject()) ?? [:]
-        let display = selectableProjects
-        let displayRank = Dictionary(uniqueKeysWithValues: display.enumerated().map { ($1.id, $0) })
-        // The current task is pinned to index 0 rather than left to the timestamps. Switching A -> B
-        // closes A at the exact instant B starts, so both carry the same activity time and the tie
-        // broke on display order — sometimes putting the task you just left at index 0 and the one
-        // you're on at index 1, which inverts what one press of `\` does.
-        let current = engine.runningProjectID ?? engine.currentProjectID
-        return display.sorted { a, b in
-            if (a.id == current) != (b.id == current) { return a.id == current }
-            switch (activity[a.id], activity[b.id]) {
-            case let (x?, y?) where x != y: return x > y            // more recent first
-            case (nil, _?): return false                            // untracked sinks
-            case (_?, nil): return true
-            default: return (displayRank[a.id] ?? 0) < (displayRank[b.id] ?? 0)
-            }
-        }
+        TaskOrdering.recencyOrdered(
+            display: selectableProjects,
+            lastActivity: (try? store.lastActivityByProject()) ?? [:],
+            current: engine.runningProjectID ?? engine.currentProjectID)
     }
 
     /// Freeze the switcher's order and return it, so the HUD and the cycling agree.
