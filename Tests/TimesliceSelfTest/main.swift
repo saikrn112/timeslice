@@ -2733,6 +2733,57 @@ func testCreateProjectFilesIntoGroup() throws {
     check(byTask[inbox]?.contains(tagID) != true, "an Inbox task inherits nothing")
 }
 
+
+/// `rangeTotals` is the general form of `todayTotals`. Added because "Where time went" needs per-task
+/// figures for an arbitrary range, and every caller was otherwise trimming intervals by hand — the
+/// DST/midnight-sensitive arithmetic that must not exist twice.
+func testRangeTotals() throws {
+    print("\nRange totals:")
+    let (store, url) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let a = try store.createProject(name: "alpha", colorHex: "#4E79A7")
+    let b = try store.createProject(name: "beta", colorHex: "#F28E2B")
+    let tasks = try store.listProjects(includeArchived: true)
+    let now = date(2026, 3, 11, 12, 0)
+
+    // Fully inside the day.
+    try store.insertClosedInterval(projectID: a, start: date(2026, 3, 11, 9, 0),
+                                   end: date(2026, 3, 11, 11, 0))
+    // Straddles midnight INTO the day — only the post-midnight hour counts.
+    try store.insertClosedInterval(projectID: a, start: date(2026, 3, 10, 23, 0),
+                                   end: date(2026, 3, 11, 1, 0))
+    // Entirely before the day — must not count at all.
+    try store.insertClosedInterval(projectID: b, start: date(2026, 3, 9, 9, 0),
+                                   end: date(2026, 3, 9, 10, 0))
+    let intervals = try store.intervals()
+
+    let day = DateRange.resolve(unit: .day, anchor: now, calendar: cal)
+    let totals = Aggregations.rangeTotals(projects: tasks, intervals: intervals, range: day, now: now)
+    let byID = Dictionary(uniqueKeysWithValues: totals.map { ($0.project.id, $0.seconds) })
+
+    check(approx(byID[a] ?? -1, 3 * 3600, 1),
+          "2h inside + 1h of a midnight-straddling session = 3h, not 4h")
+    check(approx(byID[b] ?? -1, 0, 1), "an interval entirely outside the range contributes nothing")
+
+    // Widening the range must pick the earlier session up rather than change the clipping rules.
+    let month = DateRange.resolve(unit: .month, anchor: now, calendar: cal)
+    let wide = Aggregations.rangeTotals(projects: tasks, intervals: intervals, range: month, now: now)
+    let wideByID = Dictionary(uniqueKeysWithValues: wide.map { ($0.project.id, $0.seconds) })
+    check(approx(wideByID[a] ?? -1, 4 * 3600, 1), "over a month, both of alpha's sessions count fully")
+    check(approx(wideByID[b] ?? -1, 3600, 1), "beta's earlier hour appears once the range includes it")
+
+    // Agrees with todayTotals for a day range — they must not be two different clippings.
+    let viaToday = Aggregations.todayTotals(projects: tasks, intervals: intervals, now: now,
+                                            calendar: cal)
+    let todayByID = Dictionary(uniqueKeysWithValues: viaToday.map { ($0.project.id, $0.seconds) })
+    check(approx(todayByID[a] ?? -1, byID[a] ?? -2, 1),
+          "rangeTotals over a day equals todayTotals")
+
+    // Every project appears, including ones with no time — the UI filters, the maths doesn't.
+    check(totals.count == tasks.count, "a row per project, zeroes included")
+}
+
 // MARK: - Run
 
 do {
@@ -2768,6 +2819,7 @@ do {
     testTaskOrdering()
     try testCreateProjectFilesIntoGroup()
     try testBudgetRows()
+    try testRangeTotals()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1

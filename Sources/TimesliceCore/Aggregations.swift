@@ -43,6 +43,23 @@ public enum Aggregations {
         }
     }
 
+    /// Seconds per project clipped to an arbitrary range — the general form of `todayTotals`.
+    ///
+    /// Added because "Where time went" needs per-task totals for whatever range is selected, and
+    /// without it every caller hand-rolls its own interval trimming. That trimming is exactly the
+    /// midnight/DST-sensitive part, so a second copy of it is how the phone's totals would start
+    /// disagreeing with the Mac's.
+    public static func rangeTotals(
+        projects: [Project],
+        intervals: [Interval],
+        range: DateRange,
+        now: Date = Date()
+    ) -> [ProjectTotal] {
+        totals(projects: projects, intervals: intervals) {
+            clip($0, windowStart: range.start, windowEnd: range.end, now: now)
+        }
+    }
+
     private static func totals(
         projects: [Project],
         intervals: [Interval],

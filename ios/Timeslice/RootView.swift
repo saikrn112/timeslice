@@ -1,4 +1,5 @@
 import SwiftUI
+import TimesliceCore
 
 /// Tasks / Metrics / Budgets, mirroring the Mac's main-window tabs.
 ///
@@ -16,23 +17,32 @@ struct RootView: View {
 
     /// Preselects a tab, so every screen can be screenshotted headlessly:
     ///
-    /// ```
-    /// xcrun simctl spawn booted defaults write com.timeslice.ios TimesliceStartTab -string budgets
+    /// ```bash
+    /// C=$(xcrun simctl get_app_container booted com.timeslice.ios data)   # AFTER installing
+    /// echo -n budgets > "$C/Library/Application Support/Timeslice/start-tab"
+    /// xcrun simctl terminate booted com.timeslice.ios
     /// xcrun simctl launch booted com.timeslice.ios
     /// ```
     ///
     /// `simctl` can boot, install, launch and screenshot, but it cannot tap a tab bar — so without
     /// this, verifying Metrics or Budgets would need a human, which the plan asks to avoid.
     ///
-    /// A preference rather than a launch argument or environment variable, because **neither reaches
-    /// the app through `simctl launch`** on Xcode 26 — both were tried and logged: `--tab budgets`
-    /// arrived as nothing (the process saw only its executable path), and `SIMCTL_CHILD_TIMESLICE_TAB`
-    /// arrived as nil. A preference is set from outside the process entirely, so nothing can swallow
-    /// it, and it can be changed between screenshots without reinstalling.
+    /// A plain FILE, after three other mechanisms silently failed on Xcode 26 (each doing nothing
+    /// rather than erroring, which is what made this worth documenting):
     ///
-    /// An unrecognised value falls through to Tasks, so a stale preference can't break a real launch.
+    /// | Attempt | What actually happened |
+    /// |---|---|
+    /// | `simctl launch … --tab budgets` | swallowed by simctl; the process saw only its own path |
+    /// | `SIMCTL_CHILD_TIMESLICE_TAB=…` | arrived as nil |
+    /// | `defaults write` into the container plist | `cfprefsd` caches prefs, so the app never saw it |
+    ///
+    /// A file read at launch is cached by nothing. It sits beside the database, the same place
+    /// `TimeslicePaths` already keeps `device-id`. Absent or unrecognised falls through to Tasks, so
+    /// this cannot affect a real install.
     private static var launchTab: Tab? {
-        UserDefaults.standard.string(forKey: "TimesliceStartTab").flatMap(Tab.init(rawValue:))
+        let url = TimeslicePaths.defaultSupportDirectoryURL().appendingPathComponent("start-tab")
+        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        return Tab(rawValue: raw.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     var body: some View {

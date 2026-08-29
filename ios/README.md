@@ -57,12 +57,16 @@ xcodebuild -project ios/Timeslice.xcodeproj -scheme TimesliceiOS \
 a `TimesliceStartTab` preference on launch:
 
 ```bash
-C=$(xcrun simctl get_app_container booted com.timeslice.ios data)
-defaults write "$C/Library/Preferences/com.timeslice.ios" TimesliceStartTab -string budgets
+xcrun simctl install booted "$APP"                                  # install FIRST
+C=$(xcrun simctl get_app_container booted com.timeslice.ios data)   # container UUID changes on install
+printf metrics > "$C/Library/Application Support/Timeslice/start-tab"   # tasks | metrics | budgets
 xcrun simctl terminate booted com.timeslice.ios
 xcrun simctl launch booted com.timeslice.ios
-xcrun simctl io booted screenshot /tmp/shot.png      # values: tasks | metrics | budgets
+xcrun simctl io booted screenshot /tmp/shot.png
 ```
+
+Resolve the container **after** installing — reinstalling changes its UUID, and writing to the old
+path silently does nothing.
 
 Write the plist **inside the app's data container**, as above. Three other routes were tried and all
 silently fail on Xcode 26:
@@ -72,9 +76,11 @@ silently fail on Xcode 26:
 | `simctl launch … --tab budgets` | swallowed by simctl; the app saw only its executable path |
 | `SIMCTL_CHILD_TIMESLICE_TAB=…` | arrived as nil |
 | `simctl spawn booted defaults write com.timeslice.ios …` | writes the simulator's global domain, not the sandboxed container |
+| `defaults write` into the container plist | `cfprefsd` caches preferences, so the app never read it |
 
-Each failed by doing nothing rather than erroring, so verify the preference reads back
-(`defaults read "$C/Library/Preferences/com.timeslice.ios"`) before concluding a screen is broken.
+A plain file is cached by nothing. Every one of the four alternatives failed by doing **nothing**
+rather than erroring, which is why this is written down — the symptom is "the screen looks wrong",
+not an error. `cat` the file back before concluding a screen is broken.
 
 Contrary to the plan's §7, **screenshots do not need a TCC grant on the iOS Simulator** — that
 restriction applies to capturing the macOS desktop. Every screen here has been verified this way.
