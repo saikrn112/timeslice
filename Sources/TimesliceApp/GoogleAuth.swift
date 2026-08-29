@@ -66,7 +66,7 @@ final class GoogleAuth: ObservableObject {
         defer { listener.stop() }
         NSLog("[timeslice-auth] listening on 127.0.0.1:\(listener.port)")
 
-        let url = GoogleOAuth.authorizationURL(pkce: pkce, port: listener.port, state: state)
+        let url = GoogleOAuth.authorizationURL(pkce: pkce, redirect: .loopback(port: listener.port), state: state)
         let opened = NSWorkspace.shared.open(url)
         NSLog("[timeslice-auth] opened browser: \(opened)")
 
@@ -89,7 +89,7 @@ final class GoogleAuth: ObservableObject {
         NSLog("[timeslice-auth] got authorization code, exchanging…")
 
         let tokens = try await exchange(
-            body: GoogleOAuth.tokenRequestBody(code: code, pkce: pkce, port: listener.port))
+            body: GoogleOAuth.tokenRequestBody(code: code, pkce: pkce, redirect: .loopback(port: listener.port)))
         guard let refresh = tokens.refreshToken else {
             NSLog("[timeslice-auth] exchange OK but no refresh_token returned")
             throw AuthError.noRefreshToken

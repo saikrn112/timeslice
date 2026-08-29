@@ -29,8 +29,15 @@ public enum GoogleOAuth {
 
     /// True when sync can be offered at all. Without credentials the feature stays hidden rather
     /// than failing at the consent screen.
+    ///
+    /// The secret is required only for the Desktop client type the Mac uses; an iOS client has none,
+    /// so demanding one there would hide sync permanently.
     public static var isConfigured: Bool {
-        !clientID.isEmpty && !clientSecret.isEmpty
+        #if os(macOS)
+        return !clientID.isEmpty && !clientSecret.isEmpty
+        #else
+        return !clientID.isEmpty
+        #endif
     }
 
     public static let configFilePath = "~/.config/timeslice/env"
@@ -104,16 +111,38 @@ public enum GoogleOAuth {
         }
     }
 
-    /// Consent URL for a loopback redirect on `port`.
+    /// Where Google sends the authorization code back to.
     ///
-    /// Loopback (not a custom scheme) is why a Desktop client needs no registered redirect URI:
-    /// Google accepts any `http://127.0.0.1:<port>` for this client type, so the app can grab a
-    /// free port at runtime instead of shipping a fixed list.
-    public static func authorizationURL(pkce: PKCE, port: Int, state: String) -> URL {
+    /// Abstracted because the two platforms cannot share one answer. A Mac can open a socket and
+    /// catch the redirect; an iPhone cannot usefully run a web server, and `ASWebAuthenticationSession`
+    /// only reports back through a custom URL scheme. The redirect URI must be byte-identical in the
+    /// consent request and the token exchange or Google rejects the exchange, so it is one value
+    /// passed to both rather than a string built twice.
+    public enum Redirect: Sendable, Equatable {
+        /// Desktop client: Google accepts any `http://127.0.0.1:<port>`, which is why this client
+        /// type needs no registered redirect URI — the app takes a free port at runtime.
+        case loopback(port: Int)
+
+        /// Installed-app client (what iOS requires). The scheme is **not** arbitrary: Google only
+        /// accepts the reversed client id, e.g.
+        /// `com.googleusercontent.apps.1234-abcd:/oauth`. A `timeslice://oauth` scheme — which the
+        /// design note proposed — is refused for this client type.
+        case customScheme(String)
+
+        public var uriString: String {
+            switch self {
+            case .loopback(let port): return "http://127.0.0.1:\(port)"
+            case .customScheme(let uri): return uri
+            }
+        }
+    }
+
+    /// Consent URL for `redirect`.
+    public static func authorizationURL(pkce: PKCE, redirect: Redirect, state: String) -> URL {
         var c = URLComponents(string: authEndpoint)!
         c.queryItems = [
             .init(name: "client_id", value: clientID),
-            .init(name: "redirect_uri", value: "http://127.0.0.1:\(port)"),
+            .init(name: "redirect_uri", value: redirect.uriString),
             .init(name: "response_type", value: "code"),
             .init(name: "scope", value: scope),
             .init(name: "code_challenge", value: pkce.challenge),
@@ -126,14 +155,17 @@ public enum GoogleOAuth {
         return c.url!
     }
 
-    public static func tokenRequestBody(code: String, pkce: PKCE, port: Int) -> Data {
+    public static func tokenRequestBody(code: String, pkce: PKCE, redirect: Redirect) -> Data {
         form([
             "client_id": clientID,
+            // Omitted entirely when empty: a Desktop client must send it (Google answers
+            // "client_secret is missing." otherwise), but an iOS client has none and sending an
+            // empty one is an error rather than a no-op.
             "client_secret": clientSecret,
             "code": code,
             "code_verifier": pkce.verifier,
             "grant_type": "authorization_code",
-            "redirect_uri": "http://127.0.0.1:\(port)",
+            "redirect_uri": redirect.uriString,
         ])
     }
 
@@ -146,9 +178,13 @@ public enum GoogleOAuth {
         ])
     }
 
+    /// Empty values are dropped rather than sent blank, so a client type that has no
+    /// `client_secret` (iOS) doesn't transmit `client_secret=` and get rejected for it.
     private static func form(_ fields: [String: String]) -> Data {
         var c = URLComponents()
-        c.queryItems = fields.map { URLQueryItem(name: $0.key, value: $0.value) }
+        c.queryItems = fields
+            .filter { !$0.value.isEmpty }
+            .map { URLQueryItem(name: $0.key, value: $0.value) }
         return Data((c.percentEncodedQuery ?? "").utf8)
     }
 

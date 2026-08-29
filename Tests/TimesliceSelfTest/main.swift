@@ -293,7 +293,8 @@ func testOAuthPKCE() {
     }
 
     do { // the consent URL carries what Google needs
-        let url = GoogleOAuth.authorizationURL(pkce: GoogleOAuth.PKCE(), port: 51789, state: "st")
+        let url = GoogleOAuth.authorizationURL(
+            pkce: GoogleOAuth.PKCE(), redirect: .loopback(port: 51789), state: "st")
         let s = url.absoluteString
         check(s.hasPrefix(GoogleOAuth.authEndpoint), "points at Google's auth endpoint")
         check(s.contains("code_challenge_method=S256"), "declares S256")
@@ -315,32 +316,57 @@ func testOAuthPKCE() {
         check(denied.code == nil, "...with no code")
     }
 
-    do { // token bodies must carry BOTH the verifier and the secret.
+    do { // token bodies must carry the verifier, and the secret whenever there is one.
         // Google rejects the exchange with "client_secret is missing." even for a Desktop client
-        // using PKCE. Omitting it made sign-in fail silently, so pin both here.
+        // using PKCE. Omitting it made sign-in fail silently, so pin it here.
         let body = String(decoding: GoogleOAuth.tokenRequestBody(
-            code: "c", pkce: GoogleOAuth.PKCE(), port: 1), as: UTF8.self)
+            code: "c", pkce: GoogleOAuth.PKCE(), redirect: .loopback(port: 1)), as: UTF8.self)
         check(body.contains("code_verifier="), "exchange sends the PKCE verifier")
-        check(body.contains("client_secret="), "exchange sends client_secret (Google requires it)")
         check(body.contains("grant_type=authorization_code"), "correct grant for the exchange")
 
         let refresh = String(decoding: GoogleOAuth.refreshRequestBody(refreshToken: "r"),
                             as: UTF8.self)
         check(refresh.contains("grant_type=refresh_token"), "refresh uses the right grant")
-        check(refresh.contains("client_secret="), "refresh also needs client_secret")
 
         // The AUTH url must never carry the secret — that would leak it into browser history.
-        let authURL = GoogleOAuth.authorizationURL(pkce: GoogleOAuth.PKCE(), port: 1, state: "s")
+        let authURL = GoogleOAuth.authorizationURL(
+            pkce: GoogleOAuth.PKCE(), redirect: .loopback(port: 1), state: "s")
         check(!authURL.absoluteString.contains("client_secret"),
               "secret stays out of the authorization URL")
+
         // Credentials are supplied at runtime (env or ~/.config/timeslice/env), never committed,
         // so a bare checkout legitimately has none. Assert the plumbing, not the value.
+        //
+        // Empty fields are now DROPPED rather than sent blank, because an iOS client has no secret
+        // and `client_secret=` is an error there rather than a no-op. So the presence of the field
+        // tracks whether a secret exists — which is the property worth pinning either way.
         if GoogleOAuth.isConfigured {
             check(!GoogleOAuth.clientSecret.isEmpty, "configured secret is non-empty")
             check(body.contains("client_secret="), "configured secret reaches the exchange")
+            check(refresh.contains("client_secret="), "refresh also carries the secret")
         } else {
             check(GoogleOAuth.clientID.isEmpty, "unconfigured build reports no client id")
+            check(!body.contains("client_secret="), "no secret means the field is omitted, not blank")
         }
+    }
+
+    do { // the redirect URI must be identical in both legs, or Google refuses the exchange
+        let scheme = GoogleOAuth.Redirect.customScheme("com.googleusercontent.apps.123-abc:/oauth")
+        check(scheme.uriString == "com.googleusercontent.apps.123-abc:/oauth",
+              "custom scheme is passed through verbatim")
+        check(GoogleOAuth.Redirect.loopback(port: 8080).uriString == "http://127.0.0.1:8080",
+              "loopback builds the Desktop-client redirect")
+
+        let authURL = GoogleOAuth.authorizationURL(
+            pkce: GoogleOAuth.PKCE(), redirect: scheme, state: "s").absoluteString
+        let exchange = String(decoding: GoogleOAuth.tokenRequestBody(
+            code: "c", pkce: GoogleOAuth.PKCE(), redirect: scheme), as: UTF8.self)
+        // Both legs must agree. This is the failure the Redirect type exists to make impossible:
+        // building the string twice let the consent and exchange drift apart.
+        check(authURL.contains("com.googleusercontent.apps.123-abc"),
+              "consent URL carries the custom-scheme redirect")
+        check(exchange.contains("redirect_uri=com.googleusercontent.apps.123-abc"),
+              "token exchange carries the SAME redirect")
     }
 }
 
