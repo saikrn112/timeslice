@@ -12,10 +12,11 @@ struct SettingsPanel: View {
             Text("Settings").font(.headline)
 
             stepperRow(
-                title: "Daily goal",
-                value: "\(Int(settings.dailyGoalHours))h",
-                onDec: { settings.dailyGoalHours = max(1, settings.dailyGoalHours - 1) },
-                onInc: { settings.dailyGoalHours = min(24, settings.dailyGoalHours + 1) }
+                title: "Awake hours",
+                value: "\(Int(settings.wakingHours))h",
+                caption: "what \"used\" is measured against — the rest is unaccounted",
+                onDec: { settings.wakingHours = max(4, settings.wakingHours - 1) },
+                onInc: { settings.wakingHours = min(24, settings.wakingHours + 1) }
             )
 
             stepperRow(
@@ -57,15 +58,6 @@ struct SettingsPanel: View {
 
             Divider()
 
-            Toggle(isOn: $settings.highlightLinking) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Linked highlighting")
-                    Text("hovering a task lights up its blocks in the timeline and sessions")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-            }
-            .toggleStyle(.switch)
-
             stepperRow(
                 title: "Dim others",
                 value: "\(settings.highlightDimPercent)%",
@@ -73,7 +65,6 @@ struct SettingsPanel: View {
                 onDec: { settings.highlightDimPercent = max(0, settings.highlightDimPercent - 5) },
                 onInc: { settings.highlightDimPercent = min(95, settings.highlightDimPercent + 5) }
             )
-            .disabled(!settings.highlightLinking)
 
             Divider()
             syncSection

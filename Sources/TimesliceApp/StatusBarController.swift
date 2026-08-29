@@ -201,8 +201,12 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             popover.performClose(sender)
         } else if let button = statusItem.button {
             appState.reload()
-            // Default the highlight to the current (running/paused) task, else the first task.
-            appState.selectedProjectID = engine.currentProjectID ?? appState.projects.first?.id
+            // Freeze recency order for as long as the popover is open, so the rows and the ↑/↓ keys
+            // walk the SAME list. Without the freeze the list would re-rank under the cursor and the
+            // arrows would track a different order than the one on screen.
+            let ordered = appState.beginSwitcherSession()
+            // Default the highlight to the current (running/paused) task, else the top of the list.
+            appState.selectedProjectID = engine.currentProjectID ?? ordered.first?.id
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             if let window = popover.contentViewController?.view.window {
                 window.makeKey()                  // key WITHOUT NSApp.activate, so the main
@@ -238,6 +242,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     func popoverDidClose(_ notification: Notification) {
+        // Release the frozen order so the next open re-ranks with whatever you just worked on first.
+        appState.endSwitcherSession()
         removePopoverKeyMonitor()
     }
 

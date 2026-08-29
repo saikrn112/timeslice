@@ -59,9 +59,28 @@ public struct SyncEngine {
                                          deviceID: iv.deviceID ?? deviceID))
         }
 
+        // Tags, links and budgets. Both ends of a link and a budget's subject travel as UIDs —
+        // local row ids differ per device, so `subject_id = 8` means something else over there.
+        let tagRecords = try store.tagsWithUIDs().map {
+            SyncPayload.TagRecord(uid: $0.uid, name: $0.tag.name, colorHex: $0.tag.colorHex,
+                                  sortOrder: $0.tag.sortOrder, updatedAt: $0.updatedAt)
+        }
+        let linkRecords = try store.tagLinksForExport().map {
+            SyncPayload.TagLinkRecord(uid: $0.uid, tagUID: $0.tagUID, subjectKind: $0.subjectKind,
+                                      subjectUID: $0.subjectUID, updatedAt: $0.updatedAt)
+        }
+        let targetRecords = try store.targetsForExport().map {
+            SyncPayload.TargetRecord(uid: $0.uid, subjectKind: $0.subjectKind,
+                                     subjectUID: $0.subjectUID, seconds: $0.seconds,
+                                     direction: $0.direction, period: $0.period,
+                                     updatedAt: $0.updatedAt, createdAt: $0.createdAt,
+                                     completedAt: $0.completedAt)
+        }
+
         let tombs = try store.tombstoneRecords()
         return SyncPayload(deviceID: deviceID, deviceLabel: deviceLabel,
                            writtenAt: now.timeIntervalSince1970,
+                           tags: tagRecords, tagLinks: linkRecords, targets: targetRecords,
                            tasks: taskRecords, projects: projectRecords,
                            intervals: intervalRecords, tombstones: tombs)
     }
@@ -175,6 +194,73 @@ public struct SyncEngine {
                                            end: Date(timeIntervalSince1970: iv.end),
                                            deviceID: iv.deviceID ?? remote.deviceID)
             report.intervalsAdded += 1
+        }
+
+        // ---- Tags, then links, then budgets ----
+        //
+        // Strictly in that order: a link needs its tag AND its subject to exist locally, and a budget
+        // needs its subject. Tasks and projects were merged above, so by here every subject a peer
+        // could reference is either present or deliberately deleted.
+
+        // Tags merge BY NAME, like projects: two devices that each created "office" mean one tag, and
+        // inserting both would violate the case-insensitive unique index anyway.
+        var tagIDByUID: [String: Int64] = [:]
+        for t in (remote.tags ?? []) where !deleted.contains(t.uid) {
+            if let existing = try store.localID(table: "tags", uid: t.uid) {
+                tagIDByUID[t.uid] = existing
+                if try store.applyRemoteTagEdit(uid: t.uid, name: t.name, colorHex: t.colorHex,
+                                                sortOrder: t.sortOrder,
+                                                remoteUpdatedAt: t.updatedAt) {
+                    report.tagEditsApplied += 1
+                }
+            } else if let byName = try store.tag(named: t.name) {
+                tagIDByUID[t.uid] = byName.id
+                report.tagsMergedByName.append(byName.name)
+                // Converge on ONE uid by a stable rule (lexically smaller), so later renames match by
+                // uid instead of arriving as a second tag. Colour follows the same rule as projects.
+                if let mineUID = try store.uid(table: "tags", id: byName.id), t.uid < mineUID {
+                    try store.adoptTagUID(id: byName.id, uid: t.uid)
+                    tagIDByUID[t.uid] = byName.id
+                }
+                if t.colorHex < byName.colorHex {
+                    try store.setTagColor(id: byName.id, colorHex: t.colorHex)
+                }
+            } else {
+                tagIDByUID[t.uid] = try store.insertRemoteTag(
+                    uid: t.uid, name: t.name, colorHex: t.colorHex,
+                    sortOrder: t.sortOrder, updatedAt: t.updatedAt)
+                report.tagsAdded += 1
+            }
+        }
+
+        let haveLinks = try store.uidsPresent(table: "tag_links")
+        for l in (remote.tagLinks ?? [])
+        where !haveLinks.contains(l.uid) && !deleted.contains(l.uid) && !deleted.contains(l.tagUID) {
+            guard let tagID = try tagIDByUID[l.tagUID] ?? store.localID(table: "tags", uid: l.tagUID),
+                  let table = IntervalStore.table(forSubjectKind: l.subjectKind),
+                  let subjectID = try store.localID(table: table, uid: l.subjectUID),
+                  let subject = TargetSubject(kind: l.subjectKind, id: subjectID)
+            else { continue }   // tag or subject not here (deleted, or not yet merged) — skip, retry next sync
+            try store.insertRemoteTagLink(uid: l.uid, tagID: tagID, subject: subject,
+                                          updatedAt: l.updatedAt)
+            report.tagLinksAdded += 1
+        }
+
+        for t in (remote.targets ?? []) where !deleted.contains(t.uid) {
+            guard let table = IntervalStore.table(forSubjectKind: t.subjectKind),
+                  let subjectID = try store.localID(table: table, uid: t.subjectUID),
+                  let subject = TargetSubject(kind: t.subjectKind, id: subjectID),
+                  let direction = Target.Direction(rawValue: t.direction),
+                  let period = Target.Period(rawValue: t.period)
+            else { continue }
+            // A budget on a deleted tag is dead weight; don't resurrect the pointer.
+            if case .tag = subject, deleted.contains(t.subjectUID) { continue }
+            if try store.applyRemoteTarget(uid: t.uid, subject: subject, seconds: t.seconds,
+                                           direction: direction, period: period,
+                                           remoteUpdatedAt: t.updatedAt,
+                                           createdAt: t.createdAt, completedAt: t.completedAt) {
+                report.targetsApplied += 1
+            }
         }
         return report
     }

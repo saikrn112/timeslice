@@ -18,6 +18,14 @@ public struct SyncPayload: Codable, Equatable, Sendable {
     public var intervals: [IntervalRecord]
     public var tombstones: [TombstoneRecord]
 
+    /// Tags, tag links and budgets.
+    ///
+    /// OPTIONAL so a payload written by a build that predates them still decodes — a missing key
+    /// would otherwise make the whole file unreadable and silently stop syncing with that device.
+    public var tags: [TagRecord]?
+    public var tagLinks: [TagLinkRecord]?
+    public var targets: [TargetRecord]?
+
     public struct TaskRecord: Codable, Equatable, Sendable {
         public var uid: String
         public var name: String
@@ -70,6 +78,61 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         }
     }
 
+    public struct TagRecord: Codable, Equatable, Sendable {
+        public var uid: String
+        public var name: String
+        public var colorHex: String
+        public var sortOrder: Int
+        public var updatedAt: TimeInterval
+
+        public init(uid: String, name: String, colorHex: String, sortOrder: Int,
+                    updatedAt: TimeInterval) {
+            self.uid = uid; self.name = name; self.colorHex = colorHex
+            self.sortOrder = sortOrder; self.updatedAt = updatedAt
+        }
+    }
+
+    /// "This tag applies to this task/project."
+    ///
+    /// Both ends travel as UIDs, never local ids: row ids are per-device, so `subject_id = 8` means a
+    /// different project on the other machine. This is the same trap that made interval attribution
+    /// need uids.
+    public struct TagLinkRecord: Codable, Equatable, Sendable {
+        public var uid: String
+        public var tagUID: String
+        public var subjectKind: String        // "task" | "project"
+        public var subjectUID: String
+        public var updatedAt: TimeInterval
+
+        public init(uid: String, tagUID: String, subjectKind: String, subjectUID: String,
+                    updatedAt: TimeInterval) {
+            self.uid = uid; self.tagUID = tagUID; self.subjectKind = subjectKind
+            self.subjectUID = subjectUID; self.updatedAt = updatedAt
+        }
+    }
+
+    public struct TargetRecord: Codable, Equatable, Sendable {
+        public var uid: String
+        public var subjectKind: String        // "task" | "project" | "tag"
+        public var subjectUID: String
+        public var seconds: TimeInterval
+        public var direction: String
+        public var period: String
+        public var updatedAt: TimeInterval
+        /// Optional so a payload from a build without the done state still decodes; absent means live.
+        public var createdAt: TimeInterval?
+        public var completedAt: TimeInterval?
+
+        public init(uid: String, subjectKind: String, subjectUID: String, seconds: TimeInterval,
+                    direction: String, period: String, updatedAt: TimeInterval,
+                    createdAt: TimeInterval? = nil, completedAt: TimeInterval? = nil) {
+            self.uid = uid; self.subjectKind = subjectKind; self.subjectUID = subjectUID
+            self.seconds = seconds; self.direction = direction; self.period = period
+            self.updatedAt = updatedAt
+            self.createdAt = createdAt; self.completedAt = completedAt
+        }
+    }
+
     public struct TombstoneRecord: Codable, Equatable, Sendable {
         public var uid: String
         public var kind: String        // "interval" | "task" | "task_project"
@@ -81,11 +144,14 @@ public struct SyncPayload: Codable, Equatable, Sendable {
     }
 
     public init(deviceID: String, deviceLabel: String? = nil, writtenAt: TimeInterval,
+                tags: [TagRecord]? = nil, tagLinks: [TagLinkRecord]? = nil,
+                targets: [TargetRecord]? = nil,
                 tasks: [TaskRecord], projects: [ProjectRecord], intervals: [IntervalRecord],
                 tombstones: [TombstoneRecord]) {
         self.deviceID = deviceID; self.deviceLabel = deviceLabel
         self.writtenAt = writtenAt; self.tasks = tasks
         self.projects = projects; self.intervals = intervals; self.tombstones = tombstones
+        self.tags = tags; self.tagLinks = tagLinks; self.targets = targets
     }
 }
 
@@ -151,6 +217,11 @@ public struct MergeReport: Equatable, Sendable {
     public var projectEditsApplied = 0
     /// Rows whose device attribution the sender corrected (see reattributeInterval).
     public var intervalsReattributed = 0
+    public var tagsAdded = 0
+    public var tagsMergedByName: [String] = []
+    public var tagEditsApplied = 0
+    public var tagLinksAdded = 0
+    public var targetsApplied = 0
     public var deletionsApplied = 0
 
     public init() {}
@@ -160,5 +231,7 @@ public struct MergeReport: Equatable, Sendable {
             && projectsMergedByName.isEmpty && taskEditsApplied == 0
             && projectEditsApplied == 0 && deletionsApplied == 0
             && intervalsReattributed == 0
+            && tagsAdded == 0 && tagsMergedByName.isEmpty && tagEditsApplied == 0
+            && tagLinksAdded == 0 && targetsApplied == 0
     }
 }

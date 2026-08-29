@@ -22,6 +22,10 @@ struct ProjectListView: View {
     /// Creating a project with nothing selected — an empty group you then drag tasks into.
     @State private var creatingEmptyProject = false
 
+    /// Project awaiting a brand-new tag, and the name being typed.
+    @State private var taggingProjectID: Int64?
+    @State private var newTagName = ""
+
     /// WhatsApp-forward-style selection mode: tick boxes appear, and an action bar slides in to
     /// assign everything ticked in one go. Off by default so the list stays clean.
     @State private var selecting = false
@@ -117,6 +121,26 @@ struct ProjectListView: View {
             Text("This clears all tracked time for the task but keeps the task itself.")
         }
         // Naming a brand-new project for a task. A sheet (not a dialog) because it takes input.
+        .sheet(isPresented: Binding(
+            get: { taggingProjectID != nil },
+            set: { if !$0 { taggingProjectID = nil; newTagName = "" } }
+        )) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("New tag").font(.headline)
+                TextField("Tag name", text: $newTagName)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { commitNewTag() }
+                HStack {
+                    Spacer()
+                    Button("Cancel") { taggingProjectID = nil; newTagName = "" }
+                    Button("Create") { commitNewTag() }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(newTagName.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            .padding(16)
+            .frame(width: 300)
+        }
         .sheet(isPresented: Binding(
             get: { newProjectFor != nil || creatingEmptyProject },
             set: { if !$0 { newProjectFor = nil; creatingEmptyProject = false; newProjectName = "" } }
@@ -271,6 +295,24 @@ struct ProjectListView: View {
             }
 
             Text("\(section.totals.count)").font(.caption2).foregroundStyle(.tertiary)
+
+            // Tags, in their own colour but small and unweighted — the header is deliberately tiny,
+            // so these have to read as an annotation rather than another control.
+            if let tags = appState.tagsByProject[section.id], !tags.isEmpty {
+                HStack(spacing: 4) {
+                    ForEach(tags) { tag in
+                        Text(tag.name)
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color(hex: tag.colorHex).opacity(0.9))
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(
+                                Capsule().fill(Color(hex: tag.colorHex).opacity(0.14))
+                            )
+                    }
+                }
+                .help("Tags on this project — right-click to change")
+            }
+
             Spacer()
 
             // Time then buttons, in the same order as a task row, so the columns line up.
@@ -317,6 +359,7 @@ struct ProjectListView: View {
         .contextMenu {
             if section.id != -1 {
                 Button("Rename…") { beginGroupRename(section) }
+                tagMenu(for: section.id)
                 Divider()
                 Button("Delete project", role: .destructive) {
                     // Tasks fall back to Inbox — never destroys tracked time.
@@ -768,6 +811,56 @@ struct ProjectListView: View {
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(isRunning ? Color.green.opacity(0.7) : Color.black.opacity(0.04), lineWidth: isRunning ? 1.5 : 0.5)
             )
+    }
+
+// MARK: - Tags
+
+    /// Tag assignment lives in a context menu rather than on the row: the project header is
+    /// deliberately tiny, and tags are set once in a while, not per glance.
+    ///
+    /// Only projects can be tagged from the UI for now. Tasks can carry tags too — the store and
+    /// schema already support it — so exposing that later needs no migration.
+    @ViewBuilder
+    private func tagMenu(for projectID: Int64) -> some View {
+        let assigned = Set((try? store.tagIDs(for: .project(projectID))) ?? [])
+        Menu("Tags") {
+            ForEach(allTags) { tag in
+                Button {
+                    if assigned.contains(tag.id) {
+                        try? store.removeTag(tag.id, from: .project(projectID))
+                    } else {
+                        try? store.addTag(tag.id, to: .project(projectID))
+                    }
+                    appState.reload()
+                } label: {
+                    // A leading tick stands in for a checkbox; Menu doesn't offer a real one.
+                    Text(assigned.contains(tag.id) ? "✓ \(tag.name)" : "   \(tag.name)")
+                }
+            }
+            if !allTags.isEmpty { Divider() }
+            Button("New tag…") {
+                newTagName = ""
+                taggingProjectID = projectID
+            }
+        }
+    }
+
+    /// Read straight from the store rather than cached: the menu is built on demand, so a stale
+    /// list can't be shown, and this runs once per right-click rather than per render.
+    private var allTags: [Tag] { appState.allTags }
+
+    private func commitNewTag() {
+        let name = newTagName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, let projectID = taggingProjectID else { return }
+        // upsertTag reuses an existing name, so typing one you already have attaches it rather
+        // than creating a second tag that would split its totals.
+        if let tagID = try? store.upsertTag(name: name,
+                                           colorHex: Palette.color(forIndex: allTags.count)) {
+            try? store.addTag(tagID, to: .project(projectID))
+        }
+        taggingProjectID = nil
+        newTagName = ""
+        appState.reload()
     }
 
     // MARK: - Actions
