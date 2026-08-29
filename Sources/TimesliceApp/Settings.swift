@@ -13,10 +13,6 @@ final class Settings: ObservableObject {
     }
 
     /// Daily target hours (goal line on the daily-hours chart).
-    @Published var dailyGoalHours: Double {
-        didSet { defaults.set(dailyGoalHours, forKey: Keys.dailyGoalHours) }
-    }
-
     /// Prompt "still working?" after a session has run this long (0 = off).
     @Published var autoPauseMinutes: Int {
         didSet { defaults.set(autoPauseMinutes, forKey: Keys.autoPauseMinutes) }
@@ -35,11 +31,17 @@ final class Settings: ObservableObject {
         didSet { defaults.set(promptsEnabled, forKey: Keys.promptsEnabled) }
     }
 
-    /// Whether hovering one view highlights the matching rows/blocks in the others (breakdown ⇄
-    /// timeline ⇄ sessions). On by default; off for anyone who finds the movement distracting.
-    @Published var highlightLinking: Bool {
-        didSet { defaults.set(highlightLinking, forKey: Keys.highlightLinking) }
+    /// Hours you're awake on a typical day — the denominator for "how much of my day did I
+    /// actually use".
+    ///
+    /// Replaced the old "daily goal", which stopped meaning anything once everything gets tracked
+    /// rather than just work: 4h against an 8h work target said nothing about the other 12 hours.
+    /// Per-subject commitments are Budgets' job now.
+    @Published var wakingHours: Double {
+        didSet { defaults.set(wakingHours, forKey: Keys.wakingHours) }
     }
+
+    var wakingSeconds: TimeInterval { wakingHours * 3600 }
 
     /// How far non-matching items fade while something is highlighted, as a percentage.
     /// 0 = no dimming at all (matches are picked out only by what tints), 90 = nearly invisible.
@@ -79,7 +81,6 @@ final class Settings: ObservableObject {
     }
 
     var deepBlockSeconds: TimeInterval { TimeInterval(deepBlockMinutes * 60) }
-    var dailyGoalSeconds: TimeInterval { dailyGoalHours * 3600 }
 
     /// The nudge thresholds as the (unit-tested) policy type in TimesliceCore.
     var nudgeConfig: NudgePolicy.Config {
@@ -95,11 +96,10 @@ final class Settings: ObservableObject {
 
     init() {
         deepBlockMinutes = defaults.object(forKey: Keys.deepBlockMinutes) as? Int ?? 25
-        dailyGoalHours = defaults.object(forKey: Keys.dailyGoalHours) as? Double ?? 10
         autoPauseMinutes = defaults.object(forKey: Keys.autoPauseMinutes) as? Int ?? 60
         idleNudgeMinutes = defaults.object(forKey: Keys.idleNudgeMinutes) as? Int ?? 15
         promptsEnabled = defaults.object(forKey: Keys.promptsEnabled) as? Bool ?? true
-        highlightLinking = defaults.object(forKey: Keys.highlightLinking) as? Bool ?? true
+        wakingHours = defaults.object(forKey: Keys.wakingHours) as? Double ?? 16
         highlightDimPercent = defaults.object(forKey: Keys.highlightDimPercent) as? Int ?? 85
         // A sandbox run can point both instances at one folder without touching real settings.
         deviceLabel = defaults.string(forKey: Keys.deviceLabel) ?? ""
@@ -117,11 +117,10 @@ final class Settings: ObservableObject {
 
     private enum Keys {
         static let deepBlockMinutes = "deepBlockMinutes"
-        static let dailyGoalHours = "dailyGoalHours"
         static let autoPauseMinutes = "autoPauseMinutes"
         static let idleNudgeMinutes = "idleNudgeMinutes"
         static let promptsEnabled = "promptsEnabled"
-        static let highlightLinking = "highlightLinking"
+        static let wakingHours = "wakingHours"
         static let highlightDimPercent = "highlightDimPercent"
         static let syncFolderPath = "syncFolderPath"
         static let syncMode = "syncMode"

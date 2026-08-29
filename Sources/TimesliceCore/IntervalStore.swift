@@ -138,6 +138,74 @@ public final class IntervalStore {
         // index makes the constraint match the lookup.
         _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_projects_name_nocase ON task_projects(name COLLATE NOCASE)", nil, nil, nil)
 
+        // MARK: Tags and targets
+        //
+        // A tag is a flat label attached to a PROJECT or an individual TASK; a task inherits its
+        // project's tags. Deliberately not a third level in the hierarchy — tags overlap freely and
+        // don't have to cover everything, so nothing new has to be filled in when creating a task.
+        //
+        // `subject_kind` + `subject_id` rather than two nullable columns: one link row shape, and
+        // adding a future subject type doesn't change the schema.
+        _ = sqlite3_exec(db, """
+            CREATE TABLE IF NOT EXISTS tags (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                name       TEXT NOT NULL,
+                color_hex  TEXT NOT NULL DEFAULT '#8E8E93',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                uid        TEXT,
+                updated_at REAL,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+            """, nil, nil, nil)
+        // Case-insensitive uniqueness, matching how task_projects learned it the hard way: a
+        // case-SENSITIVE constraint lets "Office" and "office" coexist while lookups pick one
+        // arbitrarily, and a merge would create exactly that pair.
+        _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_name_nocase ON tags(name COLLATE NOCASE)", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_uid ON tags(uid)", nil, nil, nil)
+
+        _ = sqlite3_exec(db, """
+            CREATE TABLE IF NOT EXISTS tag_links (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                tag_id       INTEGER NOT NULL REFERENCES tags(id),
+                subject_kind TEXT NOT NULL,          -- 'task' | 'project'
+                subject_id   INTEGER NOT NULL,
+                uid          TEXT,
+                updated_at   REAL
+            )
+            """, nil, nil, nil)
+        // One link per (tag, subject) — re-tagging must be idempotent rather than piling up rows.
+        _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_tag_links_unique ON tag_links(tag_id, subject_kind, subject_id)", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_tag_links_uid ON tag_links(uid)", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_tag_links_subject ON tag_links(subject_kind, subject_id)", nil, nil, nil)
+
+        // A target can point at a task, a project OR a tag, so a per-project budget needs no tag
+        // and a cross-project one needs no restructuring.
+        _ = sqlite3_exec(db, """
+            CREATE TABLE IF NOT EXISTS targets (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_kind TEXT NOT NULL,          -- 'task' | 'project' | 'tag'
+                subject_id   INTEGER NOT NULL,
+                seconds      REAL NOT NULL,
+                direction    TEXT NOT NULL,          -- 'atLeast' | 'atMost'
+                period       TEXT NOT NULL,          -- 'day' | 'week' | 'month'
+                uid          TEXT,
+                updated_at   REAL
+            )
+            """, nil, nil, nil)
+        // ONE target per subject — the period is a property of it, not part of its identity.
+        //
+        // Keying on (subject, period) meant changing the period in the editor INSERTED a second
+        // target instead of moving the existing one, and the editor only ever showed the first: the
+        // extra became invisible and un-editable while still appearing in the metrics list. It also
+        // let one subject carry contradictory budgets ("<=1h/week" and ">=1h/day" at once).
+        //
+        // Collapse any pre-existing duplicates first, keeping the newest (the latest intent) — the
+        // unique index below would otherwise fail and leave the old one in place.
+        _ = sqlite3_exec(db, "DELETE FROM targets WHERE id NOT IN (SELECT MAX(id) FROM targets GROUP BY subject_kind, subject_id)", nil, nil, nil)
+        _ = sqlite3_exec(db, "DROP INDEX IF EXISTS idx_targets_subject", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_one_per_subject ON targets(subject_kind, subject_id)", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_uid ON targets(uid)", nil, nil, nil)
+
         try backfillSyncColumns()
     }
 
@@ -145,7 +213,9 @@ public final class IntervalStore {
     /// a no-op on every launch after the first.
     private func backfillSyncColumns() throws {
         let now = Date().timeIntervalSince1970
-        for table in ["intervals", "projects", "task_projects"] {
+        // tags/tag_links/targets included: a row with no uid can't be addressed by a peer, so it
+        // would stay invisible to sync forever.
+        for table in ["intervals", "projects", "task_projects", "tags", "tag_links", "targets"] {
             let stmt = try prepare("SELECT id FROM \(table) WHERE uid IS NULL")
             var ids: [Int64] = []
             while sqlite3_step(stmt) == SQLITE_ROW { ids.append(sqlite3_column_int64(stmt, 0)) }
@@ -172,7 +242,7 @@ public final class IntervalStore {
         }
 
         // Seed updated_at so LWW has a baseline; real edits overwrite it.
-        for table in ["projects", "task_projects"] {
+        for table in ["projects", "task_projects", "tags", "tag_links", "targets"] {
             let stmt = try prepare("UPDATE \(table) SET updated_at = ? WHERE updated_at IS NULL")
             sqlite3_bind_double(stmt, 1, now)
             try step(stmt)
@@ -312,6 +382,7 @@ public final class IntervalStore {
     /// Permanently delete a project and all its intervals. Destructive — removes time history.
     public func deleteProject(id: Int64) throws {
         try transaction {
+            try detachSubjectLocked(.task(id))
             // Tombstone before deleting — afterwards the uids are gone.
             try recordTombstoneLocked(uid: try uidLocked(table: "projects", id: id), kind: "task")
             for uid in try intervalUIDsLocked(projectID: id) {
@@ -350,6 +421,17 @@ public final class IntervalStore {
         guard sqlite3_step(stmt) == SQLITE_ROW,
               sqlite3_column_type(stmt, 0) != SQLITE_NULL else { return nil }
         return sqlite3_column_double(stmt, 0)
+    }
+
+    /// Every value of a single TEXT column. Used to collect uids before deleting their rows.
+    private func scalarTexts(_ sql: String) throws -> [String] {
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        var out: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if sqlite3_column_type(stmt, 0) != SQLITE_NULL { out.append(text(stmt, 0)) }
+        }
+        return out
     }
 
     private func scalarInt(_ sql: String) throws -> Int {
@@ -498,7 +580,16 @@ public final class IntervalStore {
 
     public func applyRemoteTombstone(uid: String, kind: String, deletedAt: TimeInterval) throws {
         try transaction {
-            let table = kind == "interval" ? "intervals" : (kind == "task" ? "projects" : "task_projects")
+            let table: String
+            switch kind {
+            case "interval": table = "intervals"
+            case "task": table = "projects"
+            case "task_project": table = "task_projects"
+            case "tag": table = "tags"
+            case "tag_link": table = "tag_links"
+            case "target": table = "targets"
+            default: return          // an unknown kind from a newer build: record it, touch nothing
+            }
             if let id = try localID(table: table, uid: uid) {
                 if table == "projects" {
                     // Deleting a task takes its intervals with it, same as a local delete.
@@ -521,6 +612,33 @@ public final class IntervalStore {
                     sqlite3_bind_int64(clear, 2, id)
                     try step(clear)
                     sqlite3_finalize(clear)
+                }
+                if table == "tags" {
+                    // Drop what POINTS AT the tag before the tag itself: tag_links.tag_id is a
+                    // foreign key and keys are ON, so deleting the tag first throws — the same trap
+                    // that broke a remote group delete, and with the same blast radius, since the
+                    // merge is one transaction and the violation aborts all of it.
+                    for sql in ["DELETE FROM tag_links WHERE tag_id = ?",
+                                "DELETE FROM targets WHERE subject_kind = 'tag' AND subject_id = ?"] {
+                        let d = try prepare(sql)
+                        sqlite3_bind_int64(d, 1, id)
+                        try step(d)
+                        sqlite3_finalize(d)
+                    }
+                }
+                if table == "projects" || table == "task_projects" {
+                    // A deleted task or project can still be a tag link's or a budget's subject.
+                    // Those aren't foreign keys (subject_id is polymorphic) so they wouldn't throw —
+                    // they'd linger pointing at a row that no longer exists, and an unresolvable
+                    // target silently vanishes from the UI while sitting in the database.
+                    let kindName = table == "projects" ? "task" : "project"
+                    for t in ["tag_links", "targets"] {
+                        let d = try prepare("DELETE FROM \(t) WHERE subject_kind = ? AND subject_id = ?")
+                        bindText(d, 1, kindName)
+                        sqlite3_bind_int64(d, 2, id)
+                        try step(d)
+                        sqlite3_finalize(d)
+                    }
                 }
                 let del = try prepare("DELETE FROM \(table) WHERE id = ?")
                 sqlite3_bind_int64(del, 1, id)
@@ -724,6 +842,7 @@ public final class IntervalStore {
             try step(clear)
             sqlite3_finalize(clear)
 
+            try detachSubjectLocked(.project(id))
             try recordTombstoneLocked(uid: try uidLocked(table: "task_projects", id: id),
                                       kind: "task_project")
             let del = try prepare("DELETE FROM task_projects WHERE id = ?")
@@ -925,6 +1044,390 @@ public final class IntervalStore {
             map[String(cString: sqlite3_column_text(stmt, 0))] = String(cString: sqlite3_column_text(stmt, 1))
         }
         return map
+    }
+
+    /// Remove tag links and targets belonging to a subject that's being deleted.
+    ///
+    /// Without this a deleted project left its target behind, and a target whose subject no longer
+    /// resolves is dropped from the UI — so it looked like the budget had vanished while the row was
+    /// still in the database, unreachable and un-editable.
+    private func detachSubjectLocked(_ subject: TargetSubject) throws {
+        for (table, kind) in [("tag_links", "tag_link"), ("targets", "target")] {
+            let sql = "SELECT uid FROM \(table) WHERE subject_kind = '\(subject.kind)' "
+                + "AND subject_id = \(subject.id) AND uid IS NOT NULL"
+            for uid in try scalarTexts(sql) { try recordTombstoneLocked(uid: uid, kind: kind) }
+        }
+        for sql in ["DELETE FROM tag_links WHERE subject_kind = ? AND subject_id = ?",
+                    "DELETE FROM targets WHERE subject_kind = ? AND subject_id = ?"] {
+            let stmt = try prepare(sql)
+            bindText(stmt, 1, subject.kind)
+            sqlite3_bind_int64(stmt, 2, subject.id)
+            try step(stmt)
+            sqlite3_finalize(stmt)
+        }
+    }
+
+    // MARK: - Tags
+
+    /// All tags, in sort order.
+    public func listTags() throws -> [Tag] {
+        let stmt = try prepare("SELECT id, name, color_hex, sort_order FROM tags ORDER BY sort_order, name COLLATE NOCASE")
+        defer { sqlite3_finalize(stmt) }
+        var out: [Tag] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(Tag(id: sqlite3_column_int64(stmt, 0), name: text(stmt, 1),
+                           colorHex: text(stmt, 2), sortOrder: Int(sqlite3_column_int(stmt, 3))))
+        }
+        return out
+    }
+
+    public func tag(named name: String) throws -> Tag? {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        let stmt = try prepare("SELECT id FROM tags WHERE name = ? COLLATE NOCASE LIMIT 1")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, trimmed)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let id = sqlite3_column_int64(stmt, 0)
+        return try listTags().first { $0.id == id }
+    }
+
+    /// Create a tag, or return the existing one with that name. Reuse rather than duplicate, for the
+    /// same reason projects do it: two tags called "office" would silently split their totals.
+    @discardableResult
+    public func upsertTag(name: String, colorHex: String) throws -> Int64 {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        if let existing = try tag(named: trimmed) { return existing.id }
+        let stmt = try prepare("INSERT INTO tags (name, color_hex, sort_order, uid, updated_at) VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM tags), ?, ?)")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, trimmed)
+        bindText(stmt, 2, colorHex)
+        bindText(stmt, 3, UUID().uuidString)
+        sqlite3_bind_double(stmt, 4, Date().timeIntervalSince1970)
+        try step(stmt)
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    public func renameTag(id: Int64, name: String) throws {
+        let stmt = try prepare("UPDATE tags SET name = ?, updated_at = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, name.trimmingCharacters(in: .whitespaces))
+        sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(stmt, 3, id)
+        try step(stmt)
+    }
+
+    public func setTagColor(id: Int64, colorHex: String) throws {
+        let stmt = try prepare("UPDATE tags SET color_hex = ?, updated_at = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, colorHex)
+        sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(stmt, 3, id)
+        try step(stmt)
+    }
+
+    /// Delete a tag, its links and any target pointing at it.
+    ///
+    /// Links and targets go first: `tag_links.tag_id` references `tags(id)` and foreign keys are ON,
+    /// so removing the tag first would throw — the same trap that broke a remote group delete.
+    public func deleteTag(id: Int64) throws {
+        try transaction {
+            // Tombstone before deleting — afterwards the uids are gone and the peer's copy would
+            // simply come back on the next merge.
+            try recordTombstoneLocked(uid: try uidLocked(table: "tags", id: id), kind: "tag")
+            for uid in try scalarTexts("SELECT uid FROM tag_links WHERE tag_id = \(id) AND uid IS NOT NULL") {
+                try recordTombstoneLocked(uid: uid, kind: "tag_link")
+            }
+            for uid in try scalarTexts("SELECT uid FROM targets WHERE subject_kind = 'tag' AND subject_id = \(id) AND uid IS NOT NULL") {
+                try recordTombstoneLocked(uid: uid, kind: "target")
+            }
+            for (sql, bindTag) in [("DELETE FROM tag_links WHERE tag_id = ?", true),
+                                   ("DELETE FROM targets WHERE subject_kind = 'tag' AND subject_id = ?", true),
+                                   ("DELETE FROM tags WHERE id = ?", true)] {
+                _ = bindTag
+                let stmt = try prepare(sql)
+                sqlite3_bind_int64(stmt, 1, id)
+                try step(stmt)
+                sqlite3_finalize(stmt)
+            }
+        }
+    }
+
+    // MARK: - Tag links
+
+    /// Attach a tag to a task or project. Idempotent — re-tagging can't pile up duplicate rows.
+    public func addTag(_ tagID: Int64, to subject: TargetSubject) throws {
+        let stmt = try prepare("INSERT OR IGNORE INTO tag_links (tag_id, subject_kind, subject_id, uid, updated_at) VALUES (?, ?, ?, ?, ?)")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, tagID)
+        bindText(stmt, 2, subject.kind)
+        sqlite3_bind_int64(stmt, 3, subject.id)
+        bindText(stmt, 4, UUID().uuidString)
+        sqlite3_bind_double(stmt, 5, Date().timeIntervalSince1970)
+        try step(stmt)
+    }
+
+    public func removeTag(_ tagID: Int64, from subject: TargetSubject) throws {
+        try transaction {
+            let sql = "SELECT uid FROM tag_links WHERE tag_id = \(tagID) AND "
+                + "subject_kind = '\(subject.kind)' AND subject_id = \(subject.id) AND uid IS NOT NULL"
+            for uid in try scalarTexts(sql) { try recordTombstoneLocked(uid: uid, kind: "tag_link") }
+            let stmt = try prepare("DELETE FROM tag_links WHERE tag_id = ? AND subject_kind = ? AND subject_id = ?")
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int64(stmt, 1, tagID)
+            bindText(stmt, 2, subject.kind)
+            sqlite3_bind_int64(stmt, 3, subject.id)
+            try step(stmt)
+        }
+    }
+
+    /// Tag ids directly attached to a subject (no inheritance).
+    public func tagIDs(for subject: TargetSubject) throws -> [Int64] {
+        let stmt = try prepare("SELECT tag_id FROM tag_links WHERE subject_kind = ? AND subject_id = ?")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, subject.kind)
+        sqlite3_bind_int64(stmt, 2, subject.id)
+        var out: [Int64] = []
+        while sqlite3_step(stmt) == SQLITE_ROW { out.append(sqlite3_column_int64(stmt, 0)) }
+        return out
+    }
+
+    /// Effective tags per TASK id, including those inherited from the task's project.
+    ///
+    /// One query rather than per-task lookups: this feeds the metrics breakdown, which would
+    /// otherwise issue a query per task on every recompute.
+    public func effectiveTagIDsByTask() throws -> [Int64: Set<Int64>] {
+        var out: [Int64: Set<Int64>] = [:]
+        // Directly tagged tasks.
+        let direct = try prepare("SELECT subject_id, tag_id FROM tag_links WHERE subject_kind = 'task'")
+        while sqlite3_step(direct) == SQLITE_ROW {
+            out[sqlite3_column_int64(direct, 0), default: []].insert(sqlite3_column_int64(direct, 1))
+        }
+        sqlite3_finalize(direct)
+        // Inherited from the task's project.
+        let inherited = try prepare("""
+            SELECT p.id, l.tag_id FROM projects p
+            JOIN tag_links l ON l.subject_kind = 'project' AND l.subject_id = p.task_project_id
+            """)
+        while sqlite3_step(inherited) == SQLITE_ROW {
+            out[sqlite3_column_int64(inherited, 0), default: []].insert(sqlite3_column_int64(inherited, 1))
+        }
+        sqlite3_finalize(inherited)
+        return out
+    }
+
+    // MARK: - Targets
+
+    public func listTargets() throws -> [Target] {
+        let stmt = try prepare("SELECT id, subject_kind, subject_id, seconds, direction, period FROM targets")
+        defer { sqlite3_finalize(stmt) }
+        var out: [Target] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let subject = TargetSubject(kind: text(stmt, 1), id: sqlite3_column_int64(stmt, 2)),
+                  let direction = Target.Direction(rawValue: text(stmt, 4)),
+                  let period = Target.Period(rawValue: text(stmt, 5)) else { continue }
+            out.append(Target(id: sqlite3_column_int64(stmt, 0), subject: subject,
+                              seconds: sqlite3_column_double(stmt, 3),
+                              direction: direction, period: period))
+        }
+        return out
+    }
+
+    /// Create or replace the target for a subject. Exactly one per subject: changing the amount,
+    /// direction OR period edits that single row rather than adding another.
+    @discardableResult
+    public func setTarget(subject: TargetSubject, seconds: TimeInterval,
+                          direction: Target.Direction, period: Target.Period) throws -> Int64 {
+        let sql = "INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at) "
+            + "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            + "ON CONFLICT(subject_kind, subject_id) DO UPDATE SET "
+            + "seconds = excluded.seconds, direction = excluded.direction, "
+            + "period = excluded.period, updated_at = excluded.updated_at"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, subject.kind)
+        sqlite3_bind_int64(stmt, 2, subject.id)
+        sqlite3_bind_double(stmt, 3, seconds)
+        bindText(stmt, 4, direction.rawValue)
+        bindText(stmt, 5, period.rawValue)
+        bindText(stmt, 6, UUID().uuidString)
+        sqlite3_bind_double(stmt, 7, Date().timeIntervalSince1970)
+        try step(stmt)
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    public func deleteTarget(id: Int64) throws {
+        try transaction {
+            try recordTombstoneLocked(uid: try uidLocked(table: "targets", id: id), kind: "target")
+            let stmt = try prepare("DELETE FROM targets WHERE id = ?")
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int64(stmt, 1, id)
+            try step(stmt)
+        }
+    }
+
+    // MARK: - Tag / target merge primitives
+
+    /// The table a subject kind lives in, so a uid can be resolved to a local id.
+    public static func table(forSubjectKind kind: String) -> String? {
+        switch kind {
+        case "task": return "projects"
+        case "project": return "task_projects"
+        case "tag": return "tags"
+        default: return nil
+        }
+    }
+
+    /// Insert a tag from another device PRESERVING its uid, so both sides share one identity.
+    @discardableResult
+    public func insertRemoteTag(uid: String, name: String, colorHex: String, sortOrder: Int,
+                                updatedAt: TimeInterval) throws -> Int64 {
+        let stmt = try prepare("INSERT INTO tags (name, color_hex, sort_order, uid, updated_at) VALUES (?, ?, ?, ?, ?)")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, name)
+        bindText(stmt, 2, colorHex)
+        sqlite3_bind_int(stmt, 3, Int32(sortOrder))
+        bindText(stmt, 4, uid)
+        sqlite3_bind_double(stmt, 5, updatedAt)
+        try step(stmt)
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    /// Apply a remote tag edit if it's newer (last-write-wins on `updated_at`).
+    @discardableResult
+    public func applyRemoteTagEdit(uid: String, name: String, colorHex: String, sortOrder: Int,
+                                   remoteUpdatedAt: TimeInterval) throws -> Bool {
+        guard let id = try localID(table: "tags", uid: uid) else { return false }
+        guard remoteUpdatedAt > (try updatedAt(table: "tags", id: id) ?? 0) else { return false }
+        let stmt = try prepare("UPDATE tags SET name = ?, color_hex = ?, sort_order = ?, updated_at = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, name)
+        bindText(stmt, 2, colorHex)
+        sqlite3_bind_int(stmt, 3, Int32(sortOrder))
+        sqlite3_bind_double(stmt, 4, remoteUpdatedAt)
+        sqlite3_bind_int64(stmt, 5, id)
+        try step(stmt)
+        return true
+    }
+
+    /// Adopt a remote uid for a tag matched by NAME, so the two devices converge on one identity —
+    /// otherwise later renames arrive as brand-new tags. Same rule projects already use.
+    public func adoptTagUID(id: Int64, uid: String) throws {
+        let stmt = try prepare("UPDATE tags SET uid = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, uid)
+        sqlite3_bind_int64(stmt, 2, id)
+        try step(stmt)
+    }
+
+    /// Insert a tag link from another device, preserving its uid. Idempotent on (tag, subject).
+    public func insertRemoteTagLink(uid: String, tagID: Int64, subject: TargetSubject,
+                                    updatedAt: TimeInterval) throws {
+        let stmt = try prepare("INSERT OR IGNORE INTO tag_links (tag_id, subject_kind, subject_id, uid, updated_at) VALUES (?, ?, ?, ?, ?)")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, tagID)
+        bindText(stmt, 2, subject.kind)
+        sqlite3_bind_int64(stmt, 3, subject.id)
+        bindText(stmt, 4, uid)
+        sqlite3_bind_double(stmt, 5, updatedAt)
+        try step(stmt)
+    }
+
+    /// Apply a remote budget: insert, or overwrite ours when the remote is newer.
+    ///
+    /// Keyed on the SUBJECT, not the uid — there's one budget per subject, so two devices that each
+    /// created one for the same tag are describing the same thing and must converge rather than
+    /// fight the unique index.
+    @discardableResult
+    public func applyRemoteTarget(uid: String, subject: TargetSubject, seconds: TimeInterval,
+                                  direction: Target.Direction, period: Target.Period,
+                                  remoteUpdatedAt: TimeInterval) throws -> Bool {
+        let existing = try prepare("SELECT id, updated_at FROM targets WHERE subject_kind = ? AND subject_id = ? LIMIT 1")
+        bindText(existing, 1, subject.kind)
+        sqlite3_bind_int64(existing, 2, subject.id)
+        var mineID: Int64?
+        var mineUpdated: Double = 0
+        if sqlite3_step(existing) == SQLITE_ROW {
+            mineID = sqlite3_column_int64(existing, 0)
+            mineUpdated = sqlite3_column_type(existing, 1) == SQLITE_NULL
+                ? 0 : sqlite3_column_double(existing, 1)
+        }
+        sqlite3_finalize(existing)
+
+        if let mineID {
+            guard remoteUpdatedAt > mineUpdated else { return false }
+            let stmt = try prepare("UPDATE targets SET seconds = ?, direction = ?, period = ?, uid = ?, updated_at = ? WHERE id = ?")
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_double(stmt, 1, seconds)
+            bindText(stmt, 2, direction.rawValue)
+            bindText(stmt, 3, period.rawValue)
+            bindText(stmt, 4, uid)
+            sqlite3_bind_double(stmt, 5, remoteUpdatedAt)
+            sqlite3_bind_int64(stmt, 6, mineID)
+            try step(stmt)
+            return true
+        }
+        let stmt = try prepare("INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, subject.kind)
+        sqlite3_bind_int64(stmt, 2, subject.id)
+        sqlite3_bind_double(stmt, 3, seconds)
+        bindText(stmt, 4, direction.rawValue)
+        bindText(stmt, 5, period.rawValue)
+        bindText(stmt, 6, uid)
+        sqlite3_bind_double(stmt, 7, remoteUpdatedAt)
+        try step(stmt)
+        return true
+    }
+
+    /// Tag links with their uids and both ends resolved to uids — the export half.
+    public func tagLinksForExport() throws -> [(uid: String, tagUID: String, subjectKind: String,
+                                                subjectUID: String, updatedAt: TimeInterval)] {
+        let sql = "SELECT l.uid, t.uid, l.subject_kind, l.subject_id, COALESCE(l.updated_at, 0) "
+            + "FROM tag_links l JOIN tags t ON t.id = l.tag_id "
+            + "WHERE l.uid IS NOT NULL AND t.uid IS NOT NULL"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        var out: [(String, String, String, String, TimeInterval)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let kind = text(stmt, 2)
+            guard let table = Self.table(forSubjectKind: kind),
+                  let subjectUID = try uidLocked(table: table, id: sqlite3_column_int64(stmt, 3))
+            else { continue }   // subject has no uid yet: it'll travel on a later sync
+            out.append((text(stmt, 0), text(stmt, 1), kind, subjectUID,
+                        sqlite3_column_double(stmt, 4)))
+        }
+        return out
+    }
+
+    /// Budgets with their subject resolved to a uid — the export half.
+    public func targetsForExport() throws -> [(uid: String, subjectKind: String, subjectUID: String,
+                                               seconds: TimeInterval, direction: String,
+                                               period: String, updatedAt: TimeInterval)] {
+        let stmt = try prepare("SELECT uid, subject_kind, subject_id, seconds, direction, period, COALESCE(updated_at, 0) FROM targets WHERE uid IS NOT NULL")
+        defer { sqlite3_finalize(stmt) }
+        var out: [(String, String, String, TimeInterval, String, String, TimeInterval)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let kind = text(stmt, 1)
+            guard let table = Self.table(forSubjectKind: kind),
+                  let subjectUID = try uidLocked(table: table, id: sqlite3_column_int64(stmt, 2))
+            else { continue }
+            out.append((text(stmt, 0), kind, subjectUID, sqlite3_column_double(stmt, 3),
+                        text(stmt, 4), text(stmt, 5), sqlite3_column_double(stmt, 6)))
+        }
+        return out
+    }
+
+    /// Tags with their uids — the export half.
+    public func tagsWithUIDs() throws -> [(tag: Tag, uid: String, updatedAt: TimeInterval)] {
+        let stmt = try prepare("SELECT id, name, color_hex, sort_order, uid, COALESCE(updated_at, 0) FROM tags WHERE uid IS NOT NULL")
+        defer { sqlite3_finalize(stmt) }
+        var out: [(Tag, String, TimeInterval)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let tag = Tag(id: sqlite3_column_int64(stmt, 0), name: text(stmt, 1),
+                          colorHex: text(stmt, 2), sortOrder: Int(sqlite3_column_int(stmt, 3)))
+            out.append((tag, text(stmt, 4), sqlite3_column_double(stmt, 5)))
+        }
+        return out
     }
 
     // MARK: - Transactions

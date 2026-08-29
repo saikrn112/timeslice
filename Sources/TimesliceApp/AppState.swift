@@ -52,11 +52,31 @@ final class AppState: ObservableObject {
         projects = (try? store.listProjects(includeArchived: false)) ?? []
         allProjectsCache = (try? store.listProjects(includeArchived: true)) ?? []
         taskProjects = (try? store.listTaskProjects()) ?? []
+        reloadTags()
         recomputeTotals()
         // Keep selection on an existing active task.
         if selectedProjectID == nil || !projects.contains(where: { $0.id == selectedProjectID }) {
             selectedProjectID = projects.first?.id
         }
+    }
+
+    /// Tags a project carries, for display on its header row.
+    ///
+    /// Cached here rather than queried from the view: a row-level lookup would issue a DB query per
+    /// project per render, which is the same trap the metrics legend already documents.
+    @Published private(set) var tagsByProject: [Int64: [Tag]] = [:]
+    @Published private(set) var allTags: [Tag] = []
+
+    private func reloadTags() {
+        allTags = (try? store.listTags()) ?? []
+        let byID = Dictionary(uniqueKeysWithValues: allTags.map { ($0.id, $0) })
+        var map: [Int64: [Tag]] = [:]
+        for group in taskProjects {
+            let ids = (try? store.tagIDs(for: .project(group.id))) ?? []
+            let tags = ids.compactMap { byID[$0] }
+            if !tags.isEmpty { map[group.id] = tags.sorted { $0.sortOrder < $1.sortOrder } }
+        }
+        tagsByProject = map
     }
 
     private func recomputeTotals() {
@@ -78,6 +98,23 @@ final class AppState: ObservableObject {
         let todayVisible = active.filter { $0.showsInToday(now: now) }
         todayTotals = Aggregations.todayTotals(projects: todayVisible, intervals: closed, now: now).sorted(by: byFinished)
         archivedTotals = Aggregations.allTimeTotals(projects: archived, intervals: closed, now: now)
+    }
+
+    /// `todayTotals` in recency order — most recently worked first, finished tasks last.
+    ///
+    /// Reads the FROZEN switcher order rather than recomputing recency, so this stays a cheap
+    /// re-render: `recencyOrderedProjects` queries the DB, and a computed property feeding a list
+    /// would do that on every frame. The popover opens a session, so the order is stable while it's
+    /// on screen and only re-ranks the next time you open it.
+    var recencyOrderedTodayTotals: [ProjectTotal] {
+        let rank = Dictionary(uniqueKeysWithValues:
+            switcherProjects.enumerated().map { ($1.id, $0) })
+        return todayTotals.sorted { a, b in
+            if a.project.finished != b.project.finished { return !a.project.finished }
+            let ra = rank[a.project.id] ?? Int.max, rb = rank[b.project.id] ?? Int.max
+            if ra != rb { return ra < rb }
+            return a.project.id < b.project.id
+        }
     }
 
     /// Live displayed seconds for a total row: the committed (closed) base plus the running

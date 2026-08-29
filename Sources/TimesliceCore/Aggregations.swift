@@ -94,6 +94,120 @@ public enum Aggregations {
         return projects.map { ProjectTotal(project: $0, seconds: byProject[$0.id] ?? 0) }
     }
 
+    /// Time under each tag over a range, plus an "untagged" bucket.
+    ///
+    /// UNIONed per tag, not summed: one tag can span several projects whose intervals overlap (two
+    /// devices mid-handoff), and wall-clock shouldn't be double-counted. Across tags the totals
+    /// legitimately exceed the range's tracked time, because a task can carry several tags — the UI
+    /// says so rather than presenting them as a partition.
+    ///
+    /// Rows with no time are dropped, so a tag only appears once it has something in the range.
+    public static func tagTotals(
+        tags: [Tag], intervals: [Interval], tagIDsByTask: [Int64: Set<Int64>],
+        range: DateRange, now: Date = Date()
+    ) -> [TagTotal] {
+        // Clip once, then fan each interval out to its tags — clipping per tag would repeat the
+        // midnight/DST work for every tag a task carries.
+        var spansByTag: [Int64: [(start: Date, end: Date)]] = [:]
+        var untaggedSpans: [(start: Date, end: Date)] = []
+
+        for interval in intervals {
+            let end = interval.end ?? now
+            let start = max(interval.start, range.start)
+            let stop = min(end, range.end)
+            guard stop > start else { continue }
+            let span = (start: start, end: stop)
+
+            let ids = tagIDsByTask[interval.projectID] ?? []
+            if ids.isEmpty {
+                untaggedSpans.append(span)
+            } else {
+                for id in ids { spansByTag[id, default: []].append(span) }
+            }
+        }
+
+        var out: [TagTotal] = tags.compactMap { tag in
+            guard let spans = spansByTag[tag.id] else { return nil }
+            let secs = SpanUnion.coveredSeconds(spans)
+            return secs > 0 ? TagTotal(tag: tag, seconds: secs) : nil
+        }
+        let untagged = SpanUnion.coveredSeconds(untaggedSpans)
+        if untagged > 0 { out.append(TagTotal(tag: nil, seconds: untagged)) }
+        // Largest first, matching the other breakdowns; untagged sorts by size like anything else.
+        return out.sorted { $0.seconds > $1.seconds }
+    }
+
+    /// Per-bucket seconds for a sparkline over `range`, bucketed to match the filter: hours across a
+    /// day, days across a week or month, weeks across six months, months across a year.
+    ///
+    /// Deliberately NOT `buckets(...)`, which collapses an hourly range to a single day bucket — that
+    /// suits the hours-per-day chart (hidden on the day view) but would give a one-bar sparkline.
+    ///
+    /// Returns every bucket in the range including empty ones, so the shape shows gaps rather than
+    /// silently compressing them.
+    public static func sparkline(
+        intervals: [Interval], range: DateRange, now: Date = Date(), calendar: Calendar = .current
+    ) -> [TimeInterval] {
+        let component: Calendar.Component = range.unit == .day ? .hour : range.unit.bucket
+        var out: [TimeInterval] = []
+        var cursor = range.start
+        // Bounded so a pathological range can't spin: 400 buckets is past any useful sparkline.
+        while cursor < range.end, out.count < 400 {
+            guard let next = calendar.date(byAdding: component, value: 1, to: cursor) else { break }
+            let stop = min(next, range.end)
+            var secs: TimeInterval = 0
+            for interval in intervals {
+                let end = interval.end ?? now
+                let s = max(interval.start, cursor), e = min(end, stop)
+                if e > s { secs += e.timeIntervalSince(s) }
+            }
+            out.append(secs)
+            cursor = next
+        }
+        return out
+    }
+
+    /// Which tasks a subject covers. Shared so a "show me only this" filter and the target maths
+    /// can't disagree about what belongs to a tag or project.
+    public static func taskIDs(
+        for subject: TargetSubject, tasks: [Project], tagIDsByTask: [Int64: Set<Int64>]
+    ) -> Set<Int64> {
+        switch subject {
+        case .task(let id):
+            return [id]
+        case .project(let id):
+            return Set(tasks.filter { $0.taskProjectID == id }.map(\.id))
+        case .tag(let id):
+            return Set(tagIDsByTask.filter { $0.value.contains(id) }.map(\.key))
+        }
+    }
+
+    /// Seconds tracked against a target's subject over a range, unioned.
+    ///
+    /// A tag subject fans out through `tagIDsByTask`; a project subject covers every task in it; a
+    /// task subject is just that task. Union everywhere so a target can't be tripped by two devices
+    /// overlapping during a handoff.
+    public static func secondsForSubject(
+        _ subject: TargetSubject,
+        intervals: [Interval],
+        tasks: [Project],
+        tagIDsByTask: [Int64: Set<Int64>],
+        range: DateRange,
+        now: Date = Date()
+    ) -> TimeInterval {
+        let taskIDs = self.taskIDs(for: subject, tasks: tasks, tagIDsByTask: tagIDsByTask)
+        guard !taskIDs.isEmpty else { return 0 }
+
+        var spans: [(start: Date, end: Date)] = []
+        for interval in intervals where taskIDs.contains(interval.projectID) {
+            let end = interval.end ?? now
+            let start = max(interval.start, range.start)
+            let stop = min(end, range.end)
+            if stop > start { spans.append((start, stop)) }
+        }
+        return SpanUnion.coveredSeconds(spans)
+    }
+
     /// Roll per-task totals up to their groups. Pure post-processing on whatever `totals(...)`
     /// already produced, which is why this works identically for every range — bucketing,
     /// midnight-splitting and clipping all happen upstream and are blind to grouping.
@@ -181,7 +295,7 @@ public enum Aggregations {
     /// individual session lengths.
     public static func summary(
         intervals: [Interval], range: DateRange, deepThreshold: TimeInterval,
-        dailyGoalSeconds: TimeInterval, now: Date = Date(), calendar: Calendar = .current
+        now: Date = Date(), calendar: Calendar = .current
     ) -> RangeSummary {
         // Collect each day's spans first, then union them per day.
         var spansByDay: [Date: [(start: Date, end: Date)]] = [:]
@@ -218,7 +332,6 @@ public enum Aggregations {
             totalSeconds: total,
             deepSeconds: min(deepTotal, total),   // can't be more focused than tracked
             activeDays: perDay.values.filter { $0 > 0 }.count,
-            daysOnGoal: perDay.values.filter { $0 >= dailyGoalSeconds }.count,
             switches: switchesInRange,
             longestSessionSeconds: longest,
             bestDaySeconds: perDay.values.max() ?? 0

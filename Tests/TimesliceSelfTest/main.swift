@@ -829,17 +829,19 @@ func testOverlapSafety() {
 
     do { // summary: wall-clock is 9→12 = 3h, NOT 2h + 2h = 4h
         let s = Aggregations.summary(intervals: ivs, range: r, deepThreshold: 25 * 60,
-                                     dailyGoalSeconds: 8 * 3600, now: date(2026, 3, 10, 23, 0), calendar: cal)
+                                     now: date(2026, 3, 10, 23, 0), calendar: cal)
         check(approx(s.totalSeconds, 3 * 3600), "summary unions overlap: 3h, not 4h")
         check(approx(s.bestDaySeconds, 3 * 3600), "best day also unioned")
         check(s.totalSeconds <= 24 * 3600, "a day can never exceed 24h")
         check(s.deepSeconds <= s.totalSeconds, "focused time can't exceed tracked time")
     }
 
-    do { // a day of overlap must not falsely clear the goal
+    do { // the union must not inflate a day past what was actually worked
         let s = Aggregations.summary(intervals: ivs, range: r, deepThreshold: 25 * 60,
-                                     dailyGoalSeconds: 4 * 3600, now: date(2026, 3, 10, 23, 0), calendar: cal)
-        check(s.daysOnGoal == 0, "3h real work doesn't clear a 4h goal (summing would have)")
+                                     now: date(2026, 3, 10, 23, 0), calendar: cal)
+        check(approx(s.totalSeconds, 3 * 3600),
+              "two overlapping 2h blocks are 3h of wall clock, not 4h")
+        check(s.totalSeconds < 4 * 3600, "summing would have reported 4h")
     }
 
     do { // buckets: the bar height is wall-clock too
@@ -867,7 +869,7 @@ func testOverlapSafety() {
             Interval(id: 2, projectID: 2, start: date(2026, 3, 10, 10, 0), end: date(2026, 3, 10, 11, 0)),
         ]
         let s = Aggregations.summary(intervals: nested, range: r, deepThreshold: 25 * 60,
-                                     dailyGoalSeconds: 8 * 3600, now: date(2026, 3, 10, 23, 0), calendar: cal)
+                                     now: date(2026, 3, 10, 23, 0), calendar: cal)
         check(approx(s.totalSeconds, 3 * 3600), "enclosed span doesn't inflate the day")
     }
 
@@ -1890,6 +1892,501 @@ func testDuplicateFileCollapse() {
     }
 }
 
+// MARK: - Tags
+
+func testTags() throws {
+    print("Tags:")
+
+    do { // reuse by name, case-insensitively — two "office" tags would split their totals
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let a = try store.upsertTag(name: "office", colorHex: "#fff")
+        let b = try store.upsertTag(name: "Office", colorHex: "#000")
+        check(a == b, "re-adding a tag name reuses it instead of forking")
+        check(try store.listTags().count == 1, "no duplicate tag row")
+    }
+
+    do { // linking is idempotent
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let t = try store.upsertTag(name: "office", colorHex: "#fff")
+        let g = try store.upsertTaskProject(name: "profiling", colorHex: "#fff")
+        try store.addTag(t, to: .project(g))
+        try store.addTag(t, to: .project(g))
+        check(try store.tagIDs(for: .project(g)) == [t], "tagging twice leaves one link")
+        try store.removeTag(t, from: .project(g))
+        check(try store.tagIDs(for: .project(g)).isEmpty, "untagging removes it")
+    }
+
+    do { // a task INHERITS its project's tags, and can carry its own on top
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let office = try store.upsertTag(name: "office", colorHex: "#fff")
+        let side = try store.upsertTag(name: "side", colorHex: "#fff")
+        let g = try store.upsertTaskProject(name: "profiling", colorHex: "#fff")
+        let task = try store.createProject(name: "optimal params", colorHex: "#fff")
+        try store.setTaskProject(taskID: task, taskProjectID: g)
+        try store.addTag(office, to: .project(g))
+        try store.addTag(side, to: .task(task))
+        let eff = try store.effectiveTagIDsByTask()
+        check(eff[task] == Set([office, side]),
+              "a task gets its project's tags plus its own")
+    }
+
+    do { // deleting a tag takes its links and targets with it (FKs are ON)
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let t = try store.upsertTag(name: "office", colorHex: "#fff")
+        let g = try store.upsertTaskProject(name: "profiling", colorHex: "#fff")
+        try store.addTag(t, to: .project(g))
+        try store.setTarget(subject: .tag(t), seconds: 3600, direction: .atLeast, period: .week)
+        try store.deleteTag(id: t)
+        check(try store.listTags().isEmpty, "the tag is gone")
+        check(try store.tagIDs(for: .project(g)).isEmpty, "its links are gone")
+        check(try store.listTargets().isEmpty, "and any target pointing at it")
+    }
+
+    do { // deleting a PROJECT takes its tag links and target with it, so no orphan is left
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let tag = try store.upsertTag(name: "office", colorHex: "#fff")
+        let g = try store.upsertTaskProject(name: "profiling", colorHex: "#fff")
+        try store.addTag(tag, to: .project(g))
+        try store.setTarget(subject: .project(g), seconds: 3600, direction: .atLeast, period: .week)
+        try store.deleteTaskProject(id: g)
+        check(try store.listTargets().isEmpty,
+              "a deleted project leaves no orphan target (which would silently vanish from the UI)")
+        check(try store.tagIDs(for: .project(g)).isEmpty, "and no dangling tag link")
+        check(try store.listTags().count == 1, "but the tag itself survives — other projects use it")
+    }
+
+    do { // same for a TASK
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let tag = try store.upsertTag(name: "side", colorHex: "#fff")
+        let t = try store.createProject(name: "timeslicer", colorHex: "#fff")
+        try store.addTag(tag, to: .task(t))
+        try store.setTarget(subject: .task(t), seconds: 3600, direction: .atMost, period: .week)
+        try store.deleteProject(id: t)
+        check(try store.listTargets().isEmpty, "a deleted task leaves no orphan target")
+        check(try store.tagIDs(for: .task(t)).isEmpty, "and no dangling tag link")
+    }
+
+    do { // one target per subject+period; setting it again edits rather than duplicates
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let g = try store.upsertTaskProject(name: "profiling", colorHex: "#fff")
+        try store.setTarget(subject: .project(g), seconds: 3600, direction: .atLeast, period: .week)
+        try store.setTarget(subject: .project(g), seconds: 7200, direction: .atMost, period: .week)
+        let targets = try store.listTargets()
+        check(targets.count == 1, "the same subject+period stays one target")
+        check(targets[0].seconds == 7200 && targets[0].direction == .atMost, "and is updated in place")
+        // Changing the PERIOD moves the same target rather than adding a second. Keying identity on
+        // the period is what let one subject end up with two contradictory budgets, the second of
+        // them unreachable from the editor.
+        try store.setTarget(subject: .project(g), seconds: 60, direction: .atLeast, period: .day)
+        let after = try store.listTargets()
+        check(after.count == 1, "changing the period edits the target instead of duplicating it")
+        check(after[0].period == .day && after[0].seconds == 60, "and carries the new values")
+    }
+}
+
+// MARK: - Tag totals
+
+func testTagTotals() {
+    print("Tag totals:")
+
+    let day = date(2026, 8, 1, 0, 0)
+    let range = DateRange(unit: .day, start: day, end: day.addingTimeInterval(86_400))
+    let office = Tag(id: 1, name: "office", colorHex: "#fff", sortOrder: 0)
+    let side = Tag(id: 2, name: "side", colorHex: "#fff", sortOrder: 1)
+    func iv(_ id: Int64, _ task: Int64, _ h1: Int, _ h2: Int) -> Interval {
+        Interval(id: id, projectID: task, start: date(2026, 8, 1, h1, 0),
+                 end: date(2026, 8, 1, h2, 0))
+    }
+
+    do { // a task carrying two tags contributes to BOTH, so totals exceed tracked time
+        let totals = Aggregations.tagTotals(
+            tags: [office, side], intervals: [iv(1, 10, 9, 11)],
+            tagIDsByTask: [10: [1, 2]], range: range)
+        check(totals.count == 2, "both tags appear")
+        check(totals.allSatisfy { approx($0.seconds / 3600, 2) },
+              "each tag counts the full 2h — overlap means totals don't partition the day")
+    }
+
+    do { // UNION within a tag: two overlapping intervals under one tag count once
+        let totals = Aggregations.tagTotals(
+            tags: [office], intervals: [iv(1, 10, 9, 11), iv(2, 11, 10, 12)],
+            tagIDsByTask: [10: [1], 11: [1]], range: range)
+        check(totals.count == 1 && approx(totals[0].seconds / 3600, 3),
+              "9-11 plus 10-12 under one tag is 3h, not 4h")
+    }
+
+    do { // untagged time is its own bucket, and zero-time tags are dropped
+        let totals = Aggregations.tagTotals(
+            tags: [office, side], intervals: [iv(1, 99, 9, 10)],
+            tagIDsByTask: [:], range: range)
+        check(totals.count == 1 && totals[0].tag == nil, "only the untagged row appears")
+        check(approx(totals[0].seconds / 60, 60), "with the right time")
+    }
+
+    do { // intervals are clipped to the range
+        let totals = Aggregations.tagTotals(
+            tags: [office],
+            intervals: [Interval(id: 1, projectID: 10, start: date(2026, 7, 31, 23, 0),
+                                 end: date(2026, 8, 1, 1, 0))],
+            tagIDsByTask: [10: [1]], range: range)
+        check(approx(totals[0].seconds / 3600, 1), "only the in-range hour counts")
+    }
+
+    do { // subject resolution: task, project and tag all reduce to the right seconds
+        let tasks = [Project(id: 10, name: "a", colorHex: "#fff", sortOrder: 0, archived: false,
+                             finished: false, finishedAt: nil, taskProjectID: 7),
+                     Project(id: 11, name: "b", colorHex: "#fff", sortOrder: 1, archived: false,
+                             finished: false, finishedAt: nil, taskProjectID: 7)]
+        let ivs = [iv(1, 10, 9, 10), iv(2, 11, 11, 12)]
+        let byTask: [Int64: Set<Int64>] = [10: [1], 11: [1]]
+        check(approx(Aggregations.secondsForSubject(.task(10), intervals: ivs, tasks: tasks,
+                                                   tagIDsByTask: byTask, range: range) / 3600, 1),
+              "a task subject counts only that task")
+        check(approx(Aggregations.secondsForSubject(.project(7), intervals: ivs, tasks: tasks,
+                                                   tagIDsByTask: byTask, range: range) / 3600, 2),
+              "a project subject covers every task in it")
+        check(approx(Aggregations.secondsForSubject(.tag(1), intervals: ivs, tasks: tasks,
+                                                   tagIDsByTask: byTask, range: range) / 3600, 2),
+              "a tag subject fans out to every task carrying it")
+        check(Aggregations.secondsForSubject(.tag(99), intervals: ivs, tasks: tasks,
+                                            tagIDsByTask: byTask, range: range) == 0,
+              "an unused subject is zero, not a crash")
+    }
+}
+
+// MARK: - Target maths
+
+func testTargetMath() {
+    print("Target maths:")
+
+    let weekStart = date(2026, 8, 24, 0, 0)
+    let weekEnd = date(2026, 8, 31, 0, 0)
+    func weekly(_ hours: Double, _ dir: Target.Direction) -> Target {
+        Target(id: 1, subject: .tag(1), seconds: hours * 3600, direction: dir, period: .week)
+    }
+
+    do { // a floor mid-week: reached => met, on track => onPace, behind => behind
+        let midweek = date(2026, 8, 27, 0, 0)          // 3 of 7 days elapsed
+        let t = weekly(30, .atLeast)
+        let met = TargetMath.progress(target: t, name: "office", actualSeconds: 31 * 3600,
+                                     rangeStart: weekStart, rangeEnd: weekEnd, now: midweek)
+        check(met.verdict == .met, "a floor already reached is met")
+        let onPace = TargetMath.progress(target: t, name: "office", actualSeconds: 14 * 3600,
+                                        rangeStart: weekStart, rangeEnd: weekEnd, now: midweek)
+        check(onPace.verdict == .onPace,
+              "14h of 30h on day 3 of 7 is on pace, not a failure")
+        let behind = TargetMath.progress(target: t, name: "office", actualSeconds: 2 * 3600,
+                                        rangeStart: weekStart, rangeEnd: weekEnd, now: midweek)
+        check(behind.verdict == .behind, "2h by day 3 is behind")
+    }
+
+    do { // a ceiling is judged against the WHOLE allowance, not the elapsed part
+        let monday = date(2026, 8, 25, 0, 0)
+        let t = weekly(5, .atMost)
+        let used = TargetMath.progress(target: t, name: "side", actualSeconds: 4.5 * 3600,
+                                      rangeStart: weekStart, rangeEnd: weekEnd, now: monday)
+        check(used.verdict == .met,
+              "spending most of the week's allowance early is not over budget")
+        let over = TargetMath.progress(target: t, name: "side", actualSeconds: 6 * 3600,
+                                      rangeStart: weekStart, rangeEnd: weekEnd, now: monday)
+        check(over.verdict == .over, "exceeding it is over, whenever it happened")
+    }
+
+    do { // percentages, including above 100 for a breached ceiling
+        let t = weekly(30, .atLeast)
+        let p = TargetMath.progress(target: t, name: "office", actualSeconds: 15 * 3600,
+                                    rangeStart: weekStart, rangeEnd: weekEnd, now: weekEnd)
+        check(approx(p.percent, 50, 0.01), "15h of 30h is 50%")
+        check(approx(p.deltaSeconds / 3600, -15), "and 15h short")
+        let c = weekly(5, .atMost)
+        let q = TargetMath.progress(target: c, name: "side", actualSeconds: 6 * 3600,
+                                    rangeStart: weekStart, rangeEnd: weekEnd, now: weekEnd)
+        check(approx(q.percent, 120, 0.01), "a breached ceiling reads over 100%")
+    }
+
+    do { // normalisation: a WEEKLY target viewed over a 30-day month expects ~4.3x
+        let monthStart = date(2026, 8, 1, 0, 0)
+        let monthEnd = date(2026, 8, 31, 0, 0)          // 30 days
+        let p = TargetMath.progress(target: weekly(10, .atLeast), name: "office",
+                                    actualSeconds: 0, rangeStart: monthStart, rangeEnd: monthEnd,
+                                    now: monthEnd)
+        check(approx(p.expectedSeconds / 3600, 10 * 30 / 7, 0.1),
+              "a weekly target scales onto a month rather than vanishing")
+    }
+
+    do { // a fully-elapsed range can't be "on pace" — it's met or it isn't
+        let p = TargetMath.progress(target: weekly(30, .atLeast), name: "office",
+                                    actualSeconds: 29 * 3600, rangeStart: weekStart,
+                                    rangeEnd: weekEnd, now: date(2026, 9, 5, 0, 0))
+        check(p.elapsedFraction == 1, "a past range is fully elapsed")
+        check(p.verdict == .behind, "missing a finished floor is behind, not on pace")
+    }
+
+    do { // a future range hasn't started, so nothing is behind yet
+        let p = TargetMath.progress(target: weekly(30, .atLeast), name: "office",
+                                    actualSeconds: 0, rangeStart: weekStart, rangeEnd: weekEnd,
+                                    now: date(2026, 8, 1, 0, 0))
+        check(p.elapsedFraction == 0, "a future range has not elapsed")
+        check(p.verdict == .onPace, "and so isn't behind")
+    }
+
+    do { // per-day figures: average divides by days BEGUN, not days completed
+        // weekStart is Mon Aug 24, so Fri Aug 28 midday is part-way through the 5th day.
+        let friday = date(2026, 8, 28, 12, 0)
+        let p = TargetMath.progress(target: weekly(40, .atLeast), name: "office",
+                                    actualSeconds: 18 * 3600, rangeStart: weekStart,
+                                    rangeEnd: weekEnd, now: friday, todaySeconds: 2 * 3600)
+        check(p.daysElapsed == 5, "a part-elapsed day still counts as a day you had")
+        check(approx(p.averagePerDaySeconds / 3600, 18.0 / 7, 0.02),
+              "18h in the week averages 18/7 h/day, whatever day it is")
+        check(approx(p.todaySeconds / 3600, 2), "today's figure is carried through")
+        // 22h short with 2 of the 7 days left.
+        check(approx((p.requiredPerDaySeconds ?? 0) / 3600, 11, 0.1),
+              "the required pace spreads the shortfall over the days actually left")
+    }
+
+    do { // nothing required once the target is already met
+        let p = TargetMath.progress(target: weekly(10, .atLeast), name: "office",
+                                    actualSeconds: 12 * 3600, rangeStart: weekStart,
+                                    rangeEnd: weekEnd, now: date(2026, 8, 26, 12, 0))
+        check(p.requiredPerDaySeconds == nil, "a met floor needs no further pace")
+    }
+
+    do { // nor once the period is over — there are no days left to make it up in
+        let p = TargetMath.progress(target: weekly(40, .atLeast), name: "office",
+                                    actualSeconds: 1 * 3600, rangeStart: weekStart,
+                                    rangeEnd: weekEnd, now: date(2026, 9, 10, 0, 0))
+        check(p.requiredPerDaySeconds == nil, "a finished period has no remaining pace")
+    }
+
+    do { // the viewed-range bar PRO-RATES the target onto whatever range is showing
+        let day = 1.0
+        let p = TargetMath.progress(target: weekly(7, .atLeast), name: "recon paper",
+                                    actualSeconds: 1.78 * 3600, rangeStart: weekStart,
+                                    rangeEnd: weekEnd, now: weekEnd,
+                                    rangeSeconds: 0, viewedRangeDays: day)
+        check(approx(p.rangeExpectedSeconds / 3600, 1, 0.01),
+              "a 7h weekly budget pro-rates to 1h over a single day")
+        check(p.rangePercent == 0, "nothing tracked that day is 0% of it")
+        check(approx(p.percent, 25, 0.5), "and the weekly goal percentage is untouched")
+    }
+
+    do { // over a month the same weekly budget scales UP
+        let p = TargetMath.progress(target: weekly(40, .atLeast), name: "office",
+                                    actualSeconds: 0, rangeStart: weekStart, rangeEnd: weekEnd,
+                                    now: weekEnd, rangeSeconds: 98.8 * 3600,
+                                    viewedRangeDays: 30)
+        check(approx(p.rangeExpectedSeconds / 3600, 40 * 30 / 7, 0.1),
+              "40h/week over 30 days expects ~171h")
+        check(approx(p.rangePercent, 57.6, 0.5), "and reports progress against that")
+    }
+
+    do { // the average divides by the FULL period, so it doesn't drift as the week progresses
+        let p = TargetMath.progress(target: weekly(40, .atLeast), name: "office",
+                                    actualSeconds: 20 * 3600, rangeStart: weekStart,
+                                    rangeEnd: weekEnd, now: weekEnd,
+                                    rangeSeconds: 10 * 3600, viewedRangeDays: 5)
+        check(approx(p.averagePerDaySeconds / 3600, 20.0 / 7, 0.02),
+              "20h in a week averages 20/7 h/day — divided by all 7 days, not the 5 elapsed")
+    }
+
+    do { // a zero-length viewed range can't divide by zero
+        let p = TargetMath.progress(target: weekly(40, .atLeast), name: "x", actualSeconds: 0,
+                                    rangeStart: weekStart, rangeEnd: weekEnd,
+                                    rangeSeconds: 0, viewedRangeDays: 0)
+        check(p.rangeExpectedSeconds == 0 && p.rangePercent == 0, "inert, not NaN")
+    }
+
+    do { // a zero-length range can't divide by zero
+        let p = TargetMath.progress(target: weekly(30, .atLeast), name: "office",
+                                    actualSeconds: 0, rangeStart: weekStart, rangeEnd: weekStart)
+        check(p.expectedSeconds == 0 && p.percent == 0, "a zero range is inert, not NaN")
+    }
+}
+
+// MARK: - Budget hours input
+
+func testHoursInput() {
+    print("Hours field input:")
+    // Filtered as you type, so the field can never hold something commit would silently discard.
+    let cases: [(String, String)] = [
+        ("40", "40"),
+        ("7.5", "7.5"),
+        ("4.55", "4.5"),          // one decimal place only
+        ("abc12x", "12"),         // letters dropped
+        ("1.2.3", "1.2"),         // second dot dropped, and so is the digit after it — one
+                                  // decimal place is the rule, so "1.23" would break it
+        (".5", "5"),              // leading dot dropped — no bare ".5"
+        (",5", "5"),              // comma keyboards: same rule
+        ("1,5", "1.5"),           // comma becomes the decimal point
+        ("", ""),
+        ("...", ""),
+    ]
+    for (input, want) in cases {
+        let got = NumericInput.hours(input)
+        check(got == want, "hours(\"\(input)\") == \"\(want)\" (got \"\(got)\")")
+    }
+}
+
+// MARK: - Tag / budget sync
+
+func testTagSync() throws {
+    print("Tag & budget sync:")
+
+    func pair() throws -> (IntervalStore, URL, SyncEngine, IntervalStore, URL, SyncEngine) {
+        let (a, ua) = try makeStore(); let (b, ub) = try makeStore()
+        return (a, ua, SyncEngine(store: a, deviceID: "A"),
+                b, ub, SyncEngine(store: b, deviceID: "B"))
+    }
+
+    do { // CREATE: a tag, its link and its budget all reach the other device
+        let (a, ua, ea, b, ub, eb) = try pair()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let g = try a.upsertTaskProject(name: "profiling", colorHex: "#aaaaaa")
+        let tag = try a.upsertTag(name: "office", colorHex: "#4E79A7")
+        try a.addTag(tag, to: .project(g))
+        try a.setTarget(subject: .tag(tag), seconds: 40 * 3600, direction: .atLeast, period: .week)
+
+        _ = try eb.merge(try ea.buildPayload())
+
+        let bTag = try b.tag(named: "office")
+        check(bTag != nil, "the tag arrives")
+        let bGroup = try b.taskProject(named: "profiling")!
+        check(try b.tagIDs(for: .project(bGroup.id)) == [bTag!.id],
+              "and so does the link, resolved to B's own project id")
+        let bTargets = try b.listTargets()
+        check(bTargets.count == 1, "and the budget")
+        check(bTargets[0].subject == .tag(bTag!.id),
+              "pointing at B's tag id, not A's — subjects travel as uids")
+        check(bTargets[0].seconds == 40 * 3600 && bTargets[0].period == .week, "with its values")
+    }
+
+    do { // EDIT: renaming and re-budgeting propagate, newest wins
+        let (a, ua, ea, b, ub, eb) = try pair()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let tag = try a.upsertTag(name: "office", colorHex: "#4E79A7")
+        try a.setTarget(subject: .tag(tag), seconds: 10 * 3600, direction: .atLeast, period: .week)
+        _ = try eb.merge(try ea.buildPayload())
+
+        try a.renameTag(id: tag, name: "work")
+        try a.setTarget(subject: .tag(tag), seconds: 25 * 3600, direction: .atMost, period: .month)
+        _ = try eb.merge(try ea.buildPayload())
+
+        check(try b.tag(named: "work") != nil, "a rename propagates")
+        check(try b.tag(named: "office") == nil, "and doesn't leave the old name behind")
+        let t = try b.listTargets()
+        check(t.count == 1, "the budget is edited, not duplicated")
+        check(t[0].seconds == 25 * 3600 && t[0].direction == .atMost && t[0].period == .month,
+              "with every field carried")
+    }
+
+    do { // DELETE: a removed tag stays removed, even though the peer still has it
+        let (a, ua, ea, b, ub, eb) = try pair()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let g = try a.upsertTaskProject(name: "profiling", colorHex: "#aaaaaa")
+        let tag = try a.upsertTag(name: "office", colorHex: "#4E79A7")
+        try a.addTag(tag, to: .project(g))
+        try a.setTarget(subject: .tag(tag), seconds: 3600, direction: .atLeast, period: .week)
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listTags().count == 1, "precondition: B has it")
+
+        try a.deleteTag(id: tag)
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listTags().isEmpty, "the delete propagates")
+        check(try b.listTargets().isEmpty, "taking its budget with it")
+        let bGroup = try b.taskProject(named: "profiling")!
+        check(try b.tagIDs(for: .project(bGroup.id)).isEmpty, "and its links")
+
+        // The peer re-sends its (stale) copy; the tombstone must hold.
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listTags().isEmpty, "and holds against a re-send")
+    }
+
+    do { // DELETE of one link only — the tag itself survives
+        let (a, ua, ea, b, ub, eb) = try pair()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let g = try a.upsertTaskProject(name: "profiling", colorHex: "#aaaaaa")
+        let tag = try a.upsertTag(name: "office", colorHex: "#4E79A7")
+        try a.addTag(tag, to: .project(g))
+        _ = try eb.merge(try ea.buildPayload())
+        try a.removeTag(tag, from: .project(g))
+        _ = try eb.merge(try ea.buildPayload())
+        let bGroup = try b.taskProject(named: "profiling")!
+        check(try b.tagIDs(for: .project(bGroup.id)).isEmpty, "un-tagging propagates")
+        check(try b.listTags().count == 1, "without deleting the tag")
+    }
+
+    do { // DELETE of a budget alone
+        let (a, ua, ea, b, ub, eb) = try pair()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let tag = try a.upsertTag(name: "office", colorHex: "#4E79A7")
+        try a.setTarget(subject: .tag(tag), seconds: 3600, direction: .atLeast, period: .week)
+        _ = try eb.merge(try ea.buildPayload())
+        try a.deleteTarget(id: try a.listTargets()[0].id)
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listTargets().isEmpty, "removing a budget propagates")
+        check(try b.listTags().count == 1, "and leaves the tag alone")
+    }
+
+    do { // both devices invent the same tag name: converge on ONE, not two
+        let (a, ua, ea, b, ub, eb) = try pair()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        _ = try a.upsertTag(name: "office", colorHex: "#111111")
+        _ = try b.upsertTag(name: "Office", colorHex: "#999999")   // different case, different uid
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listTags().count == 1, "same name means one tag, not a duplicate pair")
+        _ = try ea.merge(try eb.buildPayload())
+        check(try a.listTags().count == 1, "and the other direction agrees")
+        let uidA = try a.uid(table: "tags", id: try a.listTags()[0].id)
+        let uidB = try b.uid(table: "tags", id: try b.listTags()[0].id)
+        check(uidA == uidB, "converging on one uid, so later renames match instead of forking")
+    }
+
+    do { // idempotent: merging the same payload twice changes nothing the second time
+        let (a, ua, ea, b, ub, eb) = try pair()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let g = try a.upsertTaskProject(name: "profiling", colorHex: "#aaaaaa")
+        let tag = try a.upsertTag(name: "office", colorHex: "#4E79A7")
+        try a.addTag(tag, to: .project(g))
+        try a.setTarget(subject: .tag(tag), seconds: 3600, direction: .atLeast, period: .week)
+        let payload = try ea.buildPayload()
+        _ = try eb.merge(payload)
+        let second = try eb.merge(payload)
+        check(second.tagsAdded == 0 && second.tagLinksAdded == 0 && second.targetsApplied == 0,
+              "a repeat merge is a no-op — what makes a dumb transport safe")
+        let tagCount = try b.listTags().count, targetCount = try b.listTargets().count
+        check(tagCount == 1 && targetCount == 1, "and adds nothing")
+    }
+
+    do { // a payload from a build that predates tags must still decode
+        let (a, ua, ea, _, ub, _) = try pair()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        _ = try a.upsertTag(name: "office", colorHex: "#4E79A7")
+        var json = try JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(try ea.buildPayload())) as! [String: Any]
+        json.removeValue(forKey: "tags")
+        json.removeValue(forKey: "tagLinks")
+        json.removeValue(forKey: "targets")
+        let older = try JSONSerialization.data(withJSONObject: json)
+        check((try? JSONDecoder().decode(SyncPayload.self, from: older)) != nil,
+              "an older payload with no tag keys still decodes — optional, not required")
+    }
+
+    do { // a budget on a PROJECT resolves to the peer's own project row
+        let (a, ua, ea, b, ub, eb) = try pair()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        // Give B an extra project first so the ids can't coincidentally line up.
+        _ = try b.upsertTaskProject(name: "decoy", colorHex: "#000000")
+        let g = try a.upsertTaskProject(name: "profiling", colorHex: "#aaaaaa")
+        try a.setTarget(subject: .project(g), seconds: 7 * 3600, direction: .atLeast, period: .week)
+        _ = try eb.merge(try ea.buildPayload())
+        let bGroup = try b.taskProject(named: "profiling")!
+        let t = try b.listTargets()
+        check(t.count == 1 && t[0].subject == .project(bGroup.id),
+              "the budget points at B's project id, which differs from A's")
+    }
+}
+
 // MARK: - Run
 
 do {
@@ -1913,8 +2410,13 @@ do {
     try testTaskNameReuse()
     try testDeleteInterval()
     testMarkerLiveness()
+    testHoursInput()
     try testRemoteGroupDelete()
     testDuplicateFileCollapse()
+    try testTags()
+    try testTagSync()
+    testTagTotals()
+    testTargetMath()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1

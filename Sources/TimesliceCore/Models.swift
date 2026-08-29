@@ -194,18 +194,16 @@ public struct RangeSummary: Sendable {
     public let totalSeconds: TimeInterval
     public let deepSeconds: TimeInterval
     public let activeDays: Int
-    public let daysOnGoal: Int
     public let switches: Int
     public let longestSessionSeconds: TimeInterval
     public let bestDaySeconds: TimeInterval
 
     public init(totalSeconds: TimeInterval, deepSeconds: TimeInterval, activeDays: Int,
-                daysOnGoal: Int, switches: Int, longestSessionSeconds: TimeInterval,
+                switches: Int, longestSessionSeconds: TimeInterval,
                 bestDaySeconds: TimeInterval) {
         self.totalSeconds = totalSeconds
         self.deepSeconds = deepSeconds
         self.activeDays = activeDays
-        self.daysOnGoal = daysOnGoal
         self.switches = switches
         self.longestSessionSeconds = longestSessionSeconds
         self.bestDaySeconds = bestDaySeconds

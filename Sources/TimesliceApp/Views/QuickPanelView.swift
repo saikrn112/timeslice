@@ -40,7 +40,7 @@ struct QuickPanelView: View {
     private var list: some View {
         ScrollView {
             VStack(spacing: 2) {
-                ForEach(appState.todayTotals) { total in
+                ForEach(appState.recencyOrderedTodayTotals) { total in
                     row(total)
                 }
             }
