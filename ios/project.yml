@@ -62,6 +62,11 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.timeslice.ios
         PRODUCT_NAME: Timeslice
+        # Compiles the BODY of the shared LiveActivityIntents only into the app. The widget needs
+        # the intent *types* to render its buttons, but `perform()` runs in the app's process — and
+        # letting the extension reach TimerModel would drag a sqlite connection into it, which is
+        # exactly what 0xdead10cc punishes.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: TIMESLICE_APP
     dependencies:
       - package: Timeslice
         product: TimesliceCore

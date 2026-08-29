@@ -43,17 +43,36 @@ struct TimerLiveActivity: Widget {
                         .padding(.trailing, 4)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    HStack {
-                        Label(context.state.isRunning ? "Tracking" : "Paused",
-                              systemImage: context.state.isRunning ? "record.circle" : "pause.circle")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        // The session, since the big clock is already today's total — the two
-                        // together answer "how long on this?" and "how much today?".
-                        SessionText(state: context.state)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                    VStack(spacing: 6) {
+                        HStack {
+                            Label(context.state.isRunning ? "Tracking" : "Paused",
+                                  systemImage: context.state.isRunning ? "record.circle" : "pause.circle")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            // The session, since the big clock is already today's total — the two
+                            // together answer "how long on this?" and "how much today?".
+                            SessionText(state: context.state)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        // Buttons, not gestures: a Live Activity can host App Intents only — no taps
+                        // to interpret, no scroll views, so no wheel. These two cover the actions
+                        // worth having without the app: stop counting, or bounce to the last task.
+                        HStack(spacing: 8) {
+                            Button(intent: ToggleFromActivityIntent()) {
+                                Label(context.state.isRunning ? "Pause" : "Resume",
+                                      systemImage: context.state.isRunning ? "pause.fill" : "play.fill")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.bordered)
+                            Button(intent: PreviousTaskIntent()) {
+                                Label("Previous", systemImage: "arrow.uturn.backward")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        .tint(color)
                     }
                     .padding(.horizontal, 4)
                 }

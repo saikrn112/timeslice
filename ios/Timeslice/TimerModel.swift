@@ -39,6 +39,9 @@ final class TimerModel: ObservableObject {
     /// mirror of the long-session checkpoint. Same role as the Mac's `TimerEngine.pausedSince`.
     @Published private(set) var pausedSince: Date?
     @Published private(set) var loadError: String?
+    /// Set by `OpenSwitcherIntent` so the root view can present the wheel. A published flag rather
+    /// than the intent presenting anything itself: an AppIntent has no view hierarchy to present in.
+    @Published var showingSwitcher = false
     /// Tags per group, for the row chips. Cached rather than queried per row — a per-render DB query
     /// is the trap the Mac's metrics legend already documents.
     @Published private(set) var tagsByGroup: [Int64: [Tag]] = [:]
@@ -234,6 +237,9 @@ final class TimerModel: ObservableObject {
         // Stopping is not pausing: nothing is outstanding, so both nudges are cancelled outright.
         NudgeScheduler.shared.cancelAll()
     }
+
+    /// Ask the UI to present the switcher wheel. Called from `OpenSwitcherIntent`.
+    func requestSwitcher() { showingSwitcher = true }
 
     /// Re-arm the nudges from current state. Public because the notification's "Still on it" action
     /// re-arms without changing the timer — a long session should keep checking in rather than going

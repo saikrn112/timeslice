@@ -62,6 +62,14 @@ struct TimesliceShortcuts: AppShortcutsProvider {
             shortTitle: "Toggle Timer",
             systemImageName: "timer")
         AppShortcut(
+            intent: OpenSwitcherIntent(),
+            phrases: [
+                "Switch \(.applicationName)",
+                "Switch task in \(.applicationName)",
+            ],
+            shortTitle: "Switch Task",
+            systemImageName: "arrow.triangle.swap")
+        AppShortcut(
             intent: StopTimerIntent(),
             phrases: ["Stop \(.applicationName)"],
             shortTitle: "Stop Timer",

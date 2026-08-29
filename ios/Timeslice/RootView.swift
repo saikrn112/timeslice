@@ -15,6 +15,16 @@ struct RootView: View {
         _tab = State(initialValue: Self.launchTab ?? .tasks)
     }
 
+    /// `start-tab` containing `switcher` opens the wheel on launch, so it can be screenshotted —
+    /// the wheel is otherwise only reachable by an Action Button press or a tap, neither of which
+    /// simctl can perform.
+    private static var launchesSwitcher: Bool {
+        let url = TimeslicePaths.defaultSupportDirectoryURL().appendingPathComponent("start-tab")
+        let raw = (try? String(contentsOf: url, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw == "switcher"
+    }
+
     /// Preselects a tab, so every screen can be screenshotted headlessly:
     ///
     /// ```bash
@@ -57,6 +67,12 @@ struct RootView: View {
                 .tabItem { Label("Budgets", systemImage: "target") }
                 .tag(Tab.budgets)
         }
-        .onAppear { model.load() }
+        .onAppear {
+            model.load()
+            if Self.launchesSwitcher { model.requestSwitcher() }
+        }
+        // Presented from the root so the Action Button's switcher binding works whichever tab was
+        // last open.
+        .sheet(isPresented: $model.showingSwitcher) { SwitchWheelSheet() }
     }
 }
