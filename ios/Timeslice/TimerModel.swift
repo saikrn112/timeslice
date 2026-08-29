@@ -35,6 +35,9 @@ final class TimerModel: ObservableObject {
     @Published private(set) var running: RunningInterval?
     /// The current task even while paused — what the Action Button toggles.
     @Published private(set) var currentTaskID: Int64?
+    /// When the current task was paused; nil unless paused. Drives the "still paused?" nudge, the
+    /// mirror of the long-session checkpoint. Same role as the Mac's `TimerEngine.pausedSince`.
+    @Published private(set) var pausedSince: Date?
     @Published private(set) var loadError: String?
     /// Tags per group, for the row chips. Cached rather than queried per row — a per-render DB query
     /// is the trap the Mac's metrics legend already documents.
@@ -125,8 +128,12 @@ final class TimerModel: ObservableObject {
             // persisted start, so a suspended or terminated app loses no time.
             if let running {
                 currentTaskID = running.projectID
+                pausedSince = nil
                 syncActivity(startedAt: running.start, isRunning: true)
             }
+            // Re-arm after a cold launch: the pending notification survives termination, but the
+            // threshold may have moved (a session recovered from a crash is already older).
+            rearmNudges()
         } catch {
             loadError = "\(error)"
         }
@@ -186,17 +193,21 @@ final class TimerModel: ObservableObject {
             if running?.projectID == taskID {
                 try store.stopOpenInterval()
                 currentTaskID = taskID          // stays current, mirroring the Mac's paused state
+                pausedSince = Date()
                 reload()
                 if let task = task(id: taskID) {
                     syncActivity(startedAt: Date(), isRunning: false, task: task)
                 }
+                rearmNudges()
             } else {
                 try store.switchTo(projectID: taskID)
                 currentTaskID = taskID
+                pausedSince = nil
                 reload()
                 if let running {
                     syncActivity(startedAt: running.start, isRunning: true)
                 }
+                rearmNudges()
             }
         } catch {
             loadError = "\(error)"
@@ -217,8 +228,21 @@ final class TimerModel: ObservableObject {
         guard let store else { return }
         try? store.stopOpenInterval()
         currentTaskID = nil
+        pausedSince = nil
         reload()
         LiveActivityController.end()
+        // Stopping is not pausing: nothing is outstanding, so both nudges are cancelled outright.
+        NudgeScheduler.shared.cancelAll()
+    }
+
+    /// Re-arm the nudges from current state. Public because the notification's "Still on it" action
+    /// re-arms without changing the timer — a long session should keep checking in rather than going
+    /// quiet after one dismissal.
+    func rearmNudges() {
+        NudgeScheduler.shared.rearm(runningSince: running?.start,
+                                    pausedSince: pausedSince,
+                                    taskName: currentTaskID.flatMap { task(id: $0)?.name })
+        NudgeScheduler.shared.logPending()
     }
 
     // MARK: - Task CRUD (§3.8)

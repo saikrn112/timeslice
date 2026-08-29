@@ -7,6 +7,9 @@ struct TimesliceiOSApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
+                // Registers the actionable category and asks for permission once, rather than at the
+                // moment a nudge is due — which would show the prompt instead of the nudge.
+                .task { NudgeScheduler.shared.start() }
         }
         .onChange(of: scenePhase) { _, phase in
             // Re-read on foreground rather than keeping a ticking clock alive: elapsed time is
