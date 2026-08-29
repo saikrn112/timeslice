@@ -217,9 +217,8 @@ final class AppState: ObservableObject {
         guard let id = try? store.createProject(name: name,
                                                 colorHex: Palette.color(forIndex: projects.count),
                                                 inGroup: groupID) else { return nil }
-        if let groupID {
-            try? store.setTaskProject(taskID: id, taskProjectID: groupID)
-        }
+        // No follow-up `setTaskProject` needed: `createProject(inGroup:)` now actually files the
+        // task. The old call was compensating for the parameter being ignored.
         reload()
         selectedProjectID = id
         engine.switchTo(projectID: id)

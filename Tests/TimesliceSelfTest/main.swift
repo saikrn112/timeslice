@@ -2587,6 +2587,152 @@ func testTaskOrdering() {
     }
 }
 
+
+// MARK: - BudgetRows (shared budget row composition)
+
+/// The composition hoisted out of the Mac's MetricsView so the phone's Budgets screen measures each
+/// budget over the identical windows. Each row reads three separate clocks — its own period, today,
+/// and the range being viewed — and which figure uses which window is the whole reason the numbers
+/// mean anything. These checks pin that wiring, not the maths inside `TargetMath` (already covered).
+func testBudgetRows() throws {
+    print("\nBudget rows:")
+
+    let (store, url) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let groupID = try store.upsertTaskProject(name: "work", colorHex: "#76B7B2")
+    let a = try store.createProject(name: "alpha", colorHex: "#4E79A7", inGroup: groupID)
+    let b = try store.createProject(name: "beta", colorHex: "#F28E2B")
+    let tagID = try store.upsertTag(name: "deep", colorHex: "#59A14F")
+    try store.addTag(tagID, to: .project(groupID))
+
+    let tasks = try store.listProjects(includeArchived: true)
+    let groups = try store.listTaskProjects()
+    let tags = try store.listTags()
+    let tagIDsByTask = try store.effectiveTagIDsByTask()
+
+    // A fixed "now" so the elapsed fraction and windows are deterministic.
+    let now = date(2026, 3, 11, 12, 0)               // a Wednesday, midday
+    let dayRange = DateRange.resolve(unit: .day, anchor: now)
+
+    // 2h on alpha today.
+    try store.insertClosedInterval(projectID: a, start: date(2026, 3, 11, 9, 0),
+                                   end: date(2026, 3, 11, 11, 0))
+    // 1h on beta today.
+    try store.insertClosedInterval(projectID: b, start: date(2026, 3, 11, 11, 0),
+                                   end: date(2026, 3, 11, 12, 0))
+    let intervals = try store.intervals()
+
+    do { // a task floor, judged against ITS OWN period rather than the viewed range
+        _ = try store.setTarget(subject: .task(a), seconds: 4 * 3600,
+                                direction: .atLeast, period: .day)
+        let rows = BudgetRows.build(targets: try store.listTargets(), tasks: tasks, groups: groups,
+                                    tags: tags, tagIDsByTask: tagIDsByTask, intervals: intervals,
+                                    viewedRange: dayRange, now: now)
+        check(rows.count == 1, "one target yields one row")
+        guard let row = rows.first else { return }
+        check(row.progress.name == "alpha", "subject name resolved from the task")
+        check(approx(row.progress.actualSeconds, 2 * 3600, 1), "actual is the subject's own seconds")
+        check(approx(row.progress.expectedSeconds, 4 * 3600, 1), "a daily target expects its full amount on a day range")
+        // Midday against a 4h floor with 2h done: on pace, NOT behind. Calling this a failure is
+        // what would train you to ignore the number.
+        if case .onPace = row.progress.verdict {} else {
+            check(false, "half-done at half-elapsed is on pace, got \(row.progress.verdict)")
+        }
+        // A task inside a project takes the project's SHADE, matching the list and the island.
+        check(row.colorHex != "#8E8E93", "task subject resolves a real colour")
+        check(row.colorHex == Palette.displayColorHex(
+                for: tasks.first { $0.id == a }!, groups: groups, allTasks: tasks),
+              "task colour is its display shade, not its raw swatch")
+    }
+
+    do { // a TAG subject aggregates every task carrying it (via its project)
+        for t in try store.listTargets() { try store.deleteTarget(id: t.id) }
+        _ = try store.setTarget(subject: .tag(tagID), seconds: 1 * 3600,
+                                direction: .atLeast, period: .day)
+        let rows = BudgetRows.build(targets: try store.listTargets(), tasks: tasks, groups: groups,
+                                    tags: tags, tagIDsByTask: tagIDsByTask, intervals: intervals,
+                                    viewedRange: dayRange, now: now)
+        guard let row = rows.first else { check(false, "tag target produced a row"); return }
+        check(row.progress.name == "deep", "tag name resolved")
+        check(approx(row.progress.actualSeconds, 2 * 3600, 1),
+              "tag rolls up alpha's 2h (inherited from its project) and not beta's")
+        check(row.colorHex == "#59A14F", "tag subject uses the tag's own colour")
+        if case .met = row.progress.verdict {} else {
+            check(false, "2h against a 1h floor is met, got \(row.progress.verdict)")
+        }
+    }
+
+    do { // trouble sorts first: a breached ceiling ahead of a floor that's fine
+        for t in try store.listTargets() { try store.deleteTarget(id: t.id) }
+        _ = try store.setTarget(subject: .task(b), seconds: 10 * 60,
+                                direction: .atMost, period: .day)     // 1h spent vs 10m ceiling
+        _ = try store.setTarget(subject: .task(a), seconds: 1 * 3600,
+                                direction: .atLeast, period: .day)    // 2h vs 1h floor: met
+        let rows = BudgetRows.build(targets: try store.listTargets(), tasks: tasks, groups: groups,
+                                    tags: tags, tagIDsByTask: tagIDsByTask, intervals: intervals,
+                                    viewedRange: dayRange, now: now)
+        check(rows.count == 2, "two targets, two rows")
+        check(rows.first?.progress.name == "beta", "the breached ceiling sorts first")
+        check(BudgetRows.rank(.over) < BudgetRows.rank(.behind)
+              && BudgetRows.rank(.behind) < BudgetRows.rank(.onPace)
+              && BudgetRows.rank(.onPace) < BudgetRows.rank(.met),
+              "verdict ranking is over < behind < onPace < met")
+    }
+
+    do { // a target whose subject was deleted must not render as a blank row
+        for t in try store.listTargets() { try store.deleteTarget(id: t.id) }
+        _ = try store.setTarget(subject: .task(9_999), seconds: 3600,
+                                direction: .atLeast, period: .day)
+        let rows = BudgetRows.build(targets: try store.listTargets(), tasks: tasks, groups: groups,
+                                    tags: tags, tagIDsByTask: tagIDsByTask, intervals: intervals,
+                                    viewedRange: dayRange, now: now)
+        check(rows.isEmpty, "a target pointing at a deleted subject is dropped, not rendered blank")
+        check(BudgetRows.name(for: .task(9_999), tasks: tasks, groups: groups, tags: tags) == nil,
+              "name resolution returns nil for a missing subject")
+    }
+
+    do { // budget durations are ALWAYS hours — never "1d 16h", which is unreadable as a budget
+        check(BudgetRows.duration(40 * 3600) == "40h", "40h stays 40h rather than rolling to days")
+        check(BudgetRows.duration(0) == "0", "zero is bare")
+        check(BudgetRows.duration(90) == "1m", "under an hour shows minutes")
+        check(BudgetRows.duration(30) == "30s", "under a minute shows seconds")
+        check(BudgetRows.duration(3600 + 7 * 60) == "1h 7m", "hours and minutes")
+        // Past 100h the minutes are noise and used to overflow the column.
+        check(BudgetRows.duration(107 * 3600 + 2 * 60) == "107h", "minutes dropped past 100h")
+    }
+}
+
+
+/// `createProject(inGroup:)` must actually FILE the task, not just use the group to dedup.
+///
+/// It used to drop the parameter after the dedup lookup, so a task created in a group landed in
+/// Inbox. The Mac masked it by calling `setTaskProject` straight afterwards; the phone's `/project`
+/// filing trusted the parameter and silently did nothing. Pinned here because the symptom is
+/// invisible — the task exists, just in the wrong place.
+func testCreateProjectFilesIntoGroup() throws {
+    print("\nCreate-in-group:")
+    let (store, url) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let groupID = try store.upsertTaskProject(name: "work", colorHex: "#76B7B2")
+    let filed = try store.createProject(name: "alpha", colorHex: "#4E79A7", inGroup: groupID)
+    let inbox = try store.createProject(name: "beta", colorHex: "#F28E2B")
+
+    let tasks = try store.listProjects(includeArchived: true)
+    check(tasks.first { $0.id == filed }?.taskProjectID == groupID,
+          "a task created inGroup is actually in that group")
+    check(tasks.first { $0.id == inbox }?.taskProjectID == nil,
+          "a task created with no group stays in Inbox")
+
+    // And the consequence that made it matter: tag inheritance flows through the group.
+    let tagID = try store.upsertTag(name: "deep", colorHex: "#59A14F")
+    try store.addTag(tagID, to: .project(groupID))
+    let byTask = try store.effectiveTagIDsByTask()
+    check(byTask[filed]?.contains(tagID) == true, "the filed task inherits its project's tag")
+    check(byTask[inbox]?.contains(tagID) != true, "an Inbox task inherits nothing")
+}
+
 // MARK: - Run
 
 do {
@@ -2620,6 +2766,8 @@ do {
     testPalette()
     testInlineBarContrast()
     testTaskOrdering()
+    try testCreateProjectFilesIntoGroup()
+    try testBudgetRows()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1

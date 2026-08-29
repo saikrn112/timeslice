@@ -51,6 +51,34 @@ xcodebuild -project ios/Timeslice.xcodeproj -scheme TimesliceiOS \
   DEVELOPMENT_TEAM=XXXXXXXXXX CODE_SIGNING_ALLOWED=YES CODE_SIGN_STYLE=Automatic
 ```
 
+### Screenshotting a specific tab (headless, no human)
+
+`simctl` can boot, install, launch and screenshot, but it **cannot tap a tab bar**. So the app reads
+a `TimesliceStartTab` preference on launch:
+
+```bash
+C=$(xcrun simctl get_app_container booted com.timeslice.ios data)
+defaults write "$C/Library/Preferences/com.timeslice.ios" TimesliceStartTab -string budgets
+xcrun simctl terminate booted com.timeslice.ios
+xcrun simctl launch booted com.timeslice.ios
+xcrun simctl io booted screenshot /tmp/shot.png      # values: tasks | metrics | budgets
+```
+
+Write the plist **inside the app's data container**, as above. Three other routes were tried and all
+silently fail on Xcode 26:
+
+| Attempt | Result |
+|---|---|
+| `simctl launch … --tab budgets` | swallowed by simctl; the app saw only its executable path |
+| `SIMCTL_CHILD_TIMESLICE_TAB=…` | arrived as nil |
+| `simctl spawn booted defaults write com.timeslice.ios …` | writes the simulator's global domain, not the sandboxed container |
+
+Each failed by doing nothing rather than erroring, so verify the preference reads back
+(`defaults read "$C/Library/Preferences/com.timeslice.ios"`) before concluding a screen is broken.
+
+Contrary to the plan's §7, **screenshots do not need a TCC grant on the iOS Simulator** — that
+restriction applies to capturing the macOS desktop. Every screen here has been verified this way.
+
 ## The one thing you CANNOT automate
 
 **The Action Button cannot be claimed programmatically** — there is no API for it. The app ships an

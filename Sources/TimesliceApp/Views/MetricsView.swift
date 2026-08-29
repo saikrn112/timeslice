@@ -1409,50 +1409,20 @@ struct MetricsView: View {
         max(1, (range.end.timeIntervalSince(range.start) / 86_400).rounded())
     }
 
-    private var targetProgress: [TargetProgress] {
+    /// Rows for the Budgets section. The composition lives in `BudgetRows.build` (Core) so the
+    /// phone's Budgets screen measures each budget over the identical three windows; see there for
+    /// why each figure uses the window it does.
+    private var budgetRows: [BudgetRows.Row] {
         let tasks = (try? appState.storeForEditing.listProjects(includeArchived: true)) ?? []
-        let now = Date()
-        return targets.compactMap { target in
-            guard let name = targetName(target.subject, tasks: tasks) else { return nil }
-            let unit: RangeUnit = {
-                switch target.period {
-                case .day: return .day
-                case .week: return .week
-                case .month: return .month
-                }
-            }()
-            let window = DateRange.resolve(unit: unit, anchor: now)
-            let secs = Aggregations.secondsForSubject(
-                target.subject, intervals: rangeIntervals, tasks: tasks,
-                tagIDsByTask: tagIDsByTask, range: window, now: now)
-            // Today's slice of the same subject, for the per-day column. Also period-independent —
-            // "today" means today whatever range you're browsing.
-            let today = Aggregations.secondsForSubject(
-                target.subject, intervals: rangeIntervals, tasks: tasks,
-                tagIDsByTask: tagIDsByTask, range: DateRange.resolve(unit: .day, anchor: now),
-                now: now)
-            // The subject's slice of the RANGE BEING VIEWED, for the share bar. A separate clock
-            // from the budget period above, on purpose.
-            let inRange = Aggregations.secondsForSubject(
-                target.subject, intervals: rangeIntervals, tasks: tasks,
-                tagIDsByTask: tagIDsByTask, range: range, now: now)
-            return TargetMath.progress(target: target, name: name, actualSeconds: secs,
-                                       rangeStart: window.start, rangeEnd: window.end, now: now,
-                                       todaySeconds: today, rangeSeconds: inRange,
-                                       viewedRangeDays: viewedRangeDays)
-        }
-        // Trouble first: breached ceilings, then things falling behind.
-        .sorted { rank($0.verdict) < rank($1.verdict) }
+        return BudgetRows.build(
+            targets: targets, tasks: tasks, groups: appState.taskProjects, tags: tags,
+            tagIDsByTask: tagIDsByTask, intervals: rangeIntervals, viewedRange: range)
     }
 
-    private func rank(_ v: TargetProgress.Verdict) -> Int {
-        switch v {
-        case .over: return 0
-        case .behind: return 1
-        case .onPace: return 2
-        case .met: return 3
-        }
-    }
+    private var targetProgress: [TargetProgress] { budgetRows.map(\.progress) }
+
+    // The verdict ordering (trouble first) is now `BudgetRows.rank`, applied inside
+    // `BudgetRows.build`, so there's no local copy left to drift from the phone's.
 
     /// nil when the subject has been deleted — a stale target shouldn't render as a blank row.
     private func targetName(_ subject: TargetSubject, tasks: [Project]) -> String? {
@@ -1740,16 +1710,10 @@ struct MetricsView: View {
     ///
     /// `Format.compact` rolls over to "1d 16h" past 24 hours, which is unreadable as a *budget* —
     /// a 40h weekly target rendered as "1d 16h". Budgets are always talked about in hours.
+    /// Shared with the phone via `BudgetRows.duration` — budgets are always talked about in hours,
+    /// never rolling into days.
     private func budgetDuration(_ seconds: TimeInterval) -> String {
-        let total = Int(seconds.rounded())
-        if total <= 0 { return "0" }
-        if total < 60 { return "\(total)s" }
-        let h = total / 3600, m = (total % 3600) / 60
-        if h == 0 { return "\(m)m" }
-        // Past 100h the minutes are noise, and they overflowed the column — a year view showed
-        // "107h 2…" and "2085h…".
-        if h >= 100 || m == 0 { return "\(h)h" }
-        return "\(h)h \(m)m"
+        BudgetRows.duration(seconds)
     }
 
     /// Hours, dropping the decimal once the number is big enough not to need it.

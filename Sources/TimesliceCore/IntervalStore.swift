@@ -288,13 +288,26 @@ public final class IntervalStore {
             if existing.finished { try setProjectFinished(id: existing.id, finished: false) }
             return existing.id
         }
-        let sql = "INSERT INTO projects (name, color_hex, sort_order, uid, updated_at) VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects), ?, ?)"
+        // `task_project_id` is written HERE. It previously wasn't: `inGroup` was consulted only for
+        // the dedup lookup above and then dropped, so a task created "in a group" silently landed in
+        // Inbox. The Mac happened to work because it calls `setTaskProject` immediately afterwards,
+        // but anything trusting the parameter — like the phone's `/project` filing — quietly did
+        // nothing, which is how this was found.
+        let sql = """
+            INSERT INTO projects (name, color_hex, sort_order, task_project_id, uid, updated_at)
+            VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects), ?, ?, ?)
+            """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, name)
         bindText(stmt, 2, colorHex)
-        bindText(stmt, 3, UUID().uuidString)
-        sqlite3_bind_double(stmt, 4, Date().timeIntervalSince1970)
+        if let taskProjectID {
+            sqlite3_bind_int64(stmt, 3, taskProjectID)
+        } else {
+            sqlite3_bind_null(stmt, 3)
+        }
+        bindText(stmt, 4, UUID().uuidString)
+        sqlite3_bind_double(stmt, 5, Date().timeIntervalSince1970)
         try step(stmt)
         return sqlite3_last_insert_rowid(db)
     }
