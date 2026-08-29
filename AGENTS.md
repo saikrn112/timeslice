@@ -68,6 +68,19 @@ Notes:
 - Screen capture (`screencapture`) needs its own TCC grant; you generally can't screenshot the UI
   headlessly to verify it — rely on `swift run TimesliceSelfTest` + sqlite inspection instead.
 
+## Working on the iPhone app
+
+`ios/` is a thin Xcode shell around the same SwiftPM package (the Dynamic Island is an app
+extension, which SwiftPM cannot express). If you are building the iOS app, read **both**:
+
+- `~/workspace/persona/Notes/Projects/timeslice/artifacts/ios_full_parity.md` — the plan: review of
+  what exists, the gap to the Mac app, feature spec, build order, and the traps not to rediscover.
+- `ios/README.md` — how to generate the project, build, and run it.
+
+The iOS work happens on the `feat/ios` branch, checked out as a git worktree at
+`~/workspace/persona/timeslice-ios`. Rebase it on `main` before each phase so the phone never drifts
+from the Mac.
+
 ## Where things live
 
 - `Sources/TimesliceCore/` — `IntervalStore` (sqlite3, schema + migrations), `Aggregations`

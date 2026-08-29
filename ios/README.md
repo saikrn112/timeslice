@@ -3,6 +3,22 @@
 Press the Action Button, and the task you're timing appears in the Dynamic Island in its own
 project colour, counting up.
 
+> ## Start here
+>
+> **The plan lives outside this repo, in the Obsidian vault:**
+>
+> ```
+> ~/workspace/persona/Notes/Projects/timeslice/artifacts/ios_full_parity.md
+> ```
+>
+> Read it before writing code. It carries the review of what's already built, the gap to the Mac
+> app, the feature spec, an ordered build plan, and — most importantly — a list of traps that each
+> already cost a debugging session on the Mac. This file below is only the build-and-run mechanics.
+>
+> Also read `AGENTS.md` at the repo root for the SwiftPM conventions and the self-test workflow.
+> `ios_action_button.md` in the same vault folder is **superseded** by the parity plan; don't follow
+> it.
+
 ## Build and run
 
 Unlike the Mac app, this part **needs Xcode** — a Live Activity is an app extension, and SwiftPM has
