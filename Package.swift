@@ -13,6 +13,8 @@ let package = Package(
     ],
     products: [
         .library(name: "TimesliceCore", targets: ["TimesliceCore"]),
+        // Consumed by the iOS app AND its Live Activity extension, which is why it's a product.
+        .library(name: "TimesliceUI", targets: ["TimesliceUI"]),
         .executable(name: "TimesliceApp", targets: ["TimesliceApp"]),
     ],
     dependencies: [
@@ -28,10 +30,18 @@ let package = Package(
                 .linkedLibrary("sqlite3"),
             ]
         ),
+        // Shared SwiftUI helpers (time formatting, hex → Color). UI-framework-only, no AppKit, so
+        // it builds for the iOS app and its widget extension as well as the Mac app.
+        .target(
+            name: "TimesliceUI",
+            dependencies: ["TimesliceCore"],
+            path: "Sources/TimesliceUI"
+        ),
         .executableTarget(
             name: "TimesliceApp",
             dependencies: [
                 "TimesliceCore",
+                "TimesliceUI",
             ],
             path: "Sources/TimesliceApp",
             swiftSettings: [

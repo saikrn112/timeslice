@@ -236,22 +236,13 @@ final class AppState: ObservableObject {
     /// This is the whole point of the feature — with 35 tasks the timeline was painting 35
     /// generated hues that started to look alike. Inheriting the group's colour collapses that
     /// to a handful without losing per-task detail (hover still names the task).
+    /// The derivation itself lives in `Palette` (Core) so the iOS app and the Live Activity render
+    /// the identical colour; this is just the binding to the state it needs. A SHADE of the project
+    /// colour, not the flat colour: same hue so the group reads as one family, but distinct enough
+    /// that adjacent blocks from two tasks in the same project don't merge into an indistinguishable
+    /// band on the timeline.
     func displayColorHex(for task: Project) -> String {
-        guard let groupID = task.taskProjectID,
-              let group = taskProjects.first(where: { $0.id == groupID }) else { return task.colorHex }
-        // A SHADE of the project colour, not the flat colour: same hue so the group reads as one
-        // family, but distinct enough that adjacent blocks from two tasks in the same project
-        // don't merge into an indistinguishable band on the timeline.
-        return Palette.shade(ofHex: group.colorHex, index: shadeIndex(of: task, in: groupID))
-    }
-
-    /// A task's position among its project's tasks, in stable id order — so a task keeps the same
-    /// shade as others come and go, rather than reshuffling on every change.
-    private func shadeIndex(of task: Project, in groupID: Int64) -> Int {
-        let siblings = allProjectsCache
-            .filter { $0.taskProjectID == groupID }
-            .sorted { $0.id < $1.id }
-        return siblings.firstIndex { $0.id == task.id } ?? 0
+        Palette.displayColorHex(for: task, groups: taskProjects, allTasks: allProjectsCache)
     }
 
     /// All tasks incl. archived — shades must stay stable even when a sibling is archived, so this

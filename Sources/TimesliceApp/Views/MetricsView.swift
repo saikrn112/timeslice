@@ -1,4 +1,5 @@
 import SwiftUI
+import TimesliceUI
 import Charts
 import TimesliceCore
 

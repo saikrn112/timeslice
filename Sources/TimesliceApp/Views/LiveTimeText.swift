@@ -1,4 +1,5 @@
 import SwiftUI
+import TimesliceUI
 
 /// A time label that ticks live by observing the shared TickClock. Isolating clock observation
 /// here means only this small text re-renders at the tick rate — not the enclosing list/charts.

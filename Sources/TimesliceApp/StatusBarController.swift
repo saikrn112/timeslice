@@ -1,4 +1,5 @@
 import AppKit
+import TimesliceUI
 import SwiftUI
 import Combine
 import TimesliceCore

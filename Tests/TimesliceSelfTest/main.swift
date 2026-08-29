@@ -2387,6 +2387,71 @@ func testTagSync() throws {
     }
 }
 
+// MARK: - Palette / shared colour derivation
+
+/// Colour derivation moved from `AppState` into Core so the iOS app and the Live Activity widget
+/// (a separate process that can't link the Mac app) render a task in the SAME colour. These checks
+/// are the thing that makes that guarantee real rather than aspirational.
+func testPalette() {
+    print("\nPalette:")
+
+    do { // base palette, then generated hues — never a repeat
+        check(Palette.color(forIndex: 0) == "#4E79A7", "index 0 is the first base colour")
+        check(Palette.color(forIndex: 9) == "#BAB0AC", "index 9 is the last base colour")
+        let generated = (0..<40).map { Palette.color(forIndex: $0) }
+        check(Set(generated).count == 40, "40 tasks get 40 distinct colours")
+        check(generated.allSatisfy { $0.count == 7 && $0.hasPrefix("#") }, "all are #RRGGBB")
+    }
+
+    do { // shade(index: 0) must be identity, or the first task stops matching its project swatch
+        check(Palette.shade(ofHex: "#4E79A7", index: 0) == "#4E79A7", "shade 0 is the base colour")
+        let shades = (0..<6).map { Palette.shade(ofHex: "#4E79A7", index: $0) }
+        check(Set(shades).count == 6, "siblings get distinct shades")
+        // Same hue family: a shade must stay recognisably the project's colour.
+        let baseHue = Palette.hsv(fromHex: "#4E79A7")!.h
+        check(shades.allSatisfy { abs(Palette.hsv(fromHex: $0)!.h - baseHue) < 0.02 },
+              "shades preserve the project hue")
+    }
+
+    do { // malformed input degrades instead of crashing
+        check(Palette.shade(ofHex: "nonsense", index: 3) == "nonsense", "bad hex passes through")
+        check(Palette.hsv(fromHex: "#fff") == nil, "3-digit hex is rejected")
+    }
+
+    do { // Inbox (no group) keeps the task's own colour
+        let task = Project(id: 1, name: "t", colorHex: "#123456", sortOrder: 0, archived: false)
+        check(Palette.displayColorHex(for: task, groups: [], allTasks: [task]) == "#123456",
+              "ungrouped task keeps its own colour")
+    }
+
+    do { // grouped tasks take shades of the GROUP colour, positionally by id
+        let group = TaskProject(id: 7, name: "g", colorHex: "#59A14F")
+        func t(_ id: Int64) -> Project {
+            Project(id: id, name: "t\(id)", colorHex: "#000000", sortOrder: 0, archived: false,
+                    taskProjectID: 7)
+        }
+        let all = [t(3), t(11), t(42)]
+        let hexes = all.map { Palette.displayColorHex(for: $0, groups: [group], allTasks: all) }
+        check(hexes[0] == "#59A14F", "first task in a group matches the group swatch")
+        check(Set(hexes).count == 3, "three grouped tasks get three shades")
+
+        // Input order must not matter — sorting is by id, so a reordered list is the same colours.
+        let shuffled = [t(42), t(3), t(11)]
+        check(Palette.displayColorHex(for: t(11), groups: [group], allTasks: shuffled) == hexes[1],
+              "shade is independent of input order")
+
+        // Archived siblings MUST still count: dropping one renumbers the rest and silently
+        // recolours them, which is the bug the `allTasks` parameter exists to prevent.
+        let withoutMiddle = [t(3), t(42)]
+        check(Palette.displayColorHex(for: t(42), groups: [group], allTasks: withoutMiddle) != hexes[2],
+              "omitting a sibling shifts later shades (so archived tasks must be included)")
+
+        // A task pointing at a group that no longer exists falls back rather than vanishing.
+        check(Palette.displayColorHex(for: t(3), groups: [], allTasks: all) == "#000000",
+              "missing group falls back to the task's colour")
+    }
+}
+
 // MARK: - Run
 
 do {
@@ -2417,6 +2482,7 @@ do {
     try testTagSync()
     testTagTotals()
     testTargetMath()
+    testPalette()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1
