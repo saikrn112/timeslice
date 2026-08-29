@@ -56,6 +56,12 @@ targets:
         # Permits updating/ending an activity while backgrounded. Only *starting* one is refused.
         NSSupportsLiveActivitiesFrequentUpdates: true
         UILaunchScreen: {}
+        # Required for BGAppRefreshTask: the system refuses to register an identifier that isn't
+        # declared here, and the failure is a runtime crash rather than a build error.
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.timeslice.ios.sync
+        UIBackgroundModes:
+          - fetch
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
     settings:

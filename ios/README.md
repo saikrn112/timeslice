@@ -131,7 +131,20 @@ a shared container, and a WAL connection is such a lock).
 
 ## Sync
 
-Off by default, as on the Mac. Signing in needs a **separate Google OAuth client of iOS type** (no
+Off by default, as on the Mac. `SyncController` runs one cycle — publish payload, merge peers, settle
+the one-timer invariant via `TakeoverPolicy`, republish the running marker — all of it Core logic
+shared with the Mac.
+
+**`BGTaskScheduler` does not work on the Simulator.** `submit` returns
+`BGTaskSchedulerErrorDomain error 1` (`.unavailable`) there; registration still succeeds. Background
+refresh can only be exercised on a device, or by triggering
+`_simulateLaunchForTaskWithIdentifier:` from an attached Xcode debug session. Foregrounding the app
+syncs immediately, which is the path that *is* testable.
+
+Cadence is deliberately asymmetric: `BGAppRefreshTask` is opportunistic, so a backgrounded phone may
+not notice a takeover for hours. The data still converges because `TakeoverPolicy` back-dates
+`pauseAt` to when the other device started. Don't fight this with background modes.
+ Signing in needs a **separate Google OAuth client of iOS type** (no
 client secret) plus the reversed-client-id redirect scheme — Google refuses arbitrary schemes like
 `timeslice://` for installed apps. Until that client is registered, the app works fully as a
 standalone local tracker.
