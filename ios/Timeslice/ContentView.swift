@@ -36,8 +36,8 @@ struct ContentView: View {
                         ForEach(model.tasks) { task in
                             TaskRow(task: task,
                                     colorHex: model.colorHex(for: task),
-                                    seconds: model.todaySeconds[task.id] ?? 0,
-                                    isRunning: model.running?.projectID == task.id,
+                                    committedSeconds: model.committedTodaySeconds[task.id] ?? 0,
+                                    liveOrigin: model.liveOrigin(for: task.id),
                                     isCurrent: model.currentTaskID == task.id)
                                 .contentShape(Rectangle())
                                 .onTapGesture { model.toggle(taskID: task.id) }
@@ -79,9 +79,13 @@ struct ContentView: View {
 private struct TaskRow: View {
     let task: Project
     let colorHex: String
-    let seconds: TimeInterval
-    let isRunning: Bool
+    /// Today's seconds from closed intervals. The live run is added by `liveOrigin`, not by this.
+    let committedSeconds: TimeInterval
+    /// Non-nil only for the running task: the backdated instant to tick today's total from.
+    let liveOrigin: Date?
     let isCurrent: Bool
+
+    private var isRunning: Bool { liveOrigin != nil }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -101,16 +105,21 @@ private struct TaskRow: View {
 
             Spacer()
 
-            if isRunning, let since = TimerModel.shared.running?.start {
-                // Let SwiftUI's own timer text tick this rather than driving a 10fps clock: on a
-                // phone the list is often not even on screen, and the island is the live surface.
-                Text(timerInterval: since...Date.distantFuture, pauseTime: nil, countsDown: false)
+            if let liveOrigin {
+                // TODAY'S TOTAL, ticking — committed base plus the live run, which is what the Mac
+                // shows. Counting from the run's own start instead would make this number collapse
+                // to zero on every task switch, reading as a reset rather than a context switch.
+                //
+                // Ticked by SwiftUI from a date rather than by a 10fps clock of our own: on a phone
+                // this list is usually not even on screen, and the island is the live surface.
+                Text(timerInterval: liveOrigin...Date.distantFuture,
+                     pauseTime: nil, countsDown: false)
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(Color(hex: colorHex))
             } else {
-                Text(Format.compact(seconds))
+                Text(Format.compact(committedSeconds))
                     .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(seconds > 0 ? .primary : .tertiary)
+                    .foregroundStyle(committedSeconds > 0 ? .primary : .tertiary)
             }
         }
         .padding(.vertical, 2)

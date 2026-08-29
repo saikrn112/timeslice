@@ -49,9 +49,9 @@ struct TimerLiveActivity: Widget {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         Spacer()
-                        // The day's figure is what makes the island worth glancing at; the live
-                        // clock alone doesn't answer "how much today".
-                        TodayText(state: context.state)
+                        // The session, since the big clock is already today's total — the two
+                        // together answer "how long on this?" and "how much today?".
+                        SessionText(state: context.state)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -78,45 +78,48 @@ struct TimerLiveActivity: Widget {
     }
 }
 
-/// The live clock. Counts up from the interval's start when running; freezes at the accumulated
-/// figure when paused, since `timerInterval` has no notion of "stopped".
+/// The clock: **today's total for this task**, ticking — matching what the Mac's menu bar and task
+/// list show, which is `committed base + live elapsed` rather than the current session alone.
+///
+/// Showing only the session was the original bug: switching tasks made the number visibly collapse
+/// to zero instead of continuing the day's total, which reads as the timer having been reset.
+///
+/// Frozen at the committed figure when paused, since `timerInterval` has no notion of "stopped".
 private struct ClockText: View {
     let state: TimerActivityAttributes.ContentState
 
     var body: some View {
         if state.isRunning {
-            Text(timerInterval: state.startedAt...Date.distantFuture,
+            Text(timerInterval: state.liveOrigin...Date.distantFuture,
                  pauseTime: nil, countsDown: false)
         } else {
-            Text(Format.duration(state.todaySecondsBeforeRun))
+            Text(Format.duration(state.committedTodaySeconds))
         }
     }
 }
 
-/// Today's total for this task. While running, the system ticks it from a start point pushed back
-/// by whatever was already banked today — so the figure stays correct without the app updating it.
-private struct TodayText: View {
+/// The CURRENT SESSION, as the secondary figure — the main clock is already today's total, so
+/// repeating it here would waste the island's most limited resource. Together they answer both
+/// "how long have I been on this?" and "how much today?", which is the pair the Mac shows too.
+private struct SessionText: View {
     let state: TimerActivityAttributes.ContentState
 
     var body: some View {
         if state.isRunning {
-            // Backdate the start by what's already banked today, so one system-ticked clock shows
-            // the day's running total without the app pushing updates.
-            let dayStart = state.startedAt.addingTimeInterval(-state.todaySecondsBeforeRun)
             HStack(spacing: 3) {
-                Text("today")
-                Text(timerInterval: dayStart...Date.distantFuture,
+                Text("session")
+                Text(timerInterval: state.startedAt...Date.distantFuture,
                      pauseTime: nil, countsDown: false)
                     .monospacedDigit()
             }
         } else {
-            Text("today \(Format.compact(state.todaySecondsBeforeRun))")
+            Text("paused · today \(Format.compact(state.committedTodaySeconds))")
         }
     }
 }
 
-/// Lock Screen / banner presentation. Wider than the island, so it can afford the task name and the
-/// day total on one row.
+/// Lock Screen / banner presentation. Wider than the island, so it can afford the task name, the
+/// day total, and the session all on one row.
 private struct LockScreenView: View {
     let state: TimerActivityAttributes.ContentState
 
@@ -129,7 +132,7 @@ private struct LockScreenView: View {
                 Text(state.taskName)
                     .font(.headline)
                     .lineLimit(1)
-                TodayText(state: state)
+                SessionText(state: state)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

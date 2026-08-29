@@ -21,10 +21,14 @@ struct TimerActivityAttributes: ActivityAttributes {
         var colorHex: String
         /// When the running interval began. The system counts up from this.
         var startedAt: Date
-        /// Today's total for this task at the moment of the last update, EXCLUDING the live run.
-        /// Kept separate so the widget can show "today" without the app having to push a tick:
-        /// the live portion is `now - startedAt`, which the system already knows how to draw.
-        var todaySecondsBeforeRun: Double
+        /// Today's seconds for this task from **CLOSED intervals only** — the committed base, the
+        /// same quantity the Mac's `AppState.recomputeTotals` produces.
+        ///
+        /// Excluding the open interval is what makes this stable: the widget adds the live portion
+        /// by ticking from `startedAt`, so a base that already contained some elapsed time would
+        /// double-count and drift. Named for what it *is*, because the previous name invited
+        /// exactly that bug.
+        var committedTodaySeconds: Double
         /// False while the task is paused but still current — the island stays up showing a frozen
         /// time, which mirrors how the Mac's menu bar keeps displaying a paused task.
         var isRunning: Bool
@@ -33,4 +37,34 @@ struct TimerActivityAttributes: ActivityAttributes {
     /// Stable identity of what's being timed. Only used to decide whether an existing activity can
     /// be updated rather than replaced.
     var taskID: Int64
+}
+
+extension TimerActivityAttributes.ContentState {
+    /// The instant a system-ticked clock should count from so it reads as today's total.
+    var liveOrigin: Date {
+        TimerDisplay.liveOrigin(runStart: startedAt, committedToday: committedTodaySeconds)
+    }
+
+    /// Seconds elapsed in the current session alone (0 when paused).
+    func sessionSeconds(now: Date = Date()) -> Double {
+        isRunning ? max(0, now.timeIntervalSince(startedAt)) : 0
+    }
+}
+
+/// Display maths shared by the app and the widget extension.
+///
+/// In `Shared/` precisely because those are two processes: the list row and the Dynamic Island must
+/// agree to the second, and a second copy of this arithmetic is how they would quietly stop agreeing.
+enum TimerDisplay {
+    /// Backdate the run's start by whatever is already banked today, so ONE `Text(timerInterval:)`
+    /// renders `committed + live` — today's running total — with no timer of our own. This is what
+    /// lets the island keep counting while the app is suspended or terminated.
+    ///
+    /// Clamped to the start of today: a session begun before midnight must contribute only its
+    /// post-midnight portion, otherwise today's figure opens hours too high.
+    static func liveOrigin(runStart: Date, committedToday: Double,
+                           now: Date = Date(), calendar: Calendar = .current) -> Date {
+        let effectiveStart = max(runStart, calendar.startOfDay(for: now))
+        return effectiveStart.addingTimeInterval(-committedToday)
+    }
 }

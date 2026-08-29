@@ -16,7 +16,13 @@ final class TimerModel: ObservableObject {
     static let shared = TimerModel()
 
     @Published private(set) var tasks: [Project] = []
-    @Published private(set) var todaySeconds: [Int64: TimeInterval] = [:]
+    /// Today's seconds from **CLOSED intervals only** — the committed base, matching the Mac's
+    /// `AppState.recomputeTotals`. The running task's live time is added on top at display time, so
+    /// a row can tick without re-querying, and so this value never goes stale.
+    ///
+    /// Including the open interval here (as this once did) is a trap: it bakes a snapshot of
+    /// "elapsed as of the last reload" into the total, which then neither ticks nor matches the Mac.
+    @Published private(set) var committedTodaySeconds: [Int64: TimeInterval] = [:]
     @Published private(set) var running: RunningInterval?
     @Published private(set) var loadError: String?
 
@@ -71,9 +77,13 @@ final class TimerModel: ObservableObject {
             running = try store.openInterval()
             if let running { currentTaskID = running.projectID }
 
-            let intervals = try store.intervals(from: Calendar.current.startOfDay(for: Date()))
-            let totals = Aggregations.todayTotals(projects: allTasks, intervals: intervals)
-            todaySeconds = Dictionary(uniqueKeysWithValues: totals.map { ($0.project.id, $0.seconds) })
+            // Closed intervals only — see `committedTodaySeconds`. Not windowed by day either:
+            // `todayTotals` does the clipping, and an interval that began yesterday and ended today
+            // must be counted for its post-midnight portion, which a `from: startOfDay` query drops.
+            let closed = try store.intervals().filter { !$0.isRunning }
+            let totals = Aggregations.todayTotals(projects: allTasks, intervals: closed)
+            committedTodaySeconds = Dictionary(
+                uniqueKeysWithValues: totals.map { ($0.project.id, $0.seconds) })
         } catch {
             loadError = "\(error)"
         }
@@ -151,17 +161,23 @@ final class TimerModel: ObservableObject {
 
     private func syncActivity(startedAt: Date, isRunning: Bool, task explicit: Project? = nil) {
         guard let id = currentTaskID, let task = explicit ?? self.task(id: id) else { return }
-        // `todaySeconds` already includes the live portion, so subtract it — the widget adds the
-        // live part back by ticking from `startedAt`, and double-counting would show a today total
-        // running at twice real time.
-        let live = isRunning ? Date().timeIntervalSince(startedAt) : 0
-        let before = max(0, (todaySeconds[id] ?? 0) - live)
+        // Passed straight through now that the base excludes the open interval. The previous version
+        // subtracted a freshly-computed `live` from a total that already contained an older one —
+        // two different `now`s, so it drifted.
         LiveActivityController.sync(
             taskID: id,
             state: .init(taskName: task.name,
                          colorHex: colorHex(for: task),
                          startedAt: startedAt,
-                         todaySecondsBeforeRun: before,
+                         committedTodaySeconds: committedTodaySeconds[id] ?? 0,
                          isRunning: isRunning))
+    }
+
+    /// Where a running row's live clock should count from, so the list and the Dynamic Island show
+    /// the same number. Delegates to `TimerDisplay` in `Shared/` — the widget uses it too.
+    func liveOrigin(for taskID: Int64) -> Date? {
+        guard let running, running.projectID == taskID else { return nil }
+        return TimerDisplay.liveOrigin(runStart: running.start,
+                                       committedToday: committedTodaySeconds[taskID] ?? 0)
     }
 }
