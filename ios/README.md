@@ -45,8 +45,17 @@ xcodebuild -project ios/Timeslice.xcodeproj -scheme TimesliceiOS \
 This is the iOS counterpart to the Accessibility grant the Mac app needs (see `AGENTS.md`), and for
 the same reason: a deliberate user gesture the system won't let software perform on its own.
 
-Also note the Action Button is **iPhone 15 Pro and later**, and **does not exist in the Simulator** —
-that half is device-test-only. Everything else, including the Dynamic Island, works in the Simulator.
+The Action Button is **iPhone 15 Pro and later**. The Simulator *does* expose it — the
+Settings → Action Button pane is present on an iPhone 15/17 Pro simulator, so the assignment can be
+made and exercised there; only the physical press is hardware. (An earlier version of this file
+claimed the Simulator had no Action Button at all. It was wrong.)
+
+Both intents are registered in the built app's `Metadata.appintents`, which is what makes them
+discoverable in Shortcuts:
+
+```bash
+plutil -p "$(find ~/Library/Developer/Xcode/DerivedData -name Timeslice.app | head -1)/Metadata.appintents/extract.actionsdata" | grep Intent
+```
 
 ## How it works
 
