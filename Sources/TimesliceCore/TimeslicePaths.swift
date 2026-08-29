@@ -7,8 +7,12 @@ public enum TimeslicePaths {
     /// on an unsandboxed Mac it resolves to exactly `~/Library/Application Support`, so existing
     /// databases are found unchanged.
     public static func defaultSupportDirectoryURL(appName: String = "Timeslice") -> URL {
+        // The fallback uses `NSHomeDirectory()`, not `homeDirectoryForCurrentUser`: the latter is
+        // marked *unavailable* on iOS, so it fails to compile even sitting in a branch that can
+        // never run there. `NSHomeDirectory()` exists on both and means the right thing on both —
+        // the user's home on an unsandboxed Mac, the container root on iOS.
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser
+            ?? URL(fileURLWithPath: NSHomeDirectory())
                 .appendingPathComponent("Library/Application Support", isDirectory: true)
         return base.appendingPathComponent(appName, isDirectory: true)
     }
