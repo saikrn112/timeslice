@@ -1,0 +1,107 @@
+# XcodeGen spec for the iOS app + Live Activity extension.
+#
+# Why an Xcode project exists at all in a repo that prides itself on pure SwiftPM: a Live Activity
+# is an app extension, and SwiftPM has no app-extension product type at any tools version. The
+# Dynamic Island is therefore not expressible in Package.swift.
+#
+# Why XcodeGen rather than a committed .xcodeproj: a .pbxproj is a 1000-line generated file that
+# conflicts on every branch and cannot be reviewed. This spec is the source of truth; regenerate
+# with `xcodegen generate --spec ios/project.yml`. The .xcodeproj is disposable and gitignored.
+#
+# All the logic lives in the SwiftPM package above (TimesliceCore, TimesliceUI), consumed here as a
+# local package. The macOS app and `swift run TimesliceSelfTest` keep working with no Xcode at all.
+name: Timeslice
+options:
+  bundleIdPrefix: com.timeslice
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+packages:
+  Timeslice:
+    path: ..
+
+settings:
+  base:
+    # Swift 5 mode deliberately: the package is tools-version 5.9 and carries pre-existing
+    # concurrency warnings that are errors under Swift 6. Matching the package avoids the iOS
+    # targets failing on warnings the Mac app currently tolerates.
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Simulator builds need no signing; a device build needs a real DEVELOPMENT_TEAM, which is
+    # per-developer and so deliberately not committed here.
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+
+targets:
+  TimesliceiOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: Timeslice
+      - path: Shared
+    # Declared here, not in a checked-in plist: `info:` makes XcodeGen *generate* the file at that
+    # path, so a hand-written one gets silently overwritten on every `xcodegen generate` — which
+    # already cost one round of losing NSSupportsLiveActivities.
+    info:
+      path: Timeslice/Info.plist
+      properties:
+        CFBundleDisplayName: Timeslice
+        # Without this the Live Activity never appears, and the failure looks exactly like a bug in
+        # the widget code. Easiest thing in the whole feature to forget.
+        NSSupportsLiveActivities: true
+        # Permits updating/ending an activity while backgrounded. Only *starting* one is refused.
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.timeslice.ios
+        PRODUCT_NAME: Timeslice
+    dependencies:
+      - package: Timeslice
+        product: TimesliceCore
+      - package: Timeslice
+        product: TimesliceUI
+      - target: TimesliceWidgetsExtension
+        embed: true
+
+  TimesliceWidgetsExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: TimesliceWidgets
+      # The ActivityAttributes contract is compiled into BOTH targets — app and widget run in
+      # separate processes and must agree on the content state's layout.
+      - path: Shared
+    info:
+      path: TimesliceWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: Timeslice
+        # Identifies this as a WidgetKit extension. Missing it, the bundle builds and embeds fine
+        # but the system never loads the widget — a silent no-op rather than an error.
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.timeslice.ios.widgets
+        PRODUCT_NAME: TimesliceWidgets
+    dependencies:
+      # The widget links Core + UI so the Dynamic Island resolves colours with the same
+      # Palette/Color(hex:) the app and the Mac use, instead of a copy that can drift.
+      - package: Timeslice
+        product: TimesliceCore
+      - package: Timeslice
+        product: TimesliceUI
+
+schemes:
+  TimesliceiOS:
+    build:
+      targets:
+        TimesliceiOS: all
+    run:
+      config: Debug
