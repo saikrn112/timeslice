@@ -1,5 +1,7 @@
 import Foundation
 import TimesliceCore
+import TimesliceUI
+import SwiftUI
 
 // Minimal assertion harness (no XCTest/swift-testing under Command Line Tools).
 var failures = 0
@@ -2478,6 +2480,59 @@ func testPalette() {
     }
 }
 
+
+// MARK: - Shared bar components (TimesliceUI)
+
+/// `InlineBar` draws its percentage INSIDE the bar, so the label colour has to flip based on the
+/// fill. Getting that wrong makes the label invisible — a silent bug no compiler catches, and the
+/// reason this threshold is pinned here rather than left to inspection.
+///
+/// Also guards the platform branch: a macOS build cannot typecheck the `#if canImport(UIKit)` arm at
+/// all, so these run on the macOS arm and the iOS arm is verified separately by compiling for the
+/// iOS SDK. Keeping them in step is manual.
+func testInlineBarContrast() {
+    print("\nInlineBar contrast:")
+
+    // Perceptual, NOT max(r,g,b): a saturated yellow is far lighter to the eye than its RGB
+    // suggests, and plain brightness would put white text on it.
+    let yellow = InlineBar.perceptualLuminance(of: Color(red: 1, green: 1, blue: 0))
+    let blue = InlineBar.perceptualLuminance(of: Color(red: 0, green: 0, blue: 1))
+    check(yellow != nil && blue != nil, "luminance is readable for plain colours")
+    if let yellow, let blue {
+        check(yellow > 0.85, "yellow is perceptually light (\(yellow))")
+        check(blue < 0.2, "pure blue is perceptually dark (\(blue))")
+        check(yellow > blue, "yellow reads lighter than blue despite equal RGB maxima")
+    }
+
+    // The decisions that actually matter for legibility.
+    check(InlineBar.readableTextColor(on: Color(red: 1, green: 1, blue: 0)) == .black,
+          "black label on a light fill")
+    check(InlineBar.readableTextColor(on: Color(red: 0, green: 0, blue: 1)) == .white,
+          "white label on a dark fill")
+    check(InlineBar.readableTextColor(on: .white) == .black, "black on white")
+    check(InlineBar.readableTextColor(on: .black) == .white, "white on black")
+
+    // Every palette colour must produce a legible label — these are the fills real budget rows use.
+    for hex in Palette.colors {
+        let picked = InlineBar.readableTextColor(on: Color(hex: hex))
+        check(picked == .black || picked == .white, "palette \(hex) resolves a label colour")
+    }
+
+    // The verdict tints the Budgets rows use. Asserting only that each resolves to one of the two
+    // legible options, not WHICH — the exact luminance of SwiftUI's semantic colours is Apple's to
+    // change, and pinning it would make this test fail on an OS update rather than on a real bug.
+    // (Written after guessing `.green` took a black label; it measures below the threshold and takes
+    // white, which is correct — SwiftUI's green is a mid-dark green, not a bright one.)
+    for (name, tint) in [("green", Color.green), ("orange", .orange), ("red", .red)] {
+        let l = InlineBar.perceptualLuminance(of: tint) ?? -1
+        let picked = InlineBar.readableTextColor(on: tint)
+        check(picked == .black || picked == .white,
+              "verdict \(name) (luminance \(String(format: "%.2f", l))) resolves a legible label")
+        // The pairing must at least be self-consistent with the threshold it claims to use.
+        check((l > 0.6) == (picked == .black), "verdict \(name) label agrees with its luminance")
+    }
+}
+
 // MARK: - Run
 
 do {
@@ -2509,6 +2564,7 @@ do {
     testTagTotals()
     testTargetMath()
     testPalette()
+    testInlineBarContrast()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1

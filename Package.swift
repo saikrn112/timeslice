@@ -55,7 +55,9 @@ let package = Package(
         // Tools (no Xcode), so core logic is verified by this executable via `swift run TimesliceSelfTest`.
         .executableTarget(
             name: "TimesliceSelfTest",
-            dependencies: ["TimesliceCore"],
+            // TimesliceUI too, so the shared bar/sparkline components are covered here rather than
+            // in an iOS test target that would need Xcode to run.
+            dependencies: ["TimesliceCore", "TimesliceUI"],
             path: "Tests/TimesliceSelfTest",
             linkerSettings: [
                 .linkedLibrary("sqlite3"),
