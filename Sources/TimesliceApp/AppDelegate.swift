@@ -8,7 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var engine: TimerEngine!
     private var appState: AppState!
     private var privacy: PrivacyController!
-    private let settings = Settings()
+    private let settings = AppSettings()
     private var statusBar: StatusBarController!
     private var mainWindowController: MainWindowController?
     private var hotkeys: GlobalHotkeyManager!

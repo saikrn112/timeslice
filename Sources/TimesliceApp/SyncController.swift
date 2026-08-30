@@ -65,7 +65,7 @@ final class SyncController: ObservableObject {
     private let store: IntervalStore
     private let engine: TimerEngine
     private let appState: AppState
-    private let settings: Settings
+    private let settings: AppSettings
     private let deviceID: String
 
     private var transport: SyncTransport?
@@ -75,7 +75,7 @@ final class SyncController: ObservableObject {
 
     private let auth: GoogleAuth
 
-    init(store: IntervalStore, engine: TimerEngine, appState: AppState, settings: Settings,
+    init(store: IntervalStore, engine: TimerEngine, appState: AppState, settings: AppSettings,
          auth: GoogleAuth) {
         self.auth = auth
         self.store = store

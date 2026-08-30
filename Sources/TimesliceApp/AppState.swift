@@ -2,12 +2,6 @@ import Foundation
 import Combine
 import TimesliceCore
 
-enum TimeScope: String, CaseIterable, Identifiable {
-    case today = "Today"
-    case allTime = "All Time"
-    var id: String { rawValue }
-}
-
 /// Displayable state derived from the store. Re-runs queries on `dataDidChange`.
 @MainActor
 final class AppState: ObservableObject {

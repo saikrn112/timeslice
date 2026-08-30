@@ -42,6 +42,23 @@ final class TimerModel: ObservableObject {
     /// Set by `OpenSwitcherIntent` so the root view can present the wheel. A published flag rather
     /// than the intent presenting anything itself: an AppIntent has no view hierarchy to present in.
     @Published var showingSwitcher = false
+    @Published var showingSettings = false
+
+    /// Shared with the Mac via Core, so the deep-block and nudge thresholds mean the same thing on
+    /// both. The phone used to hardcode its own copies.
+    let settings = AppSettings()
+
+    /// Devices that have written into this database, for the Settings list and the timeline lanes.
+    struct DeviceInfo: Identifiable { let id: String; let label: String }
+    @Published private(set) var knownDevices: [DeviceInfo] = []
+    /// device_id -> human label, for the day timeline's lane titles.
+    @Published private(set) var deviceLabels: [String: String] = [:]
+
+    var deviceID: String { store?.localDeviceID ?? TimeslicePaths.deviceID() }
+    var deviceLabel: String {
+        let id = deviceID
+        return deviceLabels[id] ?? id
+    }
     /// Tags per group, for the row chips. Cached rather than queried per row — a per-render DB query
     /// is the trap the Mac's metrics legend already documents.
     @Published private(set) var tagsByGroup: [Int64: [Tag]] = [:]
@@ -168,6 +185,12 @@ final class TimerModel: ObservableObject {
                     .map { ($0.project.id, $0.seconds) })
 
             reloadTags()
+
+            // Device attribution: who recorded what. Needed by the timeline lanes and Settings.
+            deviceLabels = (try? store.deviceLabels()) ?? [:]
+            knownDevices = deviceLabels
+                .map { DeviceInfo(id: $0.key, label: $0.value.isEmpty ? $0.key : $0.value) }
+                .sorted { $0.label < $1.label }
         } catch {
             loadError = "\(error)"
         }

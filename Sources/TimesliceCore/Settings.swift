@@ -1,33 +1,49 @@
 import Foundation
 import Combine
-import TimesliceCore
+
+/// Today vs All Time — the scope both the Mac's task list and the phone's toggle between.
+///
+/// In Core because both front-ends need it; it lived in the Mac's `AppState`, which the phone can't
+/// reach.
+public enum TimeScope: String, CaseIterable, Identifiable, Sendable {
+    case today = "Today"
+    case allTime = "All Time"
+    public var id: String { rawValue }
+}
 
 /// User-configurable preferences, persisted in UserDefaults.
+///
+/// Named `AppSettings`, not `Settings`: SwiftUI already exports a `Settings` scene type, and once this
+/// moved out of the app module into Core the bare name became ambiguous at every use site.
+///
+/// In Core rather than the Mac app target so the phone reads the SAME keys, defaults and
+/// `nudgeConfig`. The iOS build previously hardcoded its own copies of the deep-block and nudge
+/// thresholds, which meant Focus % and the nudge timings could silently disagree between devices.
 @MainActor
-final class Settings: ObservableObject {
+public final class AppSettings: ObservableObject {
     private let defaults = UserDefaults.standard
 
     /// Minimum unbroken session length (seconds) that counts as a "deep block" for Focus %.
-    @Published var deepBlockMinutes: Int {
+    @Published public var deepBlockMinutes: Int {
         didSet { defaults.set(deepBlockMinutes, forKey: Keys.deepBlockMinutes) }
     }
 
     /// Daily target hours (goal line on the daily-hours chart).
     /// Prompt "still working?" after a session has run this long (0 = off).
-    @Published var autoPauseMinutes: Int {
+    @Published public var autoPauseMinutes: Int {
         didSet { defaults.set(autoPauseMinutes, forKey: Keys.autoPauseMinutes) }
     }
 
     /// Prompt "still paused?" after the current task has sat paused this long (0 = off).
     /// Catches the opposite mistake to `autoPauseMinutes`: forgetting to *un*pause after a break.
-    @Published var idleNudgeMinutes: Int {
+    @Published public var idleNudgeMinutes: Int {
         didSet { defaults.set(idleNudgeMinutes, forKey: Keys.idleNudgeMinutes) }
     }
 
     /// Master switch for every nudge — both directions. When false, nothing prompts, whatever
     /// the individual thresholds say. Sleep still pauses the timer (that protects the data);
     /// it just won't ask anything on wake.
-    @Published var promptsEnabled: Bool {
+    @Published public var promptsEnabled: Bool {
         didSet { defaults.set(promptsEnabled, forKey: Keys.promptsEnabled) }
     }
 
@@ -37,64 +53,64 @@ final class Settings: ObservableObject {
     /// Replaced the old "daily goal", which stopped meaning anything once everything gets tracked
     /// rather than just work: 4h against an 8h work target said nothing about the other 12 hours.
     /// Per-subject commitments are Budgets' job now.
-    @Published var wakingHours: Double {
+    @Published public var wakingHours: Double {
         didSet { defaults.set(wakingHours, forKey: Keys.wakingHours) }
     }
 
-    var wakingSeconds: TimeInterval { wakingHours * 3600 }
+    public var wakingSeconds: TimeInterval { wakingHours * 3600 }
 
     /// How far non-matching items fade while something is highlighted, as a percentage.
     /// 0 = no dimming at all (matches are picked out only by what tints), 90 = nearly invisible.
-    @Published var highlightDimPercent: Int {
+    @Published public var highlightDimPercent: Int {
         didSet { defaults.set(highlightDimPercent, forKey: Keys.highlightDimPercent) }
     }
 
     /// Opacity to draw non-matching items at.
-    var highlightDimOpacity: Double { 1 - Double(highlightDimPercent) / 100 }
+    public var highlightDimOpacity: Double { 1 - Double(highlightDimPercent) / 100 }
 
     /// Sync is OFF unless a folder is chosen — the app stays local-first, no account, no network,
     /// for anyone who doesn't opt in. A folder inside Dropbox/iCloud Drive is all it takes.
-    @Published var syncFolderPath: String {
+    @Published public var syncFolderPath: String {
         didSet { defaults.set(syncFolderPath, forKey: Keys.syncFolderPath) }
     }
 
     /// Sync backend. Google Drive is the primary one — it needs no third-party app installed and
     /// is the only option that can reach an iPhone.
-    enum SyncMode: String {
+    public enum SyncMode: String {
         case off, googleDrive, folder
     }
 
-    @Published var syncMode: SyncMode {
+    @Published public var syncMode: SyncMode {
         didSet { defaults.set(syncMode.rawValue, forKey: Keys.syncMode) }
     }
 
     /// What this device calls itself in the device list. Empty = derive from the machine.
-    @Published var deviceLabel: String {
+    @Published public var deviceLabel: String {
         didSet { defaults.set(deviceLabel, forKey: Keys.deviceLabel) }
     }
 
-    var syncEnabled: Bool { syncMode != .off }
+    public var syncEnabled: Bool { syncMode != .off }
 
-    var syncFolderURL: URL? {
+    public var syncFolderURL: URL? {
         guard syncEnabled else { return nil }
         return URL(fileURLWithPath: (syncFolderPath as NSString).expandingTildeInPath)
     }
 
-    var deepBlockSeconds: TimeInterval { TimeInterval(deepBlockMinutes * 60) }
+    public var deepBlockSeconds: TimeInterval { TimeInterval(deepBlockMinutes * 60) }
 
     /// The nudge thresholds as the (unit-tested) policy type in TimesliceCore.
-    var nudgeConfig: NudgePolicy.Config {
+    public var nudgeConfig: NudgePolicy.Config {
         .init(promptsEnabled: promptsEnabled,
               sessionMinutes: autoPauseMinutes,
               pausedMinutes: idleNudgeMinutes)
     }
 
-    var autoPauseEnabled: Bool { nudgeConfig.sessionNudgeEnabled }
-    var autoPauseSeconds: TimeInterval { nudgeConfig.sessionSeconds }
-    var idleNudgeEnabled: Bool { nudgeConfig.pausedNudgeEnabled }
-    var idleNudgeSeconds: TimeInterval { nudgeConfig.pausedSeconds }
+    public var autoPauseEnabled: Bool { nudgeConfig.sessionNudgeEnabled }
+    public var autoPauseSeconds: TimeInterval { nudgeConfig.sessionSeconds }
+    public var idleNudgeEnabled: Bool { nudgeConfig.pausedNudgeEnabled }
+    public var idleNudgeSeconds: TimeInterval { nudgeConfig.pausedSeconds }
 
-    init() {
+    public init() {
         deepBlockMinutes = defaults.object(forKey: Keys.deepBlockMinutes) as? Int ?? 25
         autoPauseMinutes = defaults.object(forKey: Keys.autoPauseMinutes) as? Int ?? 60
         idleNudgeMinutes = defaults.object(forKey: Keys.idleNudgeMinutes) as? Int ?? 15

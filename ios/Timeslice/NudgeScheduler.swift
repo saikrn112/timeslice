@@ -25,11 +25,10 @@ import UserNotifications
 final class NudgeScheduler: NSObject {
     static let shared = NudgeScheduler()
 
-    /// Same defaults the Mac ships (60 minutes running, 15 minutes paused, prompts on). The phone has
-    /// no settings screen yet; stated here rather than buried so the divergence is visible if the Mac's
-    /// defaults ever change.
-    private var config = NudgePolicy.Config(promptsEnabled: true, sessionMinutes: 60,
-                                            pausedMinutes: 15)
+    /// Read from the SHARED `AppSettings` rather than a local copy, so the Settings screen actually
+    /// governs these and the phone can't drift from the Mac's thresholds. This was hardcoded to
+    /// 60/15 before Settings existed on iOS.
+    private var config: NudgePolicy.Config { TimerModel.shared.settings.nudgeConfig }
 
     private enum ID {
         static let session = "timeslice.nudge.session"

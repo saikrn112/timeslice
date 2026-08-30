@@ -19,7 +19,7 @@ final class AutoPauseController: ObservableObject {
 
     private let engine: TimerEngine
     private let appState: AppState
-    private let settings: Settings
+    private let settings: AppSettings
 
     /// Debug override for quick testing: set env `TIMESLICE_AUTOPAUSE_SECONDS=10` to make the
     /// checkpoint fire after 10s (and shrink the grace window to match). Ignored when unset.
@@ -40,7 +40,7 @@ final class AutoPauseController: ObservableObject {
     /// yanks the user out of another app's full-screen Space. Set by AppDelegate.
     var openMainWindow: (() -> Void)?
 
-    init(engine: TimerEngine, appState: AppState, settings: Settings) {
+    init(engine: TimerEngine, appState: AppState, settings: AppSettings) {
         self.engine = engine
         self.appState = appState
         self.settings = settings

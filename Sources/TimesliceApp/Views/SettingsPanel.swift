@@ -1,8 +1,9 @@
 import SwiftUI
+import TimesliceCore
 
 /// Compact settings for the metrics: daily goal, deep-block threshold, trend window.
 struct SettingsPanel: View {
-    @ObservedObject var settings: Settings
+    @ObservedObject var settings: AppSettings
     /// nil when the app is running without sync wired up (tests, previews).
     var sync: SyncController? = nil
     var auth: GoogleAuth? = nil

@@ -1,4 +1,5 @@
 import AppKit
+import TimesliceCore
 import SwiftUI
 
 /// Hosts the main window in an NSWindow so we can register it with the PrivacyController for
@@ -20,7 +21,7 @@ final class MainWindowController {
                       height: min(wantsShort ? 640 : 920, usable.height - 40))
     }
 
-    init(appState: AppState, engine: TimerEngine, privacy: PrivacyController, settings: Settings,
+    init(appState: AppState, engine: TimerEngine, privacy: PrivacyController, settings: AppSettings,
          sync: SyncController? = nil, auth: GoogleAuth? = nil) {
         self.privacy = privacy
         let root = MainWindowView(appState: appState, engine: engine, privacy: privacy,

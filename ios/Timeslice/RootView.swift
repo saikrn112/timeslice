@@ -1,78 +1,65 @@
 import SwiftUI
 import TimesliceCore
+import TimesliceUI
 
-/// Tasks / Metrics / Budgets, mirroring the Mac's main-window tabs.
+/// **Two** tabs — Tasks and Metrics — exactly as the Mac's main window has.
 ///
-/// A `TabView` rather than the Mac's segmented header because a phone needs the switch reachable by
-/// thumb, and because Metrics and Budgets are full screens here rather than sections of one window.
+/// Budgets is a *section inside Metrics*, not a third tab. Splitting it out was wrong: on the Mac a
+/// budget is one block of the metrics page, read alongside the tiles and the breakdown it derives
+/// from, and promoting it to a peer of Metrics implied it was a separate subject. Settings is a sheet
+/// behind a gear, mirroring the Mac's gear popover.
 struct RootView: View {
     @ObservedObject private var model = TimerModel.shared
     @State private var tab: Tab
 
-    enum Tab: String { case tasks, metrics, budgets }
+    enum Tab: String { case tasks, metrics }
 
     init() {
         _tab = State(initialValue: Self.launchTab ?? .tasks)
     }
 
-    /// `start-tab` containing `switcher` opens the wheel on launch, so it can be screenshotted —
-    /// the wheel is otherwise only reachable by an Action Button press or a tap, neither of which
-    /// simctl can perform.
-    private static var launchesSwitcher: Bool {
-        let url = TimeslicePaths.defaultSupportDirectoryURL().appendingPathComponent("start-tab")
-        let raw = (try? String(contentsOf: url, encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return raw == "switcher"
-    }
-
     /// Preselects a tab, so every screen can be screenshotted headlessly:
     ///
     /// ```bash
-    /// C=$(xcrun simctl get_app_container booted com.timeslice.ios data)   # AFTER installing
-    /// echo -n budgets > "$C/Library/Application Support/Timeslice/start-tab"
-    /// xcrun simctl terminate booted com.timeslice.ios
-    /// xcrun simctl launch booted com.timeslice.ios
+    /// xcrun simctl install booted "$APP"                                  # install FIRST
+    /// C=$(xcrun simctl get_app_container booted com.timeslice.ios data)   # UUID changes on install
+    /// printf metrics > "$C/Library/Application Support/Timeslice/start-tab"
+    /// xcrun simctl terminate booted com.timeslice.ios && xcrun simctl launch booted com.timeslice.ios
     /// ```
     ///
-    /// `simctl` can boot, install, launch and screenshot, but it cannot tap a tab bar — so without
-    /// this, verifying Metrics or Budgets would need a human, which the plan asks to avoid.
-    ///
-    /// A plain FILE, after three other mechanisms silently failed on Xcode 26 (each doing nothing
-    /// rather than erroring, which is what made this worth documenting):
-    ///
-    /// | Attempt | What actually happened |
-    /// |---|---|
-    /// | `simctl launch … --tab budgets` | swallowed by simctl; the process saw only its own path |
-    /// | `SIMCTL_CHILD_TIMESLICE_TAB=…` | arrived as nil |
-    /// | `defaults write` into the container plist | `cfprefsd` caches prefs, so the app never saw it |
-    ///
-    /// A file read at launch is cached by nothing. It sits beside the database, the same place
-    /// `TimeslicePaths` already keeps `device-id`. Absent or unrecognised falls through to Tasks, so
-    /// this cannot affect a real install.
-    private static var launchTab: Tab? {
+    /// A plain FILE, after four other mechanisms silently failed on Xcode 26 — launch arguments
+    /// (swallowed by simctl), `SIMCTL_CHILD_*` (arrives nil), a global-domain `defaults write` (wrong
+    /// domain), and a container plist write (`cfprefsd` caches it). Each did nothing rather than
+    /// erroring. `switcher` and `settings` additionally open those sheets, which are otherwise only
+    /// reachable by a tap simctl cannot perform.
+    private static var launchHint: String? {
         let url = TimeslicePaths.defaultSupportDirectoryURL().appendingPathComponent("start-tab")
-        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        return Tab(rawValue: raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        return (try? String(contentsOf: url, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    private static var launchTab: Tab? { launchHint.flatMap(Tab.init(rawValue:)) }
 
     var body: some View {
         TabView(selection: $tab) {
             TasksView()
-                .tabItem { Label("Tasks", systemImage: "list.bullet") }
+                .tabItem { Label("Tasks", systemImage: "checklist") }
                 .tag(Tab.tasks)
             MetricsScreen()
-                .tabItem { Label("Metrics", systemImage: "chart.bar") }
+                .tabItem { Label("Metrics", systemImage: "chart.bar.xaxis") }
                 .tag(Tab.metrics)
-            BudgetsScreen()
-                .tabItem { Label("Budgets", systemImage: "target") }
-                .tag(Tab.budgets)
         }
         .onAppear {
             model.load()
-            if Self.launchesSwitcher { model.requestSwitcher() }
+            switch Self.launchHint {
+            case "switcher": model.requestSwitcher()
+            case "settings": model.showingSettings = true
+            default: break
+            }
         }
-        // Presented from the root so the Action Button's switcher binding works whichever tab was
-        // last open.
+        // Both presented from the root so the Action Button's switcher binding works whichever tab
+        // was last open, and so Settings is reachable from either.
         .sheet(isPresented: $model.showingSwitcher) { SwitchWheelSheet() }
+        .sheet(isPresented: $model.showingSettings) { SettingsSheet() }
     }
 }

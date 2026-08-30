@@ -8,7 +8,7 @@ import TimesliceCore
 struct MetricsView: View {
     @ObservedObject var appState: AppState
     @ObservedObject var engine: TimerEngine
-    @ObservedObject var settings: Settings
+    @ObservedObject var settings: AppSettings
 
     // Screenshot runs open on last month so the ranged charts (hours-per-day, weekday pattern)
     // are in frame over a fully-seeded month; the day view is the useful default otherwise.
