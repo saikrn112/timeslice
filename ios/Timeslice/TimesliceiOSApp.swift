@@ -1,3 +1,4 @@
+import AppIntents
 import SwiftUI
 
 @main
@@ -18,6 +19,16 @@ struct TimesliceiOSApp: App {
                     // Re-wires the Drive transport when a refresh token is already in the Keychain,
                     // so sync resumes without another sign-in.
                     GoogleAuthiOS.shared.restoreIfPossible()
+
+                    // Tells the system about our App Shortcuts, and — just as importantly — is the
+                    // only place in the app that REFERENCES `TimesliceShortcuts` at all.
+                    //
+                    // Without a reference, nothing guarantees the provider type is linked into the
+                    // binary, while the build-time metadata extractor still records its mangled name.
+                    // The system then finds the phrases but not the type, and running a shortcut fails
+                    // with `LNActionForAutoShortcutPhraseFetchError Code=1 "Couldn't find
+                    // AppShortcutsProvider."` — which is exactly the error observed.
+                    TimesliceShortcuts.updateAppShortcutParameters()
                 }
         }
         .onChange(of: scenePhase) { _, phase in

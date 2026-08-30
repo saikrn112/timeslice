@@ -8,9 +8,12 @@ import Foundation
 /// process. `LiveActivityIntent` is what guarantees that split — iOS runs it in the owning app, which
 /// is also why it can touch `TimerModel.shared` and the database at all.
 ///
-/// The body is compiled only into the app (`TIMESLICE_APP`, set per-target in `ios/project.yml`).
-/// Without that the widget target would need `TimerModel`, which would drag the whole app — and a
-/// sqlite connection — into an extension process, the exact thing `0xdead10cc` punishes.
+/// These live in the APP target only. They were briefly in `Shared/`, compiled into the widget too so
+/// `Button(intent:)` could render — but that shipped a second AppIntents metadata bundle declaring the
+/// same intent identifiers without an `AppShortcutsProvider`, and shortcut resolution could bind to it
+/// and fail with "Couldn't find AppShortcutsProvider", breaking the Action Button.
+///
+/// They're kept (Siri and Shortcuts can still run them) but no longer rendered as island buttons.
 
 /// Pause the running task, or resume the current one, from the island.
 struct ToggleFromActivityIntent: LiveActivityIntent {
@@ -21,11 +24,9 @@ struct ToggleFromActivityIntent: LiveActivityIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        #if TIMESLICE_APP
         let model = TimerModel.shared
         model.load()
         model.toggleCurrent()
-        #endif
         return .result()
     }
 }
@@ -41,13 +42,11 @@ struct PreviousTaskIntent: LiveActivityIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        #if TIMESLICE_APP
         let model = TimerModel.shared
         model.load()
         if let previous = model.recencyOrdered.dropFirst().first {
             model.toggle(taskID: previous.id)
         }
-        #endif
         return .result()
     }
 }

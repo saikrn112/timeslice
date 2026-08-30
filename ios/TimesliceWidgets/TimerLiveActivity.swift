@@ -56,23 +56,19 @@ struct TimerLiveActivity: Widget {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
-                        // Buttons, not gestures: a Live Activity can host App Intents only — no taps
-                        // to interpret, no scroll views, so no wheel. These two cover the actions
-                        // worth having without the app: stop counting, or bounce to the last task.
-                        HStack(spacing: 8) {
-                            Button(intent: ToggleFromActivityIntent()) {
-                                Label(context.state.isRunning ? "Pause" : "Resume",
-                                      systemImage: context.state.isRunning ? "pause.fill" : "play.fill")
-                                    .font(.caption2)
-                            }
-                            .buttonStyle(.bordered)
-                            Button(intent: PreviousTaskIntent()) {
-                                Label("Previous", systemImage: "arrow.uturn.backward")
-                                    .font(.caption2)
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                        .tint(color)
+                        // NOTE: the pause/previous buttons were removed here on purpose.
+                        //
+                        // `Button(intent:)` needs the intent TYPE visible to this extension, which
+                        // meant compiling the intents into both targets. That shipped TWO AppIntents
+                        // metadata bundles declaring the same identifiers — the app's (with an
+                        // AppShortcutsProvider) and the extension's (without one) — and shortcut
+                        // resolution could bind to the extension, failing with
+                        // "Couldn't find AppShortcutsProvider." That broke the ACTION BUTTON, which
+                        // matters more than buttons inside the island.
+                        //
+                        // Restoring them properly means hoisting the intent types into a library both
+                        // targets link (one type, one registration) with the app supplying the
+                        // behaviour — not duplicating them per target.
                     }
                     .padding(.horizontal, 4)
                 }
