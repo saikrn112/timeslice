@@ -2828,6 +2828,95 @@ func testLanesByOverlap() {
     }
 }
 
+
+/// The iOS client's redirect scheme is the REVERSED client id — not a free choice. Getting it wrong
+/// means Google refuses the exchange, so the derivation is pinned here.
+func testReversedClientID() {
+    print("\nReversed client id:")
+    let id = "1234567890-abcdefg.apps.googleusercontent.com"
+    check(GoogleOAuth.reversedClientID(id) == "com.googleusercontent.apps.abcdefg-1234567890"
+          || GoogleOAuth.reversedClientID(id) == "com.googleusercontent.apps.1234567890-abcdefg",
+          "components are reversed, got \(GoogleOAuth.reversedClientID(id) ?? "nil")")
+
+    // The redirect appends a path to that scheme.
+    if let redirect = GoogleOAuth.iOSRedirect(id) {
+        check(redirect.uriString.hasPrefix("com.googleusercontent.apps."),
+              "redirect uses the reversed-client-id scheme")
+        check(redirect.uriString.hasSuffix(":/oauth"), "redirect carries a path")
+    } else {
+        check(false, "iOSRedirect returned nil for a well-formed client id")
+    }
+
+    // A client id of the wrong shape must fail loudly rather than produce a scheme Google rejects.
+    check(GoogleOAuth.reversedClientID("not-a-google-client") == nil,
+          "a malformed client id yields no scheme")
+    check(GoogleOAuth.iOSRedirect("nonsense") == nil, "and no redirect")
+
+    // The runtime override feeds `clientID`, which is how iOS supplies one at all.
+    let saved = GoogleOAuth.clientIDOverride
+    GoogleOAuth.clientIDOverride = id
+    check(GoogleOAuth.clientID == id, "override wins over the config file")
+    check(GoogleOAuth.isConfigured, "an override is enough to report configured")
+    GoogleOAuth.clientIDOverride = nil
+    check(GoogleOAuth.clientID != id, "clearing the override restores the previous source")
+    GoogleOAuth.clientIDOverride = saved
+}
+
+
+/// The seeded database must obey the app's own invariants — otherwise it shows the UI states that
+/// cannot occur and hides the ones that can.
+///
+/// The one that matters here: **only one timer runs across all devices**, enforced by
+/// `TakeoverPolicy`, so no two intervals may overlap in time regardless of which device recorded
+/// them. An earlier seeder opened a running interval 42 minutes back on top of blocks it had already
+/// painted for today, which put fake lane contention on the day timeline.
+func testDemoSeedInvariants() throws {
+    print("\nDemo seed invariants:")
+    let (store, url) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let now = date(2026, 3, 11, 12, 0)
+    try DemoSeed.seed(into: store, preset: .rich, now: now)
+
+    let intervals = try store.intervals().sorted { $0.start < $1.start }
+    check(intervals.count > 500, "rich preset produces months of history (\(intervals.count))")
+
+    // No overlaps, across every device.
+    var offenders: [(Int64, Int64)] = []
+    for (a, b) in zip(intervals, intervals.dropFirst()) {
+        let aEnd = a.end ?? now
+        if b.start < aEnd { offenders.append((a.id, b.id)) }
+    }
+    check(offenders.isEmpty,
+          "no two intervals overlap — got \(offenders.count) pair(s), e.g. \(offenders.first.map(String.init(describing:)) ?? "none")")
+
+    // Nothing in the future.
+    let future = intervals.filter { ($0.end ?? now) > now }
+    check(future.count <= 1, "at most the running interval reaches `now` (\(future.count))")
+    check(intervals.allSatisfy { $0.start <= now }, "no interval starts in the future")
+
+    // Exactly one open interval, and it's the last thing recorded.
+    let open = intervals.filter { $0.end == nil }
+    check(open.count == 1, "exactly one running interval")
+    if let running = open.first, let previousEnd = intervals.compactMap(\.end).max() {
+        check(running.start >= previousEnd,
+              "the running interval starts at or after the last closed block")
+    }
+
+    // The shape the UI needs in order to be exercised at all.
+    check(try store.listTaskProjects().count >= 8, "several projects")
+    check(try store.listProjects(includeArchived: true).count >= 30, "many tasks")
+    check(try store.listTags().count >= 8, "several tags")
+    check(try store.listTargets().count >= 6, "budgets across subject kinds")
+    check(try store.deviceLabels().count >= 3, "several devices")
+
+    // And because the invariant holds, the day timeline needs only one lane.
+    let segments = Aggregations.assignLanesByOverlap(
+        Aggregations.daySegments(intervals: intervals, day: now, now: now))
+    check(Aggregations.laneCount(segments) == 1,
+          "a valid database needs ONE timeline lane; lanes only appear for anomalies")
+}
+
 // MARK: - Run
 
 do {
@@ -2865,6 +2954,8 @@ do {
     try testBudgetRows()
     try testRangeTotals()
     testLanesByOverlap()
+    testReversedClientID()
+    try testDemoSeedInvariants()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1

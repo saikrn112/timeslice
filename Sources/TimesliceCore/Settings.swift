@@ -85,6 +85,18 @@ public final class AppSettings: ObservableObject {
     }
 
     /// What this device calls itself in the device list. Empty = derive from the machine.
+    /// Google **iOS** OAuth client id, pasted by the user.
+    ///
+    /// Stored in UserDefaults rather than the Keychain on purpose: an installed app's client id is not
+    /// a secret — it's readable from any copy of the binary — which is precisely why PKCE is required
+    /// for this client type. The refresh token IS a secret and lives in the Keychain.
+    @Published public var googleClientID: String {
+        didSet {
+            defaults.set(googleClientID, forKey: Keys.googleClientID)
+            GoogleOAuth.clientIDOverride = googleClientID
+        }
+    }
+
     @Published public var deviceLabel: String {
         didSet { defaults.set(deviceLabel, forKey: Keys.deviceLabel) }
     }
@@ -119,6 +131,7 @@ public final class AppSettings: ObservableObject {
         highlightDimPercent = defaults.object(forKey: Keys.highlightDimPercent) as? Int ?? 85
         // A sandbox run can point both instances at one folder without touching real settings.
         deviceLabel = defaults.string(forKey: Keys.deviceLabel) ?? ""
+        googleClientID = defaults.string(forKey: Keys.googleClientID) ?? ""
         syncFolderPath = ProcessInfo.processInfo.environment["TIMESLICE_SYNC_FOLDER"]
             ?? defaults.string(forKey: Keys.syncFolderPath) ?? ""
         // A sandbox run forces folder mode so two local instances can pair without OAuth.
@@ -129,6 +142,10 @@ public final class AppSettings: ObservableObject {
         } else {
             syncMode = SyncMode(rawValue: defaults.string(forKey: Keys.syncMode) ?? "") ?? .off
         }
+        // After every stored property is initialised: publishing the client id into `GoogleOAuth` is
+        // what lets anything reading `GoogleOAuth.clientID` at launch — `isConfigured`, the sync
+        // controller — see a value the user pasted on a previous run.
+        GoogleOAuth.clientIDOverride = googleClientID
     }
 
     private enum Keys {
@@ -141,5 +158,6 @@ public final class AppSettings: ObservableObject {
         static let syncFolderPath = "syncFolderPath"
         static let syncMode = "syncMode"
         static let deviceLabel = "deviceLabel"
+        static let googleClientID = "googleClientID"
     }
 }

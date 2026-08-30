@@ -14,6 +14,7 @@ import TimesliceUI
 struct SettingsSheet: View {
     @ObservedObject private var model = TimerModel.shared
     @ObservedObject private var settings = TimerModel.shared.settings
+    @ObservedObject private var auth = GoogleAuthiOS.shared
     @Environment(\.dismiss) private var dismiss
     @State private var editingBudgets = false
     @State private var editingTags = false
@@ -99,42 +100,60 @@ struct SettingsSheet: View {
             LabeledContent("This device") {
                 Text(model.deviceLabel).font(Theme.rowTime).foregroundStyle(.secondary)
             }
-
-            if model.knownDevices.isEmpty {
-                Text("No other devices have synced into this database yet.")
-                    .font(Theme.caption).foregroundStyle(.secondary)
-            } else {
-                ForEach(model.knownDevices, id: \.id) { device in
-                    HStack {
-                        Image(systemName: device.id == model.deviceID
-                              ? "iphone" : "desktopcomputer")
-                            .foregroundStyle(.secondary)
-                        Text(device.label).font(Theme.rowTitle)
-                        Spacer()
-                        Text(device.id == model.deviceID ? "this device" : "synced")
-                            .font(Theme.captionSmall).foregroundStyle(.tertiary)
-                    }
+            ForEach(model.knownDevices, id: \.id) { device in
+                HStack {
+                    Image(systemName: device.id == model.deviceID ? "iphone" : "desktopcomputer")
+                        .foregroundStyle(.secondary)
+                    Text(device.label).font(Theme.rowTitle)
+                    Spacer()
+                    Text(device.id == model.deviceID ? "this device" : "synced")
+                        .font(Theme.captionSmall).foregroundStyle(.tertiary)
                 }
-            }
-
-            if GoogleOAuth.isConfigured {
-                Button {
-                    Task { await SyncController.shared.syncOnce() }
-                } label: {
-                    Label("Sync now", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .disabled(!SyncController.shared.isAvailable)
-            } else {
-                // Honest about why there's no sign-in button rather than showing a dead one.
-                Text("Sync needs a Google client of iOS type (no client secret) with the "
-                     + "reversed-client-id redirect scheme. None is configured in this build, so "
-                     + "sync is unavailable — the app works fully as a local tracker.")
-                    .font(Theme.captionSmall).foregroundStyle(.secondary)
             }
         } header: { header("Devices") } footer: {
-            Text("Time recorded on another device appears on the day timeline in its own lane, so "
-                 + "you can see which machine each block came from.")
+            Text("Time recorded on another device appears on the day timeline, and the session list "
+                 + "names which device each block came from.")
                 .font(Theme.captionSmall)
+        }
+
+        Section {
+            // The client id is pasted rather than baked in: this repo can't carry a credential, and an
+            // installed app's client id isn't a secret anyway — PKCE is what protects the exchange.
+            TextField("1234-abcd.apps.googleusercontent.com", text: $settings.googleClientID)
+                .font(.system(size: 11, design: .monospaced))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .disabled(auth.isSignedIn)
+
+            if auth.isSignedIn {
+                LabeledContent("Google") {
+                    Label("Signed in", systemImage: "checkmark.circle.fill")
+                        .font(Theme.caption).foregroundStyle(.green)
+                }
+                Button {
+                    Task { await SyncController.shared.syncOnce() }
+                } label: { Label("Sync now", systemImage: "arrow.triangle.2.circlepath") }
+                Button("Sign out", role: .destructive) { auth.signOut() }
+            } else {
+                Button {
+                    Task { await auth.signIn() }
+                } label: { Label("Sign in with Google", systemImage: "person.badge.key") }
+                    .disabled(settings.googleClientID.isEmpty)
+            }
+
+            if let error = auth.lastError {
+                Text(error).font(Theme.captionSmall).foregroundStyle(.red)
+            }
+        } header: { header("Sync") } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Sync is off until you sign in. Data goes to your own Google Drive "
+                     + "(appDataFolder scope), so Timeslice only ever sees files it created.")
+                Text("Create the client at console.cloud.google.com → Credentials → Create "
+                     + "credentials → OAuth client ID → **iOS**, with bundle ID "
+                     + "`com.timeslice.ios`. An iOS client has no client secret, and the redirect "
+                     + "scheme is derived from the client ID — nothing else to configure.")
+            }
+            .font(Theme.captionSmall)
         }
     }
 

@@ -218,11 +218,17 @@ public enum DemoSeed {
         try paint(store, ids: ids, days: 150, weekday: weekday, weekend: weekend,
                   devices: devices.map { Optional($0) }, now: now)
 
-        // Leave a timer RUNNING, started earlier today, so the Dynamic Island, the ticking row and
-        // the "current task" states are all live on first launch.
+        // Leave a timer RUNNING so the Dynamic Island, the ticking row and the "current task" states
+        // are live on first launch — but start it AFTER the last closed block.
+        //
+        // Only ONE timer runs across all devices (that's what `TakeoverPolicy` enforces), so
+        // concurrent intervals are data that cannot occur in practice. An earlier version opened this
+        // 42 minutes back regardless, which collided with blocks already painted for today and made
+        // the day timeline show lane contention that no real database would ever contain.
         if let id = ids["ios parity"] {
-            try? store.switchTo(projectID: id,
-                                at: now.addingTimeInterval(-42 * 60))
+            let lastEnd = (try? store.intervals())?.compactMap(\.end).max() ?? .distantPast
+            let start = max(lastEnd, now.addingTimeInterval(-42 * 60))
+            try? store.switchTo(projectID: id, at: min(start, now))
         }
     }
 
@@ -238,7 +244,10 @@ public enum DemoSeed {
                               devices: [String?], now: Date) throws {
         var cal = Calendar(identifier: .gregorian); cal.timeZone = .current
         let today = cal.startOfDay(for: now)
-        let cutoff = referenceNow(now)
+        // Never paint the future. `referenceNow` pins to 15:40 so a screenshot taken at any hour has a
+        // partly-filled day, but used alone it writes blocks that haven't happened yet — which is how
+        // "today" ended up containing sessions dated later than the clock.
+        let cutoff = min(referenceNow(now), now)
 
         for dayOffset in 0..<days {
             guard let day = cal.date(byAdding: .day, value: -dayOffset, to: today) else { continue }
@@ -246,17 +255,30 @@ public enum DemoSeed {
             let blocks = isWeekend ? weekend : weekday
             // Vary volume by day so the per-day bars differ; weekends stay light.
             let keep = isWeekend ? blocks.count : max(6, blocks.count - (dayOffset % 5))
-            for (i, (task, startHour, minutes)) in blocks.prefix(keep).enumerated() {
+            let chosen = Array(blocks.prefix(keep))
+            for (i, (task, startHour, minutes)) in chosen.enumerated() {
                 guard let taskID = ids[task] else { continue }
                 let jitter = Double((dayOffset + i) % 5) * 3.0
                 let mins = Double(minutes) + jitter - 6
                 let start = day.addingTimeInterval(startHour * 3600)
-                let end = start.addingTimeInterval(max(300, mins * 60))
+                var end = start.addingTimeInterval(max(300, mins * 60))
+
+                // CLAMP against the next block. The base shapes don't overlap, but the jitter
+                // lengthens some of them past the following start — which produced 129 overlapping
+                // pairs. Overlap is data the app cannot actually contain: only one timer runs across
+                // all devices (`TakeoverPolicy` back-dates the loser), so a seeded overlap shows lane
+                // contention on the day timeline that no real database would ever have.
+                if i + 1 < chosen.count {
+                    let nextStart = day.addingTimeInterval(chosen[i + 1].1 * 3600)
+                    end = min(end, nextStart.addingTimeInterval(-60))
+                }
+                guard end > start else { continue }
                 // Only backfill times already past, so today is partially filled rather than
                 // claiming work that hasn't happened.
                 guard end < cutoff else { continue }
-                // Rotate devices per (day, block) so most days involve more than one machine and the
-                // timeline's lanes are genuinely contended.
+                // Rotate devices per (day, block) so the history is attributed across machines —
+                // sequentially, never concurrently, which is how the one-timer invariant actually
+                // looks in practice.
                 let device = devices[(dayOffset + i) % devices.count]
                 try? store.insertClosedInterval(projectID: taskID, start: start, end: end,
                                                 deviceID: device)

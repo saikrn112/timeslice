@@ -243,39 +243,62 @@ struct MetricsScreen: View {
         }
     }
 
-    /// One line per budget, one bar, with a **pace marker** where the fill *should* be right now.
+    /// Name + budget spec, then TWO bars: the period goal, and today's share of it.
     ///
-    /// This drops the Mac's two-bar table deliberately. Two bars plus two caption lines cost four rows
-    /// per budget; with seven budgets, most at 0%, the section was mostly empty track. The marker
-    /// carries what the second bar carried — am I ahead of or behind where this period expects me — as
-    /// a position rather than another number to compare. Fill left of the marker is behind, right of
-    /// it is ahead. Colour still carries the verdict.
+    /// The trend sparkline is gone. At 32pt wide it was a few pixels of dotted line for most rows and
+    /// carried no readable information; the space buys a second bar that does.
     ///
-    /// `elapsedFraction` is already clamped 0…1 by `TargetMath`, so a period entirely in the past puts
-    /// the marker at the end rather than off the bar.
+    /// - **goal** — progress against the budget's own period, with a **pace marker** at
+    ///   `elapsedFraction` showing where the fill should be by now. Fill left of the marker is behind.
+    /// - **daily** — today against the period target divided by its nominal days, so a 35h/week floor
+    ///   reads as 5h/day. This is the figure that tells you what to do *today*, which a
+    ///   weekly percentage cannot.
     private func budgetRow(_ row: BudgetRows.Row) -> some View {
         let p = row.progress
         let tint = Theme.verdict(kind(p.verdict))
-        return HStack(spacing: 6) {
-            Circle().fill(Color(hex: row.colorHex)).frame(width: 7, height: 7)
-            VStack(alignment: .leading, spacing: 0) {
+        let perDay = p.target.seconds / max(p.target.period.nominalDays, 1)
+        let dailyFraction = perDay > 0 ? p.todaySeconds / perDay : 0
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Circle().fill(Color(hex: row.colorHex)).frame(width: 7, height: 7)
                 Text(p.name)
                     .font(.system(size: 11, weight: .medium))
                     .lineLimit(1).minimumScaleFactor(0.85)
+                Spacer(minLength: 4)
                 Text("\(p.target.direction.symbol) \(BudgetRows.duration(p.target.seconds))"
                      + " / \(shortPeriod(p.target.period))")
-                    .font(.system(size: 8)).foregroundStyle(.tertiary)
+                    .font(.system(size: 9)).foregroundStyle(.tertiary)
             }
-            .frame(width: 82, alignment: .leading)
+            barLine("goal", actual: p.actualSeconds, target: p.target.seconds,
+                    fraction: p.percent / 100, tint: tint,
+                    // Only meaningful for a floor — a ceiling has no "should be here by now".
+                    marker: p.target.direction == .atLeast ? p.elapsedFraction : nil)
+            barLine("daily", actual: p.todaySeconds, target: perDay,
+                    fraction: dailyFraction,
+                    // Informational rather than a verdict, so it takes the subject's own colour.
+                    tint: Color(hex: row.colorHex), marker: nil)
+        }
+    }
 
-            InlineBar(fraction: min(max(p.percent / 100, 0), 1),
-                      label: "\(BudgetRows.duration(p.actualSeconds)) · \(percent(p.percent / 100))",
-                      fill: tint, height: 13,
-                      // Only meaningful for a floor — a ceiling has no "should be here by now".
-                      marker: p.target.direction == .atLeast ? p.elapsedFraction : nil)
-
-            Sparkline(values: row.sparkline, tint: Color(hex: row.colorHex))
-                .frame(width: 32, height: 12)
+    private func barLine(_ caption: String, actual: TimeInterval, target: TimeInterval,
+                         fraction: Double, tint: Color, marker: Double?) -> some View {
+        HStack(spacing: 5) {
+            Text(caption)
+                .font(.system(size: 9)).foregroundStyle(.quaternary)
+                .frame(width: 26, alignment: .leading)
+            Text(BudgetRows.duration(actual))
+                .font(.system(size: 9, design: .monospaced))
+                .frame(width: 42, alignment: .trailing)
+                .lineLimit(1)
+            InlineBar(fraction: min(max(fraction, 0), 1), label: percent(fraction),
+                      fill: tint, height: 11, marker: marker)
+            Text(BudgetRows.duration(target))
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.secondary)
+                // 44, not 32: a pro-rated daily target like "4h 17m" (30h/week) wrapped onto a second
+                // line at 32 and pushed the row's height out.
+                .frame(width: 44, alignment: .leading)
+                .lineLimit(1)
         }
     }
 
@@ -316,10 +339,18 @@ struct MetricsScreen: View {
         }
     }
 
+    /// Flags OVERLAP, not devices.
+    ///
+    /// It used to read "3 devices" beside a strip whose rows were one-per-device. Now that a row
+    /// exists only where blocks genuinely collide, a device count next to it implies rows map to
+    /// devices when they don't — and the per-device totals under the strip already name them.
+    ///
+    /// A second row is now an anomaly worth pointing at: only one timer runs across all devices, so
+    /// overlap means a sync race left two intervals covering the same minutes.
     private var timelineSubtitle: String? {
-        let devices = Aggregations.orderedDevices(data.segments)
-        guard devices.count > 1 else { return nil }
-        return "\(devices.count) devices"
+        let lanes = Aggregations.laneCount(data.segments)
+        guard lanes > 1 else { return nil }
+        return "overlapping blocks"
     }
 
     private func laneHeight(_ lanes: Int) -> CGFloat {

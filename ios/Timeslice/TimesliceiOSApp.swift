@@ -15,6 +15,9 @@ struct TimesliceiOSApp: App {
                     // refuses the identifier.
                     SyncController.shared.registerBackgroundTask()
                     SyncController.shared.scheduleNextRefresh()
+                    // Re-wires the Drive transport when a refresh token is already in the Keychain,
+                    // so sync resumes without another sign-in.
+                    GoogleAuthiOS.shared.restoreIfPossible()
                 }
         }
         .onChange(of: scenePhase) { _, phase in

@@ -24,7 +24,42 @@ public enum GoogleOAuth {
     /// protects the exchange. The redirect is 127.0.0.1, so a copied credential cannot receive
     /// anyone else's authorization codes, and `drive.appdata` reaches nothing but files this app
     /// created.
-    public static var clientID: String { credential("CLIENT_ID") }
+    /// Set at runtime by a platform that has nowhere to read a config file from.
+    ///
+    /// iOS needs this: `configFilePath` is `~/.config/timeslice/env`, which does not exist inside an
+    /// app sandbox, so the phone had no way to learn a client id at all. The value is not a secret —
+    /// an installed app's client id is readable from its binary either way, which is exactly why PKCE
+    /// is mandatory for this client type.
+    public static var clientIDOverride: String? {
+        get { overrideLock.withLock { _clientIDOverride } }
+        set { overrideLock.withLock { _clientIDOverride = newValue } }
+    }
+
+    private static let overrideLock = NSLock()
+    private static var _clientIDOverride: String?
+
+    public static var clientID: String {
+        if let o = clientIDOverride, !o.isEmpty { return o }
+        return credential("CLIENT_ID")
+    }
+
+    /// The custom URL scheme Google requires for an installed-app ("iOS") client: the client id with
+    /// its dot-separated components reversed.
+    ///
+    /// `1234-abcd.apps.googleusercontent.com` → `com.googleusercontent.apps.1234-abcd`
+    ///
+    /// It is NOT a free choice — an arbitrary scheme like `timeslice://` is refused for this client
+    /// type, which is the correction to the original design note.
+    public static func reversedClientID(_ id: String = clientID) -> String? {
+        guard id.hasSuffix(".apps.googleusercontent.com") else { return nil }
+        return id.split(separator: ".").reversed().joined(separator: ".")
+    }
+
+    /// The full redirect for an iOS client: reversed client id, then a path.
+    public static func iOSRedirect(_ id: String = clientID) -> Redirect? {
+        guard let scheme = reversedClientID(id) else { return nil }
+        return .customScheme("\(scheme):/oauth")
+    }
     public static var clientSecret: String { credential("CLIENT_SECRET") }
 
     /// True when sync can be offered at all. Without credentials the feature stays hidden rather
