@@ -17,12 +17,20 @@ public struct InlineBar: View {
     let label: String
     let fill: Color
     var height: CGFloat = 13
+    /// Optional 0…1 position for a **pace marker** — where the fill *should* be right now.
+    ///
+    /// Lets one bar answer both "how far along am I" (the fill) and "how far along should I be"
+    /// (the marker), which otherwise needs a second bar beside it. Fill short of the marker reads as
+    /// behind at a glance, with no percentage arithmetic.
+    var marker: Double?
 
-    public init(fraction: Double, label: String, fill: Color, height: CGFloat = 13) {
+    public init(fraction: Double, label: String, fill: Color, height: CGFloat = 13,
+                marker: Double? = nil) {
         self.fraction = fraction
         self.label = label
         self.fill = fill
         self.height = height
+        self.marker = marker
     }
 
     public var body: some View {
@@ -33,6 +41,15 @@ public struct InlineBar: View {
                 Capsule().fill(Color.secondary.opacity(0.14))
                 // No sliver at zero: a minimum-width stub reads as "started" when nothing has been.
                 if fw > 0 { Capsule().fill(fill).frame(width: max(3, fw)) }
+
+                // Drawn over the fill but under the label, so it stays visible whichever side of it
+                // the fill has reached.
+                if let marker, marker > 0, marker < 1 {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.45))
+                        .frame(width: 1.5, height: height)
+                        .offset(x: marker * w)
+                }
 
                 text(color: onTrack)
                     .frame(width: w)

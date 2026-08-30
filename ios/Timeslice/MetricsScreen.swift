@@ -86,53 +86,46 @@ struct MetricsScreen: View {
 
     // MARK: - Range
 
-    /// The Mac's range bar: capsule pills, a ‹ label › stepper, and "Today".
-    ///
-    /// The stepper is what makes any day but today reachable — without it the timeline could only
-    /// ever show `now`'s day, which is also how a whole day of seeded data appeared to be missing
-    /// during testing.
+    /// One row: pills, then `‹ label ›`. The "Today" reset is folded INTO the label — when you're
+    /// already on today it was a disabled button restating the text beside it, and reclaiming that
+    /// width is what lets everything fit on a single line.
     private var rangeBar: some View {
-        VStack(spacing: 7) {
-            HStack(spacing: 4) {
-                ForEach(RangeUnit.allCases, id: \.self) { u in
-                    let selected = range.unit == u
-                    Button {
-                        // Looking at the CURRENT period keeps you current when switching units;
-                        // only a deliberately historical view carries its anchor over.
-                        let anchor = range.isCurrent() ? Date() : min(range.start, Date())
-                        range = DateRange.resolve(unit: u, anchor: anchor, earliest: earliest)
-                    } label: {
-                        Text(u.rawValue)
-                            .font(.system(size: 11, weight: selected ? .bold : .medium, design: .rounded))
-                            .foregroundStyle(selected ? Color.white : Color.secondary)
-                            .frame(minWidth: 24)
-                            .padding(.vertical, 4)
-                            .background(Capsule().fill(
-                                selected ? Color.accentColor : Color.secondary.opacity(0.14)))
-                    }
-                    .buttonStyle(.plain)
+        HStack(spacing: 5) {
+            ForEach(RangeUnit.allCases, id: \.self) { u in
+                let selected = range.unit == u
+                Button {
+                    let anchor = range.isCurrent() ? Date() : min(range.start, Date())
+                    range = DateRange.resolve(unit: u, anchor: anchor, earliest: earliest)
+                } label: {
+                    Text(u.rawValue)
+                        .font(.system(size: 10, weight: selected ? .bold : .medium, design: .rounded))
+                        .foregroundStyle(selected ? Color.white : Color.secondary)
+                        .frame(minWidth: 16)
+                        .padding(.vertical, 3).padding(.horizontal, 4)
+                        .background(Capsule().fill(
+                            selected ? Color.accentColor : Color.secondary.opacity(0.14)))
                 }
-            }
-            HStack(spacing: 8) {
-                Button { step(-1) } label: { Image(systemName: "chevron.left") }
-                    .buttonStyle(.plain)
-                    .disabled(range.unit == .all)
-                Text(range.label())
-                    .font(.system(size: 12, design: .rounded)).fontWeight(.medium)
-                    .frame(maxWidth: .infinity)
-                Button { step(1) } label: { Image(systemName: "chevron.right") }
-                    .buttonStyle(.plain)
-                    .disabled(range.unit == .all || atPresentEdge)
-                Button("Today") {
-                    range = DateRange.resolve(unit: range.unit, anchor: Date(), earliest: earliest)
-                }
-                .font(.system(size: 11))
                 .buttonStyle(.plain)
-                .foregroundStyle(range.isCurrent() ? Color.secondary : Color.accentColor)
-                .disabled(range.isCurrent())
             }
+
+            Spacer(minLength: 2)
+
+            Button { step(-1) } label: { Image(systemName: "chevron.left").font(.system(size: 10)) }
+                .buttonStyle(.plain).disabled(range.unit == .all)
+            Button {
+                range = DateRange.resolve(unit: range.unit, anchor: Date(), earliest: earliest)
+            } label: {
+                Text(range.label())
+                    .font(.system(size: 11, design: .rounded)).fontWeight(.medium)
+                    .foregroundStyle(range.isCurrent() ? Color.primary : Color.accentColor)
+                    .lineLimit(1).minimumScaleFactor(0.75)
+            }
+            .buttonStyle(.plain)
+            .disabled(range.isCurrent())
+            Button { step(1) } label: { Image(systemName: "chevron.right").font(.system(size: 10)) }
+                .buttonStyle(.plain).disabled(range.unit == .all || atPresentEdge)
         }
-        .padding(.horizontal, 10).padding(.vertical, 8)
+        .padding(.horizontal, 9).padding(.vertical, 6)
         .background(RoundedRectangle(cornerRadius: Theme.cardRadius).fill(Theme.card))
     }
 
@@ -250,74 +243,39 @@ struct MetricsScreen: View {
         }
     }
 
-    /// Two bars per budget, as the Mac has:
+    /// One line per budget, one bar, with a **pace marker** where the fill *should* be right now.
     ///
-    /// - **goal** — progress against the budget's OWN period. A weekly budget always reads "this
-    ///   week", whatever the filter is set to, which is what makes the verdict meaningful.
-    /// - **this &lt;range&gt;** — the same target pro-rated onto the range being VIEWED, so the row
-    ///   re-reads at whatever zoom the filter is on. `TargetProgress.rangePercent` already computes
-    ///   it; dropping this bar earlier lost the only figure that responds to the filter.
+    /// This drops the Mac's two-bar table deliberately. Two bars plus two caption lines cost four rows
+    /// per budget; with seven budgets, most at 0%, the section was mostly empty track. The marker
+    /// carries what the second bar carried — am I ahead of or behind where this period expects me — as
+    /// a position rather than another number to compare. Fill left of the marker is behind, right of
+    /// it is ahead. Colour still carries the verdict.
     ///
-    /// Two lines rather than the Mac's one: at phone width a single line can't hold two bars plus
-    /// both actual/target pairs. Each bar carries its own actual and percentage inside it, which is
-    /// what `InlineBar` is for, so nothing is lost — only rearranged.
+    /// `elapsedFraction` is already clamped 0…1 by `TargetMath`, so a period entirely in the past puts
+    /// the marker at the end rather than off the bar.
     private func budgetRow(_ row: BudgetRows.Row) -> some View {
         let p = row.progress
         let tint = Theme.verdict(kind(p.verdict))
-        return VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 5) {
-                Circle().fill(Color(hex: row.colorHex)).frame(width: 7, height: 7)
+        return HStack(spacing: 6) {
+            Circle().fill(Color(hex: row.colorHex)).frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 0) {
                 Text(p.name)
                     .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1).minimumScaleFactor(0.8)
-                // The period sits immediately after the name — it's part of reading "timeslice, at
-                // least 60h, per month". Exiled to the far right it floated above the trend column
-                // and read as unrelated.
+                    .lineLimit(1).minimumScaleFactor(0.85)
                 Text("\(p.target.direction.symbol) \(BudgetRows.duration(p.target.seconds))"
                      + " / \(shortPeriod(p.target.period))")
-                    .font(.system(size: 9)).foregroundStyle(.tertiary)
-                Spacer(minLength: 2)
-                Sparkline(values: row.sparkline, tint: Color(hex: row.colorHex))
-                    .frame(width: 40, height: 10)
+                    .font(.system(size: 8)).foregroundStyle(.tertiary)
             }
-            HStack(spacing: 5) {
-                barCell("goal", actual: p.actualSeconds, fraction: p.percent / 100, tint: tint)
-                barCell(rangeWord, actual: p.rangeSeconds, fraction: p.rangePercent / 100,
-                        // The range bar is informational rather than a verdict — it answers "how much
-                        // of this window", so it takes the subject's colour, not the pass/fail tint.
-                        tint: Color(hex: row.colorHex))
-            }
-        }
-    }
+            .frame(width: 82, alignment: .leading)
 
-    /// Only the PERCENTAGE goes inside the bar; the actual figure rides on the caption line above it.
-    ///
-    /// Putting "42h 14m · 68%" inside a ~180pt bar overflowed it — the percentage spilled past the
-    /// fill's right edge. The Mac keeps the bar's interior to the percentage alone for the same
-    /// reason, with the durations outside it.
-    private func barCell(_ caption: String, actual: TimeInterval, fraction: Double,
-                         tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 3) {
-                Text(caption).font(.system(size: 8)).foregroundStyle(.quaternary)
-                Text(BudgetRows.duration(actual))
-                    .font(.system(size: 8, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-            }
-            InlineBar(fraction: min(max(fraction, 0), 1),
-                      label: percent(fraction), fill: tint, height: 11)
-        }
-    }
+            InlineBar(fraction: min(max(p.percent / 100, 0), 1),
+                      label: "\(BudgetRows.duration(p.actualSeconds)) · \(percent(p.percent / 100))",
+                      fill: tint, height: 13,
+                      // Only meaningful for a floor — a ceiling has no "should be here by now".
+                      marker: p.target.direction == .atLeast ? p.elapsedFraction : nil)
 
-    /// Names the second bar after the filter, so it's obvious which control re-scales it.
-    private var rangeWord: String {
-        switch range.unit {
-        case .day: return "this day"
-        case .week: return "this week"
-        case .month: return "this month"
-        case .sixMonths: return "6 months"
-        case .year: return "this year"
-        case .all: return "all time"
+            Sparkline(values: row.sparkline, tint: Color(hex: row.colorHex))
+                .frame(width: 32, height: 12)
         }
     }
 
@@ -345,31 +303,9 @@ struct MetricsScreen: View {
             if data.segments.isEmpty {
                 placeholder("Nothing tracked on this day")
             } else {
-                let lanes = max(1, Aggregations.laneCount(data.segments))
-                let devices = Aggregations.orderedDevices(data.segments)
-                HStack(alignment: .top, spacing: 5) {
-                    // Device names down the left edge, one per lane — the Mac's arrangement. Only
-                    // shown when more than one machine contributed, otherwise it's a column of one
-                    // label restating the obvious.
-                    if devices.count > 1 {
-                        VStack(spacing: 2) {
-                            ForEach(0..<lanes, id: \.self) { lane in
-                                Text(deviceName(devices, lane))
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.secondary)
-                                    // Two lines rather than one: "MacBook Air" truncated to
-                                    // "MacBoo…" at a single line, which defeats the point of
-                                    // labelling the lane at all.
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.trailing)
-                                    .minimumScaleFactor(0.8)
-                                    .frame(height: laneHeight(lanes), alignment: .center)
-                            }
-                        }
-                        .frame(width: 58, alignment: .trailing)
-                    }
-                    timelineStrip(lanes: lanes)
-                }
+                // A lane now exists only where blocks genuinely overlap, so there is no device
+                // column to label; the strip takes the full width.
+                timelineStrip(lanes: max(1, Aggregations.laneCount(data.segments)))
                 hourAxis
                 timelineFooter(Aggregations.orderedDevices(data.segments))
                 if let seg = inspected { inspector(seg) } else {
@@ -387,7 +323,7 @@ struct MetricsScreen: View {
     }
 
     private func laneHeight(_ lanes: Int) -> CGFloat {
-        lanes > 1 ? max(16, 74 / CGFloat(lanes)) : 40
+        lanes > 1 ? max(14, 58 / CGFloat(lanes)) : 30
     }
 
     private func deviceName(_ devices: [String?], _ lane: Int) -> String {
@@ -637,6 +573,11 @@ struct MetricsScreen: View {
                                 Text(label).font(Theme.captionSmall).foregroundStyle(.tertiary)
                             }
                             Spacer()
+                            // WHEN it happened, not just how long — a list of durations can't be
+                            // matched up against the timeline above it.
+                            Text(sessionClock(s))
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.tertiary)
                             Text(Format.compact(s.seconds()))
                                 .font(.system(size: 11, design: .monospaced))
                             Button {
@@ -667,10 +608,16 @@ struct MetricsScreen: View {
                     Text(subtitle).font(Theme.captionSmall).foregroundStyle(.tertiary)
                 }
             }
-            content()
-                .padding(Theme.cardPadding)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: Theme.cardRadius).fill(Theme.card))
+            // The VStack is load-bearing. Applying `.background` straight to `content()` applies it
+            // to a TupleView, and SwiftUI distributes such modifiers across EACH child — so the Day
+            // timeline rendered as five separate cards (strip, axis, totals, legend, hint) instead of
+            // one. Wrapping first makes it a single view to decorate.
+            VStack(alignment: .leading, spacing: 6) {
+                content()
+            }
+            .padding(Theme.cardPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: Theme.cardRadius).fill(Theme.card))
         }
     }
 
@@ -712,7 +659,11 @@ struct MetricsScreen: View {
         d.summary = Aggregations.summary(intervals: all, range: range, deepThreshold: deep, now: now)
         d.buckets = Aggregations.buckets(intervals: all, range: range, deepThreshold: deep, now: now)
         // Anchored to the RANGE's day, not `now`, so the ‹ › stepper actually moves the timeline.
-        d.segments = Aggregations.assignLanes(
+        // Overlap-only lanes: `assignLanes` gives each of three devices its own row even when their
+        // blocks never overlap in time, which reads as concurrency that didn't happen and spends three
+        // rows saying what one says. Attribution still shows in the per-device totals and the tap
+        // inspector.
+        d.segments = Aggregations.assignLanesByOverlap(
             Aggregations.daySegments(intervals: all, day: range.start, now: now))
         d.taskTotals = Aggregations.rangeTotals(projects: model.allTasks, intervals: all,
                                                 range: range, now: now)
@@ -765,4 +716,22 @@ struct FlowRow: Layout {
             rowHeight = max(rowHeight, size.height)
         }
     }
+}
+
+extension MetricsScreen {
+    /// `9:05–10:20` for a closed session, `14:32–now` for the running one.
+    ///
+    /// A `DateFormatter` per row would be wasteful; one static formatter is reused.
+    fileprivate func sessionClock(_ session: Interval) -> String {
+        let f = MetricsScreen.clockFormatter
+        let start = f.string(from: session.start)
+        guard let end = session.end else { return "\(start)–now" }
+        return "\(start)–\(f.string(from: end))"
+    }
+
+    fileprivate static let clockFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f
+    }()
 }

@@ -472,6 +472,21 @@ public enum Aggregations {
         return out.sorted { $0.startHour < $1.startHour }
     }
 
+    /// Lanes packed purely by TIME OVERLAP, ignoring which device recorded what.
+    ///
+    /// `assignLanes` gives every device its own lane whenever more than one contributed, so three
+    /// devices produce three rows even when their blocks never overlap in time. That reads as
+    /// "these ran concurrently" when they didn't, and on a phone it costs three rows to say what one
+    /// row says. Device attribution is still available — the per-device totals under the strip and
+    /// the tap inspector both name it — so nothing is lost by collapsing rows that don't collide.
+    ///
+    /// The Mac keeps `assignLanes`; this exists for surfaces where vertical space is the scarce
+    /// resource and only genuine overlap deserves a second row.
+    public static func assignLanesByOverlap(_ segments: [DaySegment]) -> [DaySegment] {
+        packByOverlap(segments.sorted { $0.startHour < $1.startHour }, baseLane: 0)
+            .sorted { $0.startHour < $1.startHour }
+    }
+
     /// Devices in order of first appearance — a stable, caller-visible row order.
     /// nil (unattributed) sorts last so named devices keep the top rows.
     public static func orderedDevices(_ segments: [DaySegment]) -> [String?] {

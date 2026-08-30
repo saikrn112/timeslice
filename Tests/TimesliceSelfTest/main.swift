@@ -2784,6 +2784,50 @@ func testRangeTotals() throws {
     check(totals.count == tasks.count, "a row per project, zeroes included")
 }
 
+
+/// Lanes packed by time overlap only. `assignLanes` deliberately gives each DEVICE its own row; this
+/// variant exists for the phone, where three devices whose blocks never overlap should not cost three
+/// rows and should not imply concurrency that didn't happen.
+func testLanesByOverlap() {
+    print("\nLanes by overlap:")
+    func seg(_ id: Int64, _ from: Double, _ to: Double, _ device: String?) -> DaySegment {
+        DaySegment(id: id, projectID: id, startHour: from, endHour: to, deviceID: device)
+    }
+
+    do { // three devices, NO time overlap -> one row
+        let out = Aggregations.assignLanesByOverlap([
+            seg(1, 9, 10, "mac"), seg(2, 11, 12, "air"), seg(3, 13, 14, "phone"),
+        ])
+        check(out.allSatisfy { $0.lane == 0 }, "non-overlapping blocks share one lane across devices")
+        check(Aggregations.laneCount(out) == 1, "laneCount is 1")
+        // The device-per-lane function still behaves as the Mac needs it to.
+        let macStyle = Aggregations.assignLanes([
+            seg(1, 9, 10, "mac"), seg(2, 11, 12, "air"), seg(3, 13, 14, "phone"),
+        ])
+        check(Aggregations.laneCount(macStyle) == 3, "assignLanes still gives one lane per device")
+    }
+
+    do { // genuine overlap DOES get its own row
+        let out = Aggregations.assignLanesByOverlap([
+            seg(1, 9, 12, "mac"), seg(2, 10, 11, "air"),
+        ])
+        check(Set(out.map(\.lane)) == [0, 1], "overlapping blocks are split onto two lanes")
+    }
+
+    do { // overlap within ONE device also splits, so a handoff can't hide a block
+        let out = Aggregations.assignLanesByOverlap([
+            seg(1, 9, 12, "mac"), seg(2, 10, 13, "mac"),
+        ])
+        check(Set(out.map(\.lane)) == [0, 1], "one device's own overlap still fans out")
+    }
+
+    do { // touching but not overlapping stays on one lane
+        let out = Aggregations.assignLanesByOverlap([seg(1, 9, 10, "a"), seg(2, 10, 11, "b")])
+        check(out.allSatisfy { $0.lane == 0 }, "abutting blocks don't count as overlapping")
+        check(Aggregations.assignLanesByOverlap([]).isEmpty, "empty input is empty output")
+    }
+}
+
 // MARK: - Run
 
 do {
@@ -2820,6 +2864,7 @@ do {
     try testCreateProjectFilesIntoGroup()
     try testBudgetRows()
     try testRangeTotals()
+    testLanesByOverlap()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1
