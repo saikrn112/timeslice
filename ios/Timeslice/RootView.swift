@@ -51,6 +51,10 @@ struct RootView: View {
         }
         .onAppear {
             model.load()
+            // Also applied HERE, not just as the @State initial value: SwiftUI restores a TabView's
+            // previous selection across launches, which silently overrode the init value and made
+            // the launch hint look broken.
+            if let hinted = Self.launchTab { tab = hinted }
             switch Self.launchHint {
             case "switcher": model.requestSwitcher()
             case "settings": model.showingSettings = true

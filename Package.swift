@@ -51,6 +51,17 @@ let package = Package(
                 .linkedLibrary("sqlite3"),
             ]
         ),
+        // Seeds a database with demo data. A separate executable so it can be pointed at an iOS
+        // SIMULATOR container — that database is just a file on disk, and going through
+        // `IntervalStore` keeps uids/updated_at/migrations correct in a way hand-written SQL would not.
+        .executableTarget(
+            name: "TimesliceSeed",
+            dependencies: ["TimesliceCore"],
+            path: "Tools/TimesliceSeed",
+            linkerSettings: [
+                .linkedLibrary("sqlite3"),
+            ]
+        ),
         // Self-test runner. XCTest/swift-testing bundles aren't available under Command Line
         // Tools (no Xcode), so core logic is verified by this executable via `swift run TimesliceSelfTest`.
         .executableTarget(

@@ -55,6 +55,10 @@ struct MetricsScreen: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
+                // iOS 26's tab bar FLOATS over the content. With only a handful of rows nothing
+                // reached that far and it looked fine; at 34 tasks the last rows sat permanently
+                // underneath it. Reserve its height so the list can always be scrolled clear.
+                .padding(.bottom, 56)
             }
             .background(Theme.page)
             .navigationTitle("Metrics")
