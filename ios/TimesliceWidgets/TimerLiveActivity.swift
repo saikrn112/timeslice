@@ -36,7 +36,7 @@ struct TimerLiveActivity: Widget {
                 DynamicIslandExpandedRegion(.trailing) {
                     ClockText(state: context.state)
                         .font(.system(.title3, design: .monospaced))
-                        .foregroundStyle(color)
+                        .foregroundStyle(clockColor(context.state))
                         // Monospaced digits still reflow as the hour rolls over; a fixed width
                         // stops the whole region shifting once a session passes an hour.
                         .frame(minWidth: 82, alignment: .trailing)
@@ -77,7 +77,7 @@ struct TimerLiveActivity: Widget {
             } compactTrailing: {
                 ClockText(state: context.state)
                     .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(color)
+                    .foregroundStyle(clockColor(context.state))
                     // The compact slot is width-constrained; without this an hours-long session
                     // gets truncated to an unreadable stub.
                     .frame(maxWidth: 54)
@@ -111,6 +111,18 @@ private struct ClockText: View {
             Text(Format.duration(state.committedTodaySeconds))
         }
     }
+}
+
+/// Colour for the clock digits.
+///
+/// **Green while running**, not the task's colour. A pale task colour — a light blue, a pale yellow —
+/// is barely legible against the island's black, and green is the established system convention for
+/// "actively recording" that every timer and voice-memo app uses. The task's own colour still carries
+/// identity, on the swatch and the keyline, where legibility doesn't depend on it.
+///
+/// Paused digits go secondary, so a frozen number doesn't read as live.
+private func clockColor(_ state: TimerActivityAttributes.ContentState) -> Color {
+    state.isRunning ? .green : .secondary
 }
 
 /// The CURRENT SESSION, as the secondary figure — the main clock is already today's total, so
@@ -154,7 +166,7 @@ private struct LockScreenView: View {
             Spacer()
             ClockText(state: state)
                 .font(.system(.title2, design: .monospaced))
-                .foregroundStyle(Color(hex: state.colorHex))
+                .foregroundStyle(clockColor(state))
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)

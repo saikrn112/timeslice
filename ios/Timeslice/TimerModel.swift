@@ -225,6 +225,7 @@ final class TimerModel: ObservableObject {
                     syncActivity(startedAt: Date(), isRunning: false, task: task)
                 }
                 rearmNudges()
+                SyncController.shared.publishSoon()
             } else {
                 try store.switchTo(projectID: taskID)
                 currentTaskID = taskID
@@ -234,6 +235,7 @@ final class TimerModel: ObservableObject {
                     syncActivity(startedAt: running.start, isRunning: true)
                 }
                 rearmNudges()
+                SyncController.shared.publishSoon()
             }
         } catch {
             loadError = "\(error)"
@@ -259,6 +261,8 @@ final class TimerModel: ObservableObject {
         LiveActivityController.end()
         // Stopping is not pausing: nothing is outstanding, so both nudges are cancelled outright.
         NudgeScheduler.shared.cancelAll()
+        // Clears our running marker on the other devices, so nothing keeps thinking we hold the timer.
+        SyncController.shared.publishSoon()
     }
 
     /// Ask the UI to present the switcher wheel. Called from `OpenSwitcherIntent`.

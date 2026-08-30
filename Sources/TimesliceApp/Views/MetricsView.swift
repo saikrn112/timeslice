@@ -487,6 +487,7 @@ struct MetricsView: View {
         // names (one device may span several lanes when its own blocks overlap).
         var owner: [Int: String?] = [:]
         for seg in daySegments where owner[seg.lane] == nil { owner[seg.lane] = seg.deviceID }
+        let laneHeight = 110.0 / Double(max(1, lanes))
         return VStack(spacing: 0) {
             ForEach(0..<lanes, id: \.self) { lane in
                 let device = owner[lane] ?? nil
@@ -494,13 +495,22 @@ struct MetricsView: View {
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .fixedSize()
-                    .rotationEffect(.degrees(-90))
-                    .frame(maxHeight: .infinity)
+                    .truncationMode(.tail)
+                    .minimumScaleFactor(0.75)
+                    .frame(width: 64, height: laneHeight, alignment: .trailing)
                     .help("\(deviceName(device)) — \(compactDuration(deviceSeconds(device)))")
             }
         }
-        .frame(width: 14, height: 110)
+        // HORIZONTAL, right-aligned in a fixed column — not rotated.
+        //
+        // The labels used to be rotated -90 with `.fixedSize()` inside a 14x110 column. `fixedSize`
+        // makes the text refuse to shrink, and after rotation its unrotated WIDTH becomes its vertical
+        // extent — so "iphone-b653" (~60pt wide at 9pt) needed 60pt of height in a slot that is only
+        // 110/lanes tall. With three devices that is ~36pt each, so every label overflowed into its
+        // neighbours and rendered as one illegible smear ("persoiphone-b653work").
+        //
+        // Reading sideways was never good anyway; the window has width to spare for a real column.
+        .frame(width: 64, height: 110)
         // Nudge down so the labels line up with the plot area, not the axis strip.
         .padding(.bottom, 22)
     }

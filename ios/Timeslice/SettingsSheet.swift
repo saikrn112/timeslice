@@ -97,8 +97,18 @@ struct SettingsSheet: View {
     @ViewBuilder
     private var syncSection: some View {
         Section {
-            LabeledContent("This device") {
-                Text(model.deviceLabel).font(Theme.rowTime).foregroundStyle(.secondary)
+            // EDITABLE. It was a read-only label before, so there was no way to name this phone —
+            // peers saw a raw slug like `iphone-b653` and the day timeline labelled its lane with that.
+            // Writing it publishes on the next cycle via `AppSettings.deviceLabel`.
+            HStack {
+                Text("This device").font(Theme.rowTitle)
+                Spacer()
+                TextField(model.deviceID, text: $settings.deviceLabel)
+                    .font(Theme.rowTime)
+                    .multilineTextAlignment(.trailing)
+                    .textInputAutocapitalization(.words)
+                    .autocorrectionDisabled()
+                    .onSubmit { Task { await SyncController.shared.syncOnce() } }
             }
             ForEach(model.knownDevices, id: \.id) { device in
                 HStack {
@@ -111,8 +121,9 @@ struct SettingsSheet: View {
                 }
             }
         } header: { header("Devices") } footer: {
-            Text("Time recorded on another device appears on the day timeline, and the session list "
-                 + "names which device each block came from.")
+            Text("Naming this device is how it appears on other devices' timelines. Leave it blank to "
+                 + "use the automatic name. Time recorded elsewhere shows on the day timeline, and the "
+                 + "session list names which device each block came from.")
                 .font(Theme.captionSmall)
         }
 

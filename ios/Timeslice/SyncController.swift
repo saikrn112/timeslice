@@ -75,6 +75,29 @@ final class SyncController {
         }
     }
 
+    // MARK: - Publishing a local change
+
+    private var publishTask: Task<Void, Never>?
+
+    /// Publish a local change promptly instead of waiting for the next poll.
+    ///
+    /// The Mac does this by debouncing `dataDidChange` by 2s and publishing. iOS had NO equivalent:
+    /// starting a timer on the phone wrote nothing to Drive until the next foreground transition or an
+    /// opportunistic `BGAppRefreshTask` — and if the app was already foreground when you tapped, that
+    /// meant nothing at all. Other devices therefore never saw the running marker, so
+    /// `TakeoverPolicy` had nothing to act on and the phone never stopped the Mac's timer.
+    ///
+    /// Debounced because a task switch is two mutations (close one interval, open another) and each
+    /// would otherwise be a full publish.
+    func publishSoon() {
+        publishTask?.cancel()
+        publishTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            await self?.syncOnce()
+        }
+    }
+
     // MARK: - One cycle
 
     /// Publish our facts, merge everyone else's, then settle the one-timer invariant.
@@ -110,7 +133,15 @@ final class SyncController {
             let (deviceID, encoded) = try await MainActor.run { () -> (String, Data) in
                 let store = try Self.requireStore()
                 let id = store.localDeviceID ?? TimeslicePaths.deviceID()
-                let engine = SyncEngine(store: store, deviceID: id)
+                // The label travels WITH the payload — that's how a peer shows "MacBook Air" rather
+                // than a slug like `iphone-b653`. Omitting it left this device nameless on every other
+                // device's timeline.
+                let label = TimerModel.shared.settings.deviceLabel
+                let engine = SyncEngine(store: store, deviceID: id,
+                                        deviceLabel: label.isEmpty ? nil : label)
+                // Recorded locally in the SAME hop, so this device's own list agrees with what peers
+                // will see rather than showing the raw id until the next round trip.
+                try? store.rememberDevice(id: id, label: label.isEmpty ? nil : label)
                 return (id, try JSONEncoder().encode(try engine.buildPayload()))
             }
             try transport.put(payload: encoded, deviceID: deviceID)
