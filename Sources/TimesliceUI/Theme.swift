@@ -41,28 +41,41 @@ public enum Theme {
     public static let track = Color.secondary.opacity(0.14)
 
     // MARK: - Type
+    //
+    // Sized for TOUCH, not for the Mac.
+    //
+    // These were first set to the Mac's values (14pt rows, 12pt headers, 10pt captions) on the theory
+    // that matching the Mac was the goal. That was wrong: the Mac is read at arm's length with a
+    // pointer, a phone is read one-handed at a glance, and 14pt rows with 10pt captions are genuinely
+    // hard to read. iOS `.body` is 17pt for a reason.
+    //
+    // Deliberately still tighter than stock iOS — a tracker's list is scanned, not read — but never
+    // below 12pt, and primary text sits at 16pt.
 
-    /// Row title. The Mac's task rows are 12–13pt, not iOS `.body` (17pt) — which is the single
-    /// biggest reason the phone felt oversized.
-    public static let rowTitle = Font.system(size: 14)
-    public static let rowTitleStrong = Font.system(size: 14, weight: .semibold)
+    /// Row title.
+    public static let rowTitle = Font.system(size: 16)
+    public static let rowTitleStrong = Font.system(size: 16, weight: .semibold)
     /// Monospaced digits for any duration, so columns line up and a ticking clock doesn't reflow.
-    public static let rowTime = Font.system(size: 14, design: .monospaced)
-    public static let sectionHeader = Font.system(size: 12, weight: .semibold)
-    public static let caption = Font.system(size: 11)
-    public static let captionSmall = Font.system(size: 10)
-    /// Tile headline — the Mac uses `.title2` rounded semibold.
-    public static let tileValue = Font.system(.title3, design: .rounded).weight(.semibold)
+    public static let rowTime = Font.system(size: 16, design: .monospaced)
+    public static let sectionHeader = Font.system(size: 14, weight: .semibold)
+    public static let caption = Font.system(size: 13)
+    public static let captionSmall = Font.system(size: 12)
+    /// Tile headline.
+    public static let tileValue = Font.system(.title2, design: .rounded).weight(.semibold)
 
     // MARK: - Metrics
 
-    /// Colour swatch beside a task. 9pt on the Mac.
-    public static let dot: CGFloat = 9
-    public static let rowSpacing: CGFloat = 9
-    public static let cardRadius: CGFloat = 10
-    public static let cardPadding: CGFloat = 10
-    /// Vertical padding inside a list row. Tight on purpose: a tracker's list is scanned, not read.
-    public static let rowVPadding: CGFloat = 5
+    /// Colour swatch beside a task.
+    public static let dot: CGFloat = 11
+    public static let rowSpacing: CGFloat = 10
+    public static let cardRadius: CGFloat = 12
+    public static let cardPadding: CGFloat = 12
+    /// Vertical padding inside a list row.
+    ///
+    /// 10, not 5: a row is the primary TAP TARGET in this app — tapping it starts or pauses a timer —
+    /// and Apple's guidance is a 44pt minimum. A 16pt label plus 10pt either side lands close to that;
+    /// at 5pt the rows were both hard to read and easy to mis-tap.
+    public static let rowVPadding: CGFloat = 10
 
     // MARK: - Verdicts
 

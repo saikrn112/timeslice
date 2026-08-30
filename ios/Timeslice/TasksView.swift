@@ -31,6 +31,8 @@ struct TasksView: View {
                         Label(error, systemImage: "exclamationmark.triangle")
                             .font(Theme.caption).foregroundStyle(.red).padding(.bottom, 6)
                     }
+                    // First thing on screen, above the list: start/stop without hunting for a row.
+                    if !(model.tasks.isEmpty && model.archivedTasks.isEmpty) { NowCard() }
                     controlRow
                     if model.tasks.isEmpty && model.archivedTasks.isEmpty {
                         empty
@@ -275,5 +277,77 @@ extension View {
             set: { if !$0 { item.wrappedValue = nil } })) {
             if let value = item.wrappedValue { content(value) }
         }
+    }
+}
+
+/// The hero control at the top of Tasks: what's running, for how long, and one big button.
+///
+/// Opening the app should let you start or stop immediately, the way a stopwatch does — without
+/// hunting for the right row first. This is the first piece written for touch rather than
+/// transplanted from the Mac, where the equivalent job is done by a global hotkey.
+///
+/// Three states, and the button always says what it will do:
+///  • running — ticking today's total, "Pause"
+///  • paused  — frozen total, "Resume" (the task stays current, mirroring the Mac)
+///  • idle    — "Start", which resumes the most recently worked task via `toggleCurrent()`
+struct NowCard: View {
+    @ObservedObject private var model = TimerModel.shared
+
+    private var task: Project? { model.currentTaskID.flatMap { model.task(id: $0) } }
+    private var isRunning: Bool { model.isRunning }
+
+    var body: some View {
+        let accent = task.map { Color(hex: model.colorHex(for: $0)) } ?? .secondary
+        return HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 7) {
+                    Circle().fill(accent).frame(width: 10, height: 10)
+                    Text(task?.name ?? "Nothing running")
+                        .font(.system(size: 15, weight: .medium))
+                        .lineLimit(1)
+                }
+                // Today's total for the current task, ticking while running — the same number the
+                // row and the Dynamic Island show, from the same `liveOrigin`.
+                if let id = model.currentTaskID, let origin = model.liveOrigin(for: id) {
+                    Text(timerInterval: origin...Date.distantFuture, pauseTime: nil, countsDown: false)
+                        .font(.system(size: 34, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.green)
+                } else if let id = model.currentTaskID {
+                    Text(Format.compact(model.committedTodaySeconds[id] ?? 0))
+                        .font(.system(size: 34, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("—")
+                        .font(.system(size: 34, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.tertiary)
+                }
+                Text(isRunning ? "tracking · today" : (task == nil ? "tap Start" : "paused · today"))
+                    .font(Theme.captionSmall).foregroundStyle(.tertiary)
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                model.toggleCurrent()
+            } label: {
+                // A 64pt circle: comfortably past the 44pt minimum tap target, and reachable with a
+                // thumb without looking.
+                ZStack {
+                    Circle().fill(isRunning ? Color.orange : Color.green)
+                    Image(systemName: isRunning ? "pause.fill" : "play.fill")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 64, height: 64)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isRunning ? "Pause timer" : "Start timer")
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 16).fill(Theme.card))
+        .padding(.bottom, 12)
     }
 }
