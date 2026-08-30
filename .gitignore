@@ -17,6 +17,11 @@ Package.resolved
 ios/Timeslice/Info.plist
 ios/TimesliceWidgets/Info.plist
 
+# xcodebuild -derivedDataPath output. `build/` is the Simulator build and `build-device/` the
+# signed device build described in AGENTS.md; both are large and entirely regenerable.
+ios/build/
+ios/build-device/
+
 # Editor swap files
 *.swp
 *.swo

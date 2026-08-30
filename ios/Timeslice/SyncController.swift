@@ -83,35 +83,57 @@ final class SyncController {
     /// rather than a version from before this cycle.
     @discardableResult
     func syncOnce() async -> Bool {
-        guard !isSyncing, let transport, let store = TimerModel.shared.storeIfLoaded else {
+        guard !isSyncing, transport != nil, TimerModel.shared.storeIfLoaded != nil else {
             return false
         }
         isSyncing = true
         defer { isSyncing = false }
+        return await performSync()
+    }
 
-        let deviceID = store.localDeviceID ?? TimeslicePaths.deviceID()
-        let engine = SyncEngine(store: store, deviceID: deviceID)
+    /// The cycle itself, deliberately `nonisolated`.
+    ///
+    /// `DriveSyncTransport` bridges async Drive calls to `SyncTransport`'s synchronous API with a
+    /// semaphore, and traps on the main thread — blocking there would deadlock, since the awaited
+    /// work needs the main actor to proceed. As a plain method on this `@MainActor` class every
+    /// transport call inherited main-actor isolation and tripped that guard, crashing the app on the
+    /// first sync after sign-in. The Mac's `SyncController` hit this and solved it the same way.
+    ///
+    /// So the split is: transport I/O runs here, off the actor, and only `IntervalStore` work hops
+    /// back — the store is not `Sendable` and belongs to the main-actor `TimerModel`.
+    nonisolated private func performSync() async -> Bool {
+        guard let transport = await MainActor.run(body: { self.transport }) else { return false }
 
         do {
-            // 1. Publish our payload.
-            let payload = try engine.buildPayload()
-            try transport.put(payload: try JSONEncoder().encode(payload), deviceID: deviceID)
+            // 1. Publish our payload. Building it reads the store, so it happens on the main actor;
+            //    only the upload leaves it.
+            let (deviceID, encoded) = try await MainActor.run { () -> (String, Data) in
+                let store = try Self.requireStore()
+                let id = store.localDeviceID ?? TimeslicePaths.deviceID()
+                let engine = SyncEngine(store: store, deviceID: id)
+                return (id, try JSONEncoder().encode(try engine.buildPayload()))
+            }
+            try transport.put(payload: encoded, deviceID: deviceID)
 
-            // 2. Merge every other device's.
+            // 2. Fetch off-actor, then merge on it — one hop per payload, since each merge is a
+            //    store write.
             for data in try transport.fetchOthers(excluding: deviceID) {
                 guard let remote = try? JSONDecoder().decode(SyncPayload.self, from: data) else {
                     // A payload we can't decode is a peer on a newer format or a truncated write;
                     // skipping it is right, and the transport prunes genuinely unreadable files.
                     continue
                 }
-                _ = try engine.merge(remote)
+                try await MainActor.run {
+                    let store = try Self.requireStore()
+                    _ = try SyncEngine(store: store, deviceID: deviceID).merge(remote)
+                }
             }
 
             // 3. Resolve the one-timer invariant, then republish presence.
-            try settleTakeover(transport: transport, deviceID: deviceID, store: store)
-            try publishMarker(transport: transport, deviceID: deviceID, store: store)
+            try await settleTakeover(transport: transport, deviceID: deviceID)
+            try await publishMarker(transport: transport, deviceID: deviceID)
 
-            TimerModel.shared.reload()
+            await MainActor.run { TimerModel.shared.reload() }
             return true
         } catch {
             NSLog("[timeslice] sync failed: \(error.localizedDescription)")
@@ -119,9 +141,22 @@ final class SyncController {
         }
     }
 
+    /// The store, or a thrown error — it can be torn down between hops, and force-unwrapping it
+    /// would turn an ordinary "not loaded yet" into a crash.
+    @MainActor
+    private static func requireStore() throws -> IntervalStore {
+        guard let store = TimerModel.shared.storeIfLoaded else { throw SyncError.storeUnavailable }
+        return store
+    }
+
+    enum SyncError: Error { case storeUnavailable }
+
     /// Stop our timer if another device started one later. Decision is `TakeoverPolicy`'s.
-    private func settleTakeover(transport: SyncTransport, deviceID: String,
-                                store: IntervalStore) throws {
+    ///
+    /// `nonisolated`: the marker fetch is transport I/O and must not run on the main actor. Only the
+    /// store read and the stop hop back.
+    nonisolated private func settleTakeover(transport: SyncTransport,
+                                            deviceID: String) async throws {
         let observed = try transport.fetchOtherRunningWithTimes(excluding: deviceID)
         var markers: [RunningMarker] = []
         var observedAt: [String: Date] = [:]
@@ -134,33 +169,41 @@ final class SyncController {
             if let modified = entry.modified { observedAt[marker.deviceID] = modified }
         }
 
-        let localSince = try store.openInterval()?.start
+        let localSince = try await MainActor.run { try Self.requireStore().openInterval()?.start }
         guard let decision = TakeoverPolicy.decide(localRunningSince: localSince,
                                                    markers: markers,
                                                    observedAt: observedAt) else { return }
         // Back-dated to when the other device started, so the two devices' intervals abut instead of
         // overlapping — this is what makes the delayed wake-up harmless.
-        try store.stopOpenInterval(at: decision.pauseAt)
+        try await MainActor.run { try Self.requireStore().stopOpenInterval(at: decision.pauseAt) }
         NSLog("[timeslice] paused by \(decision.byDeviceID) at \(decision.pauseAt)")
     }
 
     /// Republish our running/paused marker. Written every cycle, because its freshness is what other
     /// devices use to decide whether our claim is still live.
-    private func publishMarker(transport: SyncTransport, deviceID: String,
-                               store: IntervalStore) throws {
-        guard let open = try store.openInterval() else {
+    ///
+    /// `nonisolated` for the same reason as the rest: `putRunning` is transport I/O. The store reads
+    /// are gathered in one main-actor hop first, so the marker is built from a consistent snapshot.
+    nonisolated private func publishMarker(transport: SyncTransport,
+                                           deviceID: String) async throws {
+        let snapshot = try await MainActor.run { () -> (start: Date, uid: String)? in
+            let store = try Self.requireStore()
+            guard let open = try store.openInterval(),
+                  // The task travels as its **uid**, never its row id — `subject_id = 8` is a
+                  // different task on the other machine.
+                  let uid = try store.uid(table: "projects", id: open.projectID) else { return nil }
+            return (open.start, uid)
+        }
+        guard let snapshot else {
             // No open interval: clear the claim rather than leaving a stale one that would pause
             // other devices indefinitely.
             try transport.putRunning(nil, deviceID: deviceID)
             return
         }
-        // The task travels as its **uid**, never its row id — `subject_id = 8` is a different task on
-        // the other machine.
-        guard let uid = try store.uid(table: "projects", id: open.projectID) else { return }
         // `writtenAt` is the heartbeat, distinct from `since` (when the timer started). It's the
         // fallback freshness signal when a transport has no server-side timestamp of its own.
-        let marker = RunningMarker(deviceID: deviceID, taskUID: uid,
-                                   since: open.start.timeIntervalSince1970,
+        let marker = RunningMarker(deviceID: deviceID, taskUID: snapshot.uid,
+                                   since: snapshot.start.timeIntervalSince1970,
                                    isRunning: true,
                                    writtenAt: Date().timeIntervalSince1970)
         try transport.putRunning(try JSONEncoder().encode(marker), deviceID: deviceID)

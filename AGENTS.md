@@ -178,6 +178,73 @@ The simulator's clock can also be hours off wall-clock time. That once made a wh
 data look missing when it was actually 00:50, not 12:50 — check `date` inside the simulator before
 concluding data is wrong.
 
+### Putting the app on a real iPhone
+
+The Simulator table above says several things "need hardware". Getting there is mostly one-time
+human setup — do not burn an hour trying to automate the parts that cannot be.
+
+**What an agent can do:** detect the device (`xcrun devicectl list devices`), build, install
+(`xcrun devicectl device install app --device <UDID> <path>`), launch, and read logs.
+
+**What requires a human, with no CLI equivalent:**
+
+- **An Apple ID in Xcode** (Settings → Accounts). This mints the signing certificate. Check with
+  `security find-identity -v -p codesigning` — "0 valid identities found" means stop and ask.
+- **Developer Mode on the phone** (Settings → Privacy & Security → Developer Mode, then reboot).
+  Without it install fails with `CoreDeviceError 10005`.
+- **Trusting the certificate** (Settings → General → VPN & Device Management). Without it the app
+  installs but refuses to launch: *"invalid code signature, inadequate entitlements or its profile
+  has not been explicitly trusted"*.
+
+**Signing for a device build is a command-line override, not a spec edit.** `project.yml`'s ad-hoc
+`CODE_SIGN_IDENTITY: "-"` is correct for the Simulator; a device build passes a real team instead:
+
+```bash
+xcodebuild -project ios/Timeslice.xcodeproj -scheme TimesliceiOS \
+  -sdk iphoneos -configuration Debug -derivedDataPath build-device \
+  DEVELOPMENT_TEAM=XXXXXXXXXX CODE_SIGN_STYLE=Automatic \
+  CODE_SIGN_IDENTITY="Apple Development" \
+  CODE_SIGNING_REQUIRED=YES CODE_SIGNING_ALLOWED=YES -allowProvisioningUpdates
+```
+
+A Personal Team certificate **expires after 7 days** — "it stopped opening" usually means rebuild,
+not a bug.
+
+**Changing the bundle id is a `project.yml` edit, never an Xcode one.** A fork cannot register
+`com.timeslice.ios` (it belongs to this account), so the id must change — and because the project is
+generated, editing it in Xcode's GUI is silently reverted by the next `xcodegen generate`. Worse, the
+GUI only changes the target you are looking at, leaving the widget's id no longer prefixed by the
+app's: *"Embedded binary's bundle identifier is not prefixed with the parent app's bundle
+identifier."* Change **both**, in the spec, together.
+
+`BGTaskSchedulerPermittedIdentifiers` and the keychain service are separate identifier strings that
+do **not** have to track the bundle id — leave them alone.
+
+### Sync on iOS needs an *iOS* OAuth client, pasted at runtime
+
+The Mac reads `~/.config/timeslice/env`; a phone has no such path, so the client id is typed into
+Settings → Sync and the "Sign in with Google" button stays disabled until it is non-empty. A button
+that "does nothing" is almost always this, not a broken handler.
+
+It must be an **iOS** client (no secret, redirect derived from the reversed client id), created
+against **this build's** bundle id — not the Desktop client the Mac uses, and not the id in the
+on-screen help text if the fork renamed itself.
+
+### Never touch a transport from the main actor
+
+`DriveSyncTransport.blocking()` traps on the main thread — `assertionFailure`, so **Debug builds
+crash and Release builds silently misbehave**. The guard is deliberate: the semaphore would deadlock
+against async work that needs the main actor to proceed.
+
+Both platforms hit this, and both fixed it the same way: the sync body is `nonisolated`, transport
+I/O runs off the actor, and only `IntervalStore` work hops back via `MainActor.run` (the store is not
+`Sendable` and belongs to a `@MainActor` owner). See `SyncController.performSync` on either side.
+
+The trap is easy to reintroduce, because a plain method on a `@MainActor` class inherits that
+isolation **even when called from `Task.detached`**. If you add a sync entry point, mark it
+`nonisolated` and hop back only for store access. Symptom to recognise: the app dies immediately
+after Google sign-in completes, since that path ends in a sync.
+
 ### Share logic through Core, always
 
 The phone must not recompute anything the Mac already does; that is how the two silently diverge.
