@@ -18,7 +18,10 @@ struct TasksView: View {
     @State private var editing: Project?
     @State private var showArchived = false
     @State private var scope: TimeScope = .today
-    @State private var grouped = false
+    /// Grouped by project by default, matching the Mac — `ProjectListView` has no toggle at all and
+    /// simply groups whenever any project exists. The toggle stays because a phone benefits from a
+    /// recency view the Mac gets from its switcher, but the default now agrees.
+    @State private var grouped = true
 
     var body: some View {
         NavigationStack {
@@ -33,7 +36,7 @@ struct TasksView: View {
                         empty
                     } else if !query.isEmpty {
                         card { rows(model.searchResults(query).map(\.project)) }
-                    } else if grouped {
+                    } else if grouped && !model.groups.isEmpty {
                         ForEach(model.sections) { section in
                             groupHeader(section)
                             card { rows(section.tasks) }
@@ -45,10 +48,7 @@ struct TasksView: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                // iOS 26's tab bar FLOATS over the content. With only a handful of rows nothing
-                // reached that far and it looked fine; at 34 tasks the last rows sat permanently
-                // underneath it. Reserve its height so the list can always be scrolled clear.
-                .padding(.bottom, 56)
+
             }
             .background(Theme.page)
             .navigationTitle("Timeslice")
@@ -96,13 +96,17 @@ struct TasksView: View {
                 .buttonStyle(.plain)
             }
             Spacer()
-            Button { grouped.toggle() } label: {
-                Label(grouped ? "Projects" : "Recent",
-                      systemImage: grouped ? "folder" : "clock")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+            // Hidden with no projects: "group by project" that groups nothing is chrome the list
+            // doesn't need, which is the same reason the Mac stays flat until a project exists.
+            if !model.groups.isEmpty {
+                Button { grouped.toggle() } label: {
+                    Label(grouped ? "Projects" : "Recent",
+                          systemImage: grouped ? "folder" : "clock")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .padding(.bottom, 8)
     }
