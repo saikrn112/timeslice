@@ -16,18 +16,22 @@ struct ToggleTimerIntent: AppIntent {
     /// `Activity.request` from the background (it throws `.visibility`), so a background-only intent
     /// could toggle the timer but often fail to *show* the island — which is the point of the
     /// feature. Foregrounding guarantees the Dynamic Island appears.
-    static var openAppWhenRun: Bool = true
+    /// Computed, not a stored `static var`. Both compile, but a computed property is the form Apple
+    /// documents and the one the metadata extractor is guaranteed to read — worth removing as a
+    /// variable while the Action Button is still failing.
+    static var openAppWhenRun: Bool { true }
 
+    /// Returns a plain result, not `ProvidesDialog`.
+    ///
+    /// An intent that both foregrounds the app AND returns a dialog is an odd pairing: the app is
+    /// about to be on screen showing exactly the state the dialog would announce. Keeping the return
+    /// type minimal removes another variable from the diagnosis.
     @MainActor
-    func perform() async throws -> some IntentResult & ProvidesDialog {
+    func perform() async throws -> some IntentResult {
         let model = TimerModel.shared
         model.load()
         model.toggleCurrent()
-
-        let name = model.currentTaskID.flatMap { model.task(id: $0)?.name } ?? "timer"
-        return .result(dialog: model.isRunning
-                       ? IntentDialog("Tracking \(name)")
-                       : IntentDialog("Paused \(name)"))
+        return .result()
     }
 }
 
@@ -37,7 +41,7 @@ struct ToggleTimerIntent: AppIntent {
 struct StopTimerIntent: AppIntent {
     static var title: LocalizedStringResource = "Stop Timeslice Timer"
     static var description = IntentDescription("Stop tracking and dismiss the Dynamic Island.")
-    static var openAppWhenRun: Bool = false
+    static var openAppWhenRun: Bool { false }
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
@@ -48,9 +52,15 @@ struct StopTimerIntent: AppIntent {
     }
 }
 
-/// Makes both intents discoverable in Shortcuts (and therefore assignable to the Action Button)
+/// Makes the intents discoverable in Shortcuts (and therefore assignable to the Action Button)
 /// without the user building a shortcut by hand.
-struct TimesliceShortcuts: AppShortcutsProvider {
+///
+/// Named `ShortcutsCatalog`, deliberately NOT `TimesliceShortcuts`. A type whose name repeats the
+/// module name mangles with a word-substitution back-reference — `9Timeslice0A9ShortcutsV` — where
+/// `0A` points back at the module. A name that doesn't repeat it mangles plainly
+/// (`9Timeslice16ShortcutsCatalogV`), removing any dependence on the consumer resolving that
+/// back-reference when it looks the provider up at runtime.
+struct ShortcutsCatalog: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
             intent: ToggleTimerIntent(),

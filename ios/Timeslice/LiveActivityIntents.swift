@@ -20,7 +20,7 @@ struct ToggleFromActivityIntent: LiveActivityIntent {
     static var title: LocalizedStringResource = "Pause or Resume Timeslice"
     static var description = IntentDescription("Pause or resume the current task.")
     /// Must stay false: the point of a button in the island is not opening the app.
-    static var openAppWhenRun: Bool = false
+    static var openAppWhenRun: Bool { false }
 
     @MainActor
     func perform() async throws -> some IntentResult {
@@ -38,7 +38,7 @@ struct ToggleFromActivityIntent: LiveActivityIntent {
 struct PreviousTaskIntent: LiveActivityIntent {
     static var title: LocalizedStringResource = "Switch to Previous Task"
     static var description = IntentDescription("Switch back to the task you were on before.")
-    static var openAppWhenRun: Bool = false
+    static var openAppWhenRun: Bool { false }
 
     @MainActor
     func perform() async throws -> some IntentResult {

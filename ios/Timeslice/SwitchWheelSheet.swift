@@ -104,7 +104,7 @@ struct OpenSwitcherIntent: AppIntent {
     static var description = IntentDescription("Open Timeslice on the task switcher wheel.")
     /// Necessarily true: a wheel cannot be presented from the background, and Live Activities can't
     /// host one at all.
-    static var openAppWhenRun: Bool = true
+    static var openAppWhenRun: Bool { true }
 
     @MainActor
     func perform() async throws -> some IntentResult {
