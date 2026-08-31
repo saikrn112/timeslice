@@ -32,6 +32,24 @@ struct TimerActivityAttributes: ActivityAttributes {
         /// False while the task is paused but still current — the island stays up showing a frozen
         /// time, which mirrors how the Mac's menu bar keeps displaying a paused task.
         var isRunning: Bool
+        /// The switcher, carried in the payload because the widget **cannot read the database**.
+        ///
+        /// A widget extension that opens the shared sqlite file gets killed with `0xdead10cc` when the
+        /// app is suspended holding a lock, so every name and colour the island draws has to arrive
+        /// here. Kept short deliberately: three buttons is what fits beside pause and previous.
+        var recents: [RecentTask] = []
+    }
+
+    /// One button in the island's switcher.
+    struct RecentTask: Codable, Hashable, Identifiable {
+        /// The task's **uid** — the only safe cross-device handle, and what `SwitchToTaskIntent`
+        /// carries. Row ids mean different tasks on different machines.
+        var uid: String
+        var name: String
+        /// Already resolved through `Palette.displayColorHex` by the app, like `colorHex` above.
+        var colorHex: String
+
+        var id: String { uid }
     }
 
     /// Stable identity of what's being timed. Only used to decide whether an existing activity can
@@ -48,6 +66,22 @@ extension TimerActivityAttributes.ContentState {
     /// Seconds elapsed in the current session alone (0 when paused).
     func sessionSeconds(now: Date = Date()) -> Double {
         isRunning ? max(0, now.timeIntervalSince(startedAt)) : 0
+    }
+
+    /// Whether the ticking clock should carry an hours field.
+    var showsHours: Bool {
+        TimerDisplay.showsHours(displayedSeconds: committedTodaySeconds + sessionSeconds())
+    }
+
+    /// When the displayed clock next crosses into a new hour, or nil if it already shows hours.
+    ///
+    /// The app uses this to push one update at the boundary. Without it the label is stuck with
+    /// whatever `showsHours` was true when the snapshot was taken, and a minutes-only clock that runs
+    /// past an hour has nowhere to put the overflow.
+    func hourBoundary(now: Date = Date()) -> Date? {
+        guard isRunning, !showsHours else { return nil }
+        let displayed = committedTodaySeconds + sessionSeconds(now: now)
+        return now.addingTimeInterval(3600 - displayed)
     }
 }
 
@@ -66,5 +100,17 @@ enum TimerDisplay {
                            now: Date = Date(), calendar: Calendar = .current) -> Date {
         let effectiveStart = max(runStart, calendar.startOfDay(for: now))
         return effectiveStart.addingTimeInterval(-committedToday)
+    }
+
+    /// Drop the hours field below an hour, so a short session reads `44:45` instead of `0:44:45`.
+    ///
+    /// This is the ONLY precision control `Text(timerInterval:)` offers — its full signature is
+    /// `(timerInterval:pauseTime:countsDown:showsHours:)`, with no subsecond option. So the system
+    /// Stopwatch's hundredths (`0:03³²`) are not reachable from a Live Activity: the view is a snapshot
+    /// the system advances, and nothing in a widget extension redraws at 100Hz. Matching the *unit* to
+    /// the magnitude is the part that is achievable, and it's most of what makes the system clock read
+    /// cleanly — no leading `0:` for the common case of a session under an hour.
+    static func showsHours(displayedSeconds: Double) -> Bool {
+        displayedSeconds >= 3600
     }
 }

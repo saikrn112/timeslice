@@ -76,6 +76,17 @@ struct TimerLiveActivity: Widget {
                             .buttonStyle(.bordered)
                             .tint(.secondary)
                         }
+
+                        // THE SWITCHER, in the island. Expanding the island and tapping a task starts
+                        // it without ever opening the app — the friction this app has most of is
+                        // switching, and this is the shortest path to it that iOS allows.
+                        //
+                        // Buttons rather than the flashlight-style control you pointed at: that is a
+                        // system control, and a third-party Live Activity gets intent-backed buttons
+                        // only — no sliders, no drags, no gestures.
+                        if !context.state.recents.isEmpty {
+                            SwitcherRow(recents: context.state.recents)
+                        }
                     }
                     .padding(.horizontal, 4)
                 }
@@ -100,6 +111,47 @@ struct TimerLiveActivity: Widget {
     }
 }
 
+/// A row of one-press task buttons — the switcher, living in the Live Activity.
+///
+/// Each button carries the task's **uid**, not its row id: a widget serialises the intent and its
+/// parameters into the tap, the payload can outlive a sync, and `subject_id = 8` is a different task on
+/// another device. An unrecognised uid resolves to nothing rather than starting the wrong timer.
+///
+/// The label is the task's colour put through `Theme.legibleText`, because most of the palette is
+/// unreadable as text — the island is near-black, and a dark task colour on it disappears. The chip's
+/// fill keeps the true colour, so identity still comes from the colour even though the text is adjusted.
+private struct SwitcherRow: View {
+    let recents: [TimerActivityAttributes.RecentTask]
+    /// The island is always near-black; the Lock Screen card composites over wallpaper and is treated
+    /// the same way, since its own background is a dark tint.
+    var dark: Bool = true
+
+    var body: some View {
+        HStack(spacing: 6) {
+            // Three at most. Beyond that the labels truncate to the point of being unidentifiable,
+            // which is worse than not offering the button.
+            ForEach(recents.prefix(3)) { task in
+                Button(intent: SwitchToTaskIntent(taskUID: task.uid)) {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(Color(hex: task.colorHex))
+                            .frame(width: 7, height: 7)
+                        Text(task.name)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(Theme.legibleText(task.colorHex, dark: dark))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Color(hex: task.colorHex).opacity(0.22)))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
 /// The clock: **today's total for this task**, ticking — matching what the Mac's menu bar and task
 /// list show, which is `committed base + live elapsed` rather than the current session alone.
 ///
@@ -112,8 +164,11 @@ private struct ClockText: View {
 
     var body: some View {
         if state.isRunning {
+            // `showsHours` matched to the magnitude: `44:45` under an hour, `1:04:45` above it, rather
+            // than a permanent `0:` prefix eating the island's scarcest resource. It's the only
+            // precision knob the API has — see `TimerDisplay.showsHours`.
             Text(timerInterval: state.liveOrigin...Date.distantFuture,
-                 pauseTime: nil, countsDown: false)
+                 pauseTime: nil, countsDown: false, showsHours: state.showsHours)
         } else {
             Text(Format.duration(state.committedTodaySeconds))
         }
@@ -161,6 +216,19 @@ private struct LockScreenView: View {
     let state: TimerActivityAttributes.ContentState
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            header
+            // Same switcher as the expanded island. The Lock Screen has the most room of any
+            // presentation, so if it fits anywhere it fits here.
+            if !state.recents.isEmpty {
+                SwitcherRow(recents: state.recents)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+
+    private var header: some View {
         HStack(spacing: 12) {
             RoundedRectangle(cornerRadius: 3)
                 .fill(Color(hex: state.colorHex))
@@ -198,7 +266,5 @@ private struct LockScreenView: View {
             .background(Circle().fill(Color.secondary.opacity(0.25)))
             .clipShape(Circle())
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
     }
 }

@@ -27,6 +27,12 @@ public protocol TimerActions: AnyObject {
     func toggleCurrent()
     /// Switch to the task worked before this one — the alt-tab case.
     func switchToPrevious()
+    /// Start the task with this **uid**.
+    ///
+    /// A uid, never a row id: the island's buttons are built from a payload that can outlive a sync,
+    /// and `subject_id = 8` is a different task on another machine. Resolving here also means an
+    /// unknown uid is a no-op rather than starting the wrong timer.
+    func switchTo(uid: String)
 }
 
 /// Where the app hands its behaviour to the shared intents.
@@ -75,6 +81,38 @@ public struct PreviousTaskIntent: LiveActivityIntent {
     @MainActor
     public func perform() async throws -> some IntentResult {
         TimerActionRegistry.handler?.switchToPrevious()
+        return .result()
+    }
+}
+
+/// Start a specific task from the island's switcher row.
+///
+/// This is the "switcher in the island" case: the expanded Dynamic Island shows the last few tasks as
+/// buttons, so a switch costs one press without ever opening the app. A slider or a drag control — the
+/// flashlight-style interaction — is not available to a third-party Live Activity; intent-backed
+/// buttons are the whole vocabulary, so the switcher is expressed as a row of them.
+///
+/// The uid travels as an `@Parameter` because a `Button(intent:)` in a widget serialises the intent and
+/// its parameters into the tap; nothing of the widget's own memory survives to `perform()`, which runs
+/// in the app.
+public struct SwitchToTaskIntent: LiveActivityIntent {
+    public static var title: LocalizedStringResource = "Switch Timeslice Task"
+    public static var description = IntentDescription("Start tracking a specific task.")
+    public static var openAppWhenRun: Bool { false }
+
+    /// The task's uid. A string, so it stays valid across devices and across a re-sync.
+    @Parameter(title: "Task")
+    public var taskUID: String
+
+    public init() {}
+
+    public init(taskUID: String) {
+        self.taskUID = taskUID
+    }
+
+    @MainActor
+    public func perform() async throws -> some IntentResult {
+        TimerActionRegistry.handler?.switchTo(uid: taskUID)
         return .result()
     }
 }

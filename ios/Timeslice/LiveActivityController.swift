@@ -19,6 +19,7 @@ enum LiveActivityController {
     /// the *static* attributes, which ActivityKit will not let us mutate.
     static func sync(taskID: Int64, state: TimerActivityAttributes.ContentState) {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+        scheduleHourBoundaryRefresh(for: state)
 
         if let existing = current {
             if existing.attributes.taskID == taskID {
@@ -50,7 +51,43 @@ enum LiveActivityController {
     }
 
     static func end() {
+        boundaryTask?.cancel()
+        boundaryTask = nil
         guard let existing = current else { return }
         Task { await existing.end(nil, dismissalPolicy: .immediate) }
+    }
+
+    // MARK: - Crossing the hour
+
+    private static var boundaryTask: Task<Void, Never>?
+
+    /// Re-push the state exactly when the clock crosses one hour.
+    ///
+    /// The island's clock drops its hours field below an hour (`44:45` rather than `0:44:45`), but
+    /// `showsHours` is baked into the snapshot at render time — the system ticks the digits, not the
+    /// format. Without this, a session that starts at 50 minutes and runs on keeps a minutes-only label
+    /// with no field to carry the overflow.
+    ///
+    /// One update per hour per session, which is negligible against the activity update budget. Only
+    /// ever *arms* while the clock is below an hour: `hourBoundary` returns nil once hours are showing,
+    /// so this cannot become a repeating timer.
+    ///
+    /// This is a foreground convenience, not a guarantee — a suspended app doesn't get to run, and if
+    /// the update is missed the label is briefly ugly rather than wrong-by-arithmetic. The elapsed value
+    /// itself is always derived from `startedAt` by the system.
+    private static func scheduleHourBoundaryRefresh(for state: TimerActivityAttributes.ContentState) {
+        boundaryTask?.cancel()
+        boundaryTask = nil
+        guard let boundary = state.hourBoundary() else { return }
+        let delay = boundary.timeIntervalSinceNow
+        guard delay > 0 else { return }
+
+        boundaryTask = Task {
+            try? await Task.sleep(for: .seconds(delay + 1))
+            guard !Task.isCancelled, let existing = current else { return }
+            // Re-send the SAME state. `showsHours` is computed from it at render time, so an unchanged
+            // payload now renders with the hours field.
+            await existing.update(ActivityContent(state: state, staleDate: nil))
+        }
     }
 }

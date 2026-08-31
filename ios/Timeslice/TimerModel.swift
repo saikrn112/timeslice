@@ -413,7 +413,27 @@ final class TimerModel: ObservableObject {
                          colorHex: colorHex(for: task),
                          startedAt: startedAt,
                          committedTodaySeconds: committedTodaySeconds[id] ?? 0,
-                         isRunning: isRunning))
+                         isRunning: isRunning,
+                         recents: switcherRecents(excluding: id)))
+    }
+
+    /// The tasks offered as one-press buttons in the island's switcher.
+    ///
+    /// Same `TaskOrdering.recencyOrdered` the app's own switcher and the Mac's `\` key use, so the
+    /// island offers the same candidates in the same order rather than a second notion of "recent".
+    /// The current task is dropped — it's already the subject of the activity.
+    ///
+    /// Resolved to **uids** here, in the app, because the widget cannot open the database to do it and
+    /// a row id would mean a different task on another device.
+    private func switcherRecents(excluding current: Int64) -> [TimerActivityAttributes.RecentTask] {
+        guard let store else { return [] }
+        return recencyOrdered
+            .filter { $0.id != current && !$0.finished }
+            .prefix(3)
+            .compactMap { task in
+                guard let uid = try? store.uid(table: "projects", id: task.id) else { return nil }
+                return .init(uid: uid, name: task.name, colorHex: colorHex(for: task))
+            }
     }
 }
 
@@ -422,4 +442,21 @@ final class TimerModel: ObservableObject {
 /// The intents live in `TimesliceIntents`, which cannot reach this class — the app owns the store, and
 /// pulling it into an extension process is what `0xdead10cc` punishes. So the app registers itself at
 /// launch and the intents call through.
-extension TimerModel: TimerActions {}
+extension TimerModel: TimerActions {
+
+    /// Start the task with this uid, from a Live Activity button.
+    ///
+    /// Resolves uid → row id, never the other way round: the island's payload can outlive a sync, and
+    /// an id that arrived from another device points at a different task here. An unknown uid is a
+    /// deliberate no-op — starting *some* timer would be worse than starting none.
+    ///
+    /// `load()` first because the intent can run in a freshly-launched process where nothing is open yet.
+    func switchTo(uid: String) {
+        load()
+        // `localID` is the same resolver `SyncEngine` uses for every incoming fact, so the island and
+        // the merge path agree on what a uid means.
+        // `try?` on a throwing `Int64?` flattens to one optional, so this is a single binding.
+        guard let store, let id = try? store.localID(table: "projects", uid: uid) else { return }
+        toggle(taskID: id)
+    }
+}
