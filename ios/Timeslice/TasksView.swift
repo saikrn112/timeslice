@@ -32,7 +32,11 @@ struct TasksView: View {
                             .font(Theme.caption).foregroundStyle(.red).padding(.bottom, 6)
                     }
                     // First thing on screen, above the list: start/stop without hunting for a row.
-                    if !(model.tasks.isEmpty && model.archivedTasks.isEmpty) { NowCard() }
+                    if !(model.tasks.isEmpty && model.archivedTasks.isEmpty) {
+                        NowCard()
+                        RecentsStrip()
+                            .padding(.bottom, 12)
+                    }
                     controlRow
                     if model.tasks.isEmpty && model.archivedTasks.isEmpty {
                         empty
@@ -348,6 +352,58 @@ struct NowCard: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 16).fill(Theme.card))
-        .padding(.bottom, 12)
+    }
+}
+
+/// The tasks you actually bounce between, as one-tap targets.
+///
+/// This is the answer to "switching has friction". Every previous route made you HUNT: the list meant
+/// scrolling past project sections you don't care about, and the Action Button's wheel meant a scroll
+/// plus a precise commit tap. In practice a day involves alternating between a handful of tasks, so
+/// those few belong on screen permanently, one tap from running.
+///
+/// Fed by `TaskOrdering.recencyOrdered` — the same order the Mac's switcher uses — with the current
+/// task dropped, since a chip for what's already running would do nothing. Frozen per appearance is
+/// deliberately NOT done here: unlike the wheel, nothing is under your thumb mid-scroll, and having
+/// the chip you just used move to the front is what keeps alternation to one tap.
+struct RecentsStrip: View {
+    @ObservedObject private var model = TimerModel.shared
+
+    private var picks: [Project] {
+        model.recencyOrdered.filter { $0.id != model.currentTaskID }.prefix(4).map { $0 }
+    }
+
+    var body: some View {
+        if !picks.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(picks, id: \.id) { task in
+                        Button {
+                            model.toggle(taskID: task.id)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Circle().fill(Color(hex: model.colorHex(for: task)))
+                                    .frame(width: 9, height: 9)
+                                Text(task.name)
+                                    .font(.system(size: 15, weight: .medium))
+                                    .lineLimit(1)
+                                let secs = model.committedTodaySeconds[task.id] ?? 0
+                                if secs > 0 {
+                                    Text(Format.compact(secs))
+                                        .font(.system(size: 13, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            // Tall enough to hit without aiming.
+                            .padding(.horizontal, 13).padding(.vertical, 11)
+                            .background(Capsule().fill(Theme.card))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 1)
+            }
+            .padding(.top, 8)
+        }
     }
 }

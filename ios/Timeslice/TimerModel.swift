@@ -215,6 +215,7 @@ final class TimerModel: ObservableObject {
     /// binds to space, and what the Action Button triggers.
     func toggle(taskID: Int64) {
         guard let store else { return }
+        let wasRunning = running != nil
         do {
             if running?.projectID == taskID {
                 try store.stopOpenInterval()
@@ -224,6 +225,7 @@ final class TimerModel: ObservableObject {
                 if let task = task(id: taskID) {
                     syncActivity(startedAt: Date(), isRunning: false, task: task)
                 }
+                Haptics.paused()
                 rearmNudges()
                 SyncController.shared.publishSoon()
             } else {
@@ -234,6 +236,8 @@ final class TimerModel: ObservableObject {
                 if let running {
                     syncActivity(startedAt: running.start, isRunning: true)
                 }
+                // Switching between tasks feels different from starting from idle.
+                if wasRunning { Haptics.switched() } else { Haptics.started() }
                 rearmNudges()
                 SyncController.shared.publishSoon()
             }

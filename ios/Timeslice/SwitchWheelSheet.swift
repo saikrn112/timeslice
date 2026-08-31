@@ -26,52 +26,56 @@ struct SwitchWheelSheet: View {
     @ObservedObject private var model = TimerModel.shared
     @Environment(\.dismiss) private var dismiss
 
-    /// Captured once, in `init` — see point 1 above. Recomputing this as a derived property is the
-    /// bug it exists to prevent.
+    /// Captured once, so the row under your thumb cannot move as recency re-ranks. Same reasoning as
+    /// the Mac's frozen `switcherOrder`.
     private let frozen: [Project]
-    @State private var selection: Int64?
 
     init() {
-        let ordered = TimerModel.shared.recencyOrdered
-        frozen = ordered
-        // Preselect index 1 — the task you came from. Landing on index 0 would mean the default
-        // action is "switch to what you're already on", i.e. nothing.
-        _selection = State(initialValue: (ordered.dropFirst().first ?? ordered.first)?.id)
+        frozen = TimerModel.shared.recencyOrdered
     }
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                if frozen.isEmpty {
-                    ContentUnavailableView("No tasks", systemImage: "timer")
-                } else {
-                    Picker("Task", selection: $selection) {
-                        ForEach(frozen, id: \.id) { task in
-                            HStack(spacing: 8) {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(frozen.enumerated()), id: \.element.id) { index, task in
+                        Button {
+                            // ONE tap, committed immediately. The wheel needed a scroll plus a precise
+                            // commit tap — two deliberate acts for the app's most repeated action, and
+                            // the thing that made switching feel like work.
+                            model.toggle(taskID: task.id)
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 12) {
                                 Circle().fill(Color(hex: model.colorHex(for: task)))
-                                    .frame(width: 10, height: 10)
-                                Text(task.name)
-                                if model.currentTaskID == task.id {
-                                    Text("current").font(.caption2).foregroundStyle(.secondary)
+                                    .frame(width: 12, height: 12)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(task.name)
+                                        .font(.system(size: 17))
+                                        .lineLimit(1)
+                                    if model.currentTaskID == task.id {
+                                        Text(model.isRunning ? "running — tap to pause" : "current — tap to resume")
+                                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                                    }
                                 }
+                                Spacer()
+                                Text(Format.compact(model.committedTodaySeconds[task.id] ?? 0))
+                                    .font(.system(size: 15, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                Image(systemName: model.running?.projectID == task.id
+                                      ? "pause.circle.fill" : "play.circle.fill")
+                                    .font(.system(size: 24))
+                                    .foregroundStyle(model.running?.projectID == task.id ? .orange : .green)
                             }
-                            .tag(Int64?.some(task.id))
+                            // 56pt rows: comfortably past the 44pt minimum, hittable without aiming.
+                            .padding(.horizontal, 16).padding(.vertical, 13)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        if index < frozen.count - 1 {
+                            Divider().padding(.leading, 40)
                         }
                     }
-                    .pickerStyle(.wheel)
-
-                    Button {
-                        if let selection { model.toggle(taskID: selection) }
-                        dismiss()
-                    } label: {
-                        Text(commitLabel)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 4)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .padding(.horizontal)
-                    .padding(.bottom, 8)
-                    .disabled(selection == nil)
                 }
             }
             .navigationTitle("Switch task")
@@ -80,17 +84,8 @@ struct SwitchWheelSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             }
         }
-        .presentationDetents([.height(320)])
-    }
-
-    /// Says what the button will actually do, because for the current task it pauses rather than
-    /// switches — the same dual meaning `toggle` has everywhere else.
-    private var commitLabel: String {
-        guard let selection, let task = frozen.first(where: { $0.id == selection }) else {
-            return "Switch"
-        }
-        if model.running?.projectID == selection { return "Pause \(task.name)" }
-        return "Start \(task.name)"
+        // Tall enough to show several without scrolling, short enough to stay a sheet.
+        .presentationDetents([.medium, .large])
     }
 }
 

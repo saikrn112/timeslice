@@ -49,12 +49,13 @@ public enum Theme {
     // pointer, a phone is read one-handed at a glance, and 14pt rows with 10pt captions are genuinely
     // hard to read. iOS `.body` is 17pt for a reason.
     //
-    // Deliberately still tighter than stock iOS — a tracker's list is scanned, not read — but never
-    // below 12pt, and primary text sits at 16pt.
+    // Primary text is 17pt — the same as iOS `.body`. It was 14 (the Mac's size), then 16, and was
+    // still reported as too small on a real phone. Stop shaving it: a row you tap to start a timer
+    // has to be readable at a glance, and vertical space is cheaper than a mis-tap.
 
     /// Row title.
-    public static let rowTitle = Font.system(size: 16)
-    public static let rowTitleStrong = Font.system(size: 16, weight: .semibold)
+    public static let rowTitle = Font.system(size: 17)
+    public static let rowTitleStrong = Font.system(size: 17, weight: .semibold)
     /// Monospaced digits for any duration, so columns line up and a ticking clock doesn't reflow.
     public static let rowTime = Font.system(size: 16, design: .monospaced)
     public static let sectionHeader = Font.system(size: 14, weight: .semibold)
