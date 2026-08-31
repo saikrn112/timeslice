@@ -368,22 +368,78 @@ struct MetricsScreen: View {
             }
             Spacer(minLength: 8)
 
-            // The trend, filling what was dead space on the right of a full-width card.
+            // WHAT TO DO, instead of a chart.
             //
-            // I removed this from the old two-bar row because at 32pt it was a few pixels of line that
-            // said nothing. At ~96pt it's legible, and it answers the one question the rings can't:
-            // whether this budget is heading the right way or just happens to sit where it does today.
-            // `row.sparkline` is already computed by `BudgetRows`, so this costs nothing new.
-            // At least two buckets: a Day range has exactly one, and a one-bar "trend" is a stray
-            // vertical line that reads as a rendering glitch rather than as information.
-            if row.sparkline.count > 1, row.sparkline.contains(where: { $0 > 0 }) {
-                Sparkline(values: row.sparkline, tint: Color(hex: row.colorHex))
-                    .frame(width: 96, height: 34)
-            }
+            // This was a sparkline and it never earned the space: over a real range most buckets are
+            // empty, so the bars clumped against one edge of a wide dotted baseline and the shape said
+            // nothing. A trend is also the wrong question for a budget — it's scoped to a period that
+            // ENDS, so what matters is the distance to the line and the pace that closes it, not the
+            // history of how you arrived.
+            //
+            // Every figure comes from `TargetProgress`; there is no arithmetic here.
+            standing(row)
         }
         .padding(Theme.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: Theme.cardRadius).fill(Theme.card))
+    }
+
+    /// Where this budget stands, right-aligned: the gap on top, the pace that closes it underneath.
+    ///
+    /// A floor and a ceiling read oppositely from the same two numbers, so the direction decides the
+    /// wording rather than the caller having to interpret a signed delta:
+    ///
+    /// - floor, short   → "5h 39m left" + "1h 53m/day" (the pace that still lands it)
+    /// - floor, reached → "met" + "+2h 3m" (the surplus, which is good news)
+    /// - ceiling, under → "24m left" (headroom before the limit bites)
+    /// - ceiling, over  → "24m over" (the breach, in red)
+    private func standing(_ row: BudgetRows.Row) -> some View {
+        let p = row.progress
+        let isFloor = p.target.direction == .atLeast
+        let tint = Theme.verdict(kind(p.verdict))
+
+        return VStack(alignment: .trailing, spacing: 1) {
+            if isFloor {
+                if p.remainingSeconds > 0 {
+                    Text("\(BudgetRows.duration(p.remainingSeconds)) left")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(tint)
+                    // Only while the period still has days in it — `requiredPerDaySeconds` returns nil
+                    // once it doesn't, and "0m/day to catch up" would be a lie about a lost period.
+                    if let need = p.requiredPerDaySeconds {
+                        Text("\(BudgetRows.duration(need))/day")
+                            .font(.system(size: 11, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("period over").font(.system(size: 11)).foregroundStyle(.tertiary)
+                    }
+                } else {
+                    Text("met")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.green)
+                    Text("+\(BudgetRows.duration(p.overSeconds))")
+                        .font(.system(size: 11, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                if p.overSeconds > 0 {
+                    Text("\(BudgetRows.duration(p.overSeconds)) over")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.red)
+                    Text("limit \(BudgetRows.duration(p.target.seconds))")
+                        .font(.system(size: 11, design: .rounded))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("\(BudgetRows.duration(p.remainingSeconds)) left")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(tint)
+                    Text("under limit").font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     /// `1h 4m / ≥2h` plus what the pair is measured over — one ring's whole story on one line.
@@ -439,6 +495,18 @@ struct MetricsScreen: View {
                 // A lane now exists only where blocks genuinely overlap, so there is no device
                 // column to label; the strip takes the full width.
                 timelineStrip(lanes: max(1, Aggregations.laneCount(data.segments)))
+                // WHICH DEVICE, as its own thin band on the same axis.
+                //
+                // Device attribution was invisible: lanes only appear where blocks genuinely overlap, so
+                // with sequential work every device shared one row and the strip couldn't say where any
+                // block happened. The footer named the devices and their totals, but nothing tied a name
+                // to a position in the day.
+                //
+                // A band rather than colouring the blocks themselves, because attribution is a second
+                // dimension of the same timeline: the strip stays "what I did", this row is "where", and
+                // a shared x-axis lets you read one against the other. Not a pie or a ring — those throw
+                // away the time axis, which is the only thing that makes this legible.
+                deviceBand(Aggregations.orderedDevices(data.segments))
                 hourAxis
                 timelineFooter(Aggregations.orderedDevices(data.segments))
                 if let seg = inspected { inspector(seg) } else {
@@ -496,6 +564,35 @@ struct MetricsScreen: View {
         .frame(height: CGFloat(lanes) * (laneHeight(lanes) + 2))
     }
 
+    /// The device track: one 6pt bar per block, coloured by which device recorded it.
+    ///
+    /// Same width mapping as `timelineStrip`, so a segment sits directly under the block it belongs to.
+    /// Drawn only with more than one device — a single-device band is a solid bar that says nothing and
+    /// costs a row.
+    @ViewBuilder
+    private func deviceBand(_ devices: [String?]) -> some View {
+        if devices.count > 1 {
+            // Index by the SAME order the footer uses, so a swatch there means this colour here.
+            let colorIndex = Dictionary(uniqueKeysWithValues:
+                devices.enumerated().map { ($1 ?? "", $0) })
+            GeometryReader { geo in
+                let w = geo.size.width
+                ZStack(alignment: .topLeading) {
+                    Capsule().fill(Theme.track).frame(height: 6)
+                    ForEach(data.segments) { seg in
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(Theme.deviceColor(colorIndex[seg.deviceID ?? ""] ?? 0))
+                            .frame(width: max(1.5, w * CGFloat((seg.endHour - seg.startHour) / 24)),
+                                   height: 6)
+                            .offset(x: w * CGFloat(seg.startHour / 24))
+                    }
+                }
+            }
+            .frame(height: 6)
+            .padding(.top, 3)
+        }
+    }
+
     /// `12a 3a 6a 9a 12p 3p 6p 9p` — the Mac's labels. Bare 0/6/12/18/24 read as an index rather
     /// than a time of day.
     private var hourAxis: some View {
@@ -524,12 +621,17 @@ struct MetricsScreen: View {
         let byDevice = Dictionary(grouping: data.segments, by: { $0.deviceID })
         if devices.count > 1 {
             HStack(spacing: 10) {
-                ForEach(devices.compactMap { $0 }, id: \.self) { id in
-                    let secs = (byDevice[id] ?? []).reduce(0.0) {
+                ForEach(Array(devices.enumerated()), id: \.offset) { index, device in
+                    let secs = (byDevice[device] ?? []).reduce(0.0) {
                         $0 + ($1.endHour - $1.startHour) * 3600
                     }
                     HStack(spacing: 3) {
-                        Text(model.deviceLabels[id] ?? id)
+                        // The swatch is what makes the band above readable — without it the colours are
+                        // decoration. Indexed off the same `orderedDevices` array the band uses.
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(Theme.deviceColor(index))
+                            .frame(width: 8, height: 6)
+                        Text(device.flatMap { model.deviceLabels[$0] } ?? device ?? "unattributed")
                             .font(.system(size: 9)).foregroundStyle(.secondary)
                         Text(Format.compact(secs))
                             .font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)

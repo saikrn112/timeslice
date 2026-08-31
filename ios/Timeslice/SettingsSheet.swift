@@ -18,6 +18,12 @@ struct SettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var editingBudgets = false
     @State private var editingTags = false
+    @State private var showingNotes = false
+
+    /// Open notes only, so the badge counts what still needs doing rather than everything ever written.
+    private var openNoteCount: Int {
+        ((try? model.storeIfLoaded?.listFeedback(includeResolved: false)) ?? []).count
+    }
 
     var body: some View {
         NavigationStack {
@@ -73,6 +79,16 @@ struct SettingsSheet: View {
                         .font(Theme.captionSmall)
                 }
 
+                Section {
+                    Button { showingNotes = true } label: {
+                        Label(openNoteCount > 0 ? "Notes (\(openNoteCount) open)" : "Notes",
+                              systemImage: "note.text")
+                    }
+                } header: { header("Notes") } footer: {
+                    Text("Jotted on any device, synced everywhere.")
+                        .font(Theme.captionSmall)
+                }
+
                 syncSection
                 actionButtonSection
             }
@@ -85,6 +101,7 @@ struct SettingsSheet: View {
             }
             .sheet(isPresented: $editingBudgets) { BudgetEditorSheet() }
             .sheet(isPresented: $editingTags) { TagEditorSheet() }
+            .sheet(isPresented: $showingNotes) { NotesSheet() }
             .onDisappear {
                 // Thresholds changed, so anything armed against the old ones is wrong.
                 model.rearmNudges()

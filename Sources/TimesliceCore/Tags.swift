@@ -223,6 +223,20 @@ public struct TargetProgress: Identifiable, Sendable {
         return shortfall / remainingDays
     }
 
+    /// Distance to the budget's OWN number, as opposed to the pro-rated expectation.
+    ///
+    /// The pair is deliberately direction-agnostic — both are the same subtraction, and which one reads
+    /// as good depends on whether the budget is a floor or a ceiling, which is the caller's business.
+    /// For a floor, `remainingSeconds` is what's left to earn and `overSeconds` the surplus; for a
+    /// ceiling the roles swap, into headroom and breach.
+    ///
+    /// Measured against `target.seconds`, not `expectedSeconds`, because this answers "how much more
+    /// before I'm done, or over" — and a partly elapsed period's expectation is not the finish line.
+    public var remainingSeconds: TimeInterval { max(0, target.seconds - actualSeconds) }
+
+    /// How far past the budget's number the actual time has gone. Zero until it's exceeded.
+    public var overSeconds: TimeInterval { max(0, actualSeconds - target.seconds) }
+
     public var id: Int64 { target.id }
 
     /// Progress against the expectation, as a percentage. Can exceed 100 — for a ceiling that's

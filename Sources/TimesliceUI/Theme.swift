@@ -108,6 +108,22 @@ public enum Theme {
                                       minRatio: 3.0))
     }
 
+    // MARK: - Devices
+
+    /// Colour for the Nth device on a timeline.
+    ///
+    /// A separate, small, fixed set rather than `Palette` — device identity and task identity are
+    /// different axes, and drawing a device in a task's colour invites reading one as the other. Kept
+    /// deliberately short: only one timer runs at a time across devices, so in practice this is two or
+    /// three entries, and cycling is preferable to generating hues that drift toward the task palette.
+    ///
+    /// Chosen to hold up on both appearances and to stay distinguishable from each other at the few
+    /// points of height a band gets.
+    public static func deviceColor(_ index: Int) -> Color {
+        let hexes = ["#5E9CFF", "#C58AF9", "#4DD6A8", "#F2A65A", "#9AA5B1"]
+        return Color(hex: hexes[abs(index) % hexes.count])
+    }
+
     // MARK: - Verdicts
 
     /// Budget verdict colours, matching the Mac: trouble red, behind orange, on-pace/met green.
