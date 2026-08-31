@@ -1501,6 +1501,18 @@ func testDeviceLanes() {
               "a device's overlapping blocks count once, not twice")
     }
 
+    do { // a raw device id reads as its model in a narrow lane label
+        check(TimeslicePaths.shortDeviceName("iphone-b653") == "iphone",
+              "the 4-hex disambiguator is dropped for display")
+        check(TimeslicePaths.shortDeviceName("macbook-air-1e01") == "macbook-air",
+              "a model slug containing a dash survives")
+        check(TimeslicePaths.shortDeviceName("work") == "work", "a plain name is untouched")
+        check(TimeslicePaths.shortDeviceName("my-desk-mac") == "my-desk-mac",
+              "a user-chosen name whose last part isn't 4 hex chars is left alone")
+        check(TimeslicePaths.shortDeviceName("80a9970a4461-57ec") == "80a9970a4461",
+              "and a MAC-address-shaped id still loses only its suffix")
+    }
+
     do { // ordering is stable and named devices come before unattributed rows
         let segs = Aggregations.daySegments(
             intervals: [iv(1, 9, 10, nil), iv(2, 11, 12, "b")], day: day, calendar: cal)

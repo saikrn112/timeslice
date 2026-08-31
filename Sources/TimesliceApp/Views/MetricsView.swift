@@ -283,7 +283,7 @@ struct MetricsView: View {
                         xStart: .value("From", seg.startHour),
                         xEnd: .value("To", seg.endHour),
                         y: .value("Lane", lanes > 1 ? "\(seg.lane)" : ""),
-                        height: .fixed(lanes > 1 ? max(24, 110 / Double(lanes)) : 110)
+                        height: .fixed(laneHeight(lanes: lanes))
                     )
                     .foregroundStyle(colorForProject(seg.projectID))
                     .opacity(segmentOpacity(seg))
@@ -400,7 +400,7 @@ struct MetricsView: View {
                         }
                     }
                 }
-                .frame(height: 150)
+                .frame(height: plotHeight(lanes: lanes) + 40)
                 }
                 deviceTotals
                 if let summary = windowSummary { selectionReadout(summary) }
@@ -467,6 +467,16 @@ struct MetricsView: View {
         }
     }
 
+    /// Height of the plot area, and of one lane within it.
+    ///
+    /// Grows with the number of lanes instead of dividing a fixed 110pt: with three devices each lane
+    /// was 36pt, which is too short for a rotated name to fit beside it. A floor of 110 keeps the
+    /// single-device case looking as it did.
+    private func plotHeight(lanes: Int) -> CGFloat { max(110, CGFloat(lanes) * 46) }
+    private func laneHeight(lanes: Int) -> CGFloat {
+        lanes > 1 ? plotHeight(lanes: lanes) / CGFloat(lanes) : 110
+    }
+
     /// Devices contributing to this day, in the same first-appearance order the lanes use.
     private var timelineDevices: [String?] { Aggregations.orderedDevices(daySegments) }
 
@@ -474,7 +484,8 @@ struct MetricsView: View {
     /// rows recorded before device attribution existed.
     private func deviceName(_ id: String?) -> String {
         guard let id else { return "unknown" }
-        return deviceLabels[id] ?? id
+        // A device that hasn't been named yet shows its model rather than its raw id.
+        return deviceLabels[id] ?? TimeslicePaths.shortDeviceName(id)
     }
 
     /// Rotated device names down the left edge, aligned to their lanes.
@@ -493,13 +504,18 @@ struct MetricsView: View {
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .fixedSize()
+                    .truncationMode(.tail)
+                    // A width here, NOT `.fixedSize()`: rotation is a render transform, so this
+                    // width becomes the label's visible height. `.fixedSize()` let the text grow to
+                    // whatever the name needed and run straight over the lane above and below — with
+                    // three devices the three names overlapped into an unreadable stack.
+                    .frame(width: laneHeight(lanes: lanes) - 6)
                     .rotationEffect(.degrees(-90))
                     .frame(maxHeight: .infinity)
-                    .help("\(deviceName(device)) — \(compactDuration(deviceSeconds(device)))")
+                    .help("\(device ?? "unattributed") — \(compactDuration(deviceSeconds(device)))")
             }
         }
-        .frame(width: 14, height: 110)
+        .frame(width: 14, height: plotHeight(lanes: lanes))
         // Nudge down so the labels line up with the plot area, not the axis strip.
         .padding(.bottom, 22)
     }
