@@ -1,4 +1,5 @@
 import SwiftUI
+import TimesliceCore
 
 /// The colours and metrics both front-ends draw with.
 ///
@@ -77,6 +78,35 @@ public enum Theme {
     /// and Apple's guidance is a 44pt minimum. A 16pt label plus 10pt either side lands close to that;
     /// at 5pt the rows were both hard to read and easy to mis-tap.
     public static let rowVPadding: CGFloat = 10
+
+    // MARK: - A task's colour, used as text
+
+    /// The surfaces `legibleText` measures against.
+    ///
+    /// Deliberately the *hardest* case in each appearance rather than the average one: pure white is
+    /// the lightest surface either app puts text on, and `#2E2E2E` is the LIGHTEST dark surface (a
+    /// card, not the window behind it). Measuring against the easier surface would pass colours that
+    /// then fail on the harder one.
+    private static let lightSurface = "#FFFFFF"
+    private static let darkSurface = "#2E2E2E"
+
+    /// A task or tag's colour, safe to use as TEXT in the current appearance.
+    ///
+    /// Use this anywhere a *label* is painted in a subject's own colour. Do NOT use it for fills —
+    /// swatches, bars, timeline blocks and the island keyline want the true colour, and routing those
+    /// through here would change every existing Mac screenshot for no gain.
+    public static func legibleText(_ hex: String, dark: Bool) -> Color {
+        Color(hex: Palette.legibleHex(hex, onBackground: dark ? darkSurface : lightSurface))
+    }
+
+    /// Same, for text that is genuinely large or bold — WCAG allows 3:1 there.
+    ///
+    /// Separate so a 9pt tag chip can't accidentally borrow the looser threshold: small text is
+    /// exactly where the palette's failures are most visible.
+    public static func legibleTextLarge(_ hex: String, dark: Bool) -> Color {
+        Color(hex: Palette.legibleHex(hex, onBackground: dark ? darkSurface : lightSurface,
+                                      minRatio: 3.0))
+    }
 
     // MARK: - Verdicts
 

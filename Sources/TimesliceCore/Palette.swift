@@ -90,6 +90,72 @@ public enum Palette {
         return (h, maxV > 0 ? delta / maxV : 0, maxV)
     }
 
+    // MARK: - Legibility as text
+
+    /// WCAG relative luminance (0…1) of `#RRGGBB`, or nil when the string isn't a hex colour.
+    ///
+    /// Distinct from `InlineBar.perceptualLuminance`, which is a cheap 0.299/0.587/0.114 average used
+    /// to pick black-or-white text on a **known fill**. That's adequate for a binary choice on a bar,
+    /// but it can't answer "is this colour readable *against the page*" — it isn't gamma-correct and
+    /// yields no ratio. Both exist deliberately; this is the one with a threshold you can defend.
+    public static func relativeLuminance(ofHex hex: String) -> Double? {
+        let cleaned = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        guard cleaned.count == 6, let value = Int(cleaned, radix: 16) else { return nil }
+        func channel(_ raw: Int) -> Double {
+            let c = Double(raw) / 255
+            // sRGB gamma. Skipping it is what makes naive checks pass colours that are unreadable.
+            return c <= 0.03928 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * channel((value >> 16) & 0xFF)
+            + 0.7152 * channel((value >> 8) & 0xFF)
+            + 0.0722 * channel(value & 0xFF)
+    }
+
+    /// WCAG contrast ratio between two hex colours, 1…21. Order-independent.
+    public static func contrastRatio(_ a: String, _ b: String) -> Double? {
+        guard let la = relativeLuminance(ofHex: a), let lb = relativeLuminance(ofHex: b) else {
+            return nil
+        }
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+    }
+
+    /// `hex` adjusted until it is READABLE AS TEXT on `bgHex`, keeping its hue.
+    ///
+    /// A task colour is picked to be distinguishable *as a fill* — a swatch, a bar, a timeline block —
+    /// which is a different requirement from being readable as text. Measured across this palette plus
+    /// its `shade` variants, **47 of 60 task colours fail 4.5:1 on a light window**, worst at 1.20:1
+    /// (`#B2F7F2`, effectively invisible); 17 fail on dark. So there is no fixed rendering of a task
+    /// colour as text that works, and any UI painting a label in a task's own colour is illegible for
+    /// most tasks unless it comes through here.
+    ///
+    /// Hue is held and only brightness moves, so identity survives as far as it can — not entirely:
+    /// forcing yellow to 4.5:1 on white necessarily makes it olive. That's the same trade the Dynamic
+    /// Island already makes, and it's the right one: identity is carried by the swatch and the keyline,
+    /// where legibility doesn't depend on it, which frees text to be readable.
+    ///
+    /// Terminates regardless of input: brightness walks to a bound, and both bounds (near-black on
+    /// light, near-white on dark) clear the threshold.
+    public static func legibleHex(_ hex: String, onBackground bgHex: String,
+                                  minRatio: Double = 4.5) -> String {
+        guard let bgLuminance = relativeLuminance(ofHex: bgHex),
+              var components = hsv(fromHex: hex) else { return hex }
+        if let ratio = contrastRatio(hex, bgHex), ratio >= minRatio { return hex }
+
+        // Move AWAY from the background: darker on a light page, lighter on a dark one.
+        let darken = bgLuminance > 0.18
+        var candidate = hex
+        for _ in 0..<40 {
+            components.v = darken ? max(0, components.v - 0.025) : min(1, components.v + 0.025)
+            // Saturation climbs slightly while darkening, so a dimmed colour still reads as its hue
+            // rather than as mud, and eases while lightening so pastels on dark don't glare.
+            components.s = darken ? min(0.95, components.s + 0.01) : max(0.20, components.s - 0.01)
+            candidate = hexString(fromHue: components.h, saturation: components.s,
+                                  brightness: components.v)
+            if let ratio = contrastRatio(candidate, bgHex), ratio >= minRatio { return candidate }
+        }
+        return candidate
+    }
+
     private static func hexString(fromHue h: Double, saturation s: Double, brightness v: Double) -> String {
         let i = Int(h * 6)
         let f = h * 6 - Double(i)

@@ -257,10 +257,15 @@ struct TaskRow: View {
             if let liveOrigin {
                 // TODAY'S TOTAL, ticking — committed base plus the live run, as the Mac shows.
                 // Counting from the run's own start would collapse to zero on every switch.
+                // GREEN while running, not the task's colour — the same rule as the Dynamic Island
+                // and the same thing the Mac's list already did (`isRunning ? .green : .primary`).
+                // Painting a ticking clock in the task's own hex is what made it a barely-visible pale
+                // blue: most of the palette fails text contrast, and this is the one number in the row
+                // you actually watch.
                 Text(timerInterval: liveOrigin...Date.distantFuture,
                      pauseTime: nil, countsDown: false)
                     .font(Theme.rowTime)
-                    .foregroundStyle(Color(hex: colorHex))
+                    .foregroundStyle(.green)
             } else {
                 Text(Format.compact(seconds))
                     .font(Theme.rowTime)

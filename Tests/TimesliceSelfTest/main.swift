@@ -2478,6 +2478,62 @@ func testPalette() {
         check(Palette.displayColorHex(for: t(3), groups: [], allTasks: all) == "#000000",
               "missing group falls back to the task's colour")
     }
+
+    // MARK: colour used as TEXT
+    //
+    // The palette is chosen for FILLS. Used as text it is mostly unreadable: 47 of these 60 colours
+    // fail 4.5:1 on a white window, worst at 1.20:1. These checks pin the repair, because an invisible
+    // label is exactly the kind of bug that ships — nothing crashes and no compiler complains.
+    do {
+        // Known anchors, so a broken luminance implementation can't pass the sweep by accident.
+        check(Palette.relativeLuminance(ofHex: "#FFFFFF").map { abs($0 - 1) < 0.001 } == true,
+              "white has luminance 1")
+        check(Palette.relativeLuminance(ofHex: "#000000").map { $0 < 0.001 } == true,
+              "black has luminance 0")
+        check(Palette.contrastRatio("#FFFFFF", "#000000").map { abs($0 - 21) < 0.01 } == true,
+              "black on white is 21:1")
+        check(Palette.relativeLuminance(ofHex: "#fff") == nil, "3-digit hex is rejected")
+        check(Palette.legibleHex("nonsense", onBackground: "#FFFFFF") == "nonsense",
+              "bad hex passes through untouched")
+
+        // The sweep: every base colour AND every shade a project's tasks can take, on both
+        // appearances. `shade` reaches brightness 0.97, which is where the invisible cases come from,
+        // so testing only `Palette.colors` would miss the worst of them.
+        let surfaces = [("light", "#FFFFFF"), ("dark", "#2E2E2E")]
+        var subjects: [String] = []
+        for base in Palette.colors {
+            for i in 0..<6 { subjects.append(Palette.shade(ofHex: base, index: i)) }
+        }
+        for (name, bg) in surfaces {
+            let repaired = subjects.map { Palette.legibleHex($0, onBackground: bg) }
+            let worst = repaired.compactMap { Palette.contrastRatio($0, bg) }.min() ?? 0
+            check(worst >= 4.5, "every task colour clears 4.5:1 as text on \(name) (worst \(worst))")
+
+            // Hue is preserved, so a repaired colour still reads as "the blue one". Greys are exempt:
+            // their hue is meaningless and HSV reports it as 0 regardless.
+            let hueDrift = zip(subjects, repaired).compactMap { original, fixed -> Double? in
+                guard let a = Palette.hsv(fromHex: original), let b = Palette.hsv(fromHex: fixed),
+                      a.s > 0.15 else { return nil }
+                // Circular distance — a red at 0.99 and one at 0.01 are neighbours, not opposites.
+                let raw = abs(a.h - b.h)
+                return min(raw, 1 - raw)
+            }.max() ?? 0
+            check(hueDrift < 0.02, "repair keeps the hue on \(name) (drift \(hueDrift))")
+        }
+
+        // Idempotent: a colour that already passes is returned unchanged, so this can be applied
+        // without compounding.
+        check(Palette.legibleHex("#000000", onBackground: "#FFFFFF") == "#000000",
+              "already-legible colour is untouched")
+        let once = Palette.legibleHex("#EDC948", onBackground: "#FFFFFF")
+        check(Palette.legibleHex(once, onBackground: "#FFFFFF") == once, "repair is idempotent")
+
+        // Direction: darker on a light page, lighter on a dark one.
+        let onLight = Palette.hsv(fromHex: Palette.legibleHex("#EDC948", onBackground: "#FFFFFF"))!
+        let onDark = Palette.hsv(fromHex: Palette.legibleHex("#4E79A7", onBackground: "#2E2E2E"))!
+        check(onLight.v < Palette.hsv(fromHex: "#EDC948")!.v, "yellow darkens on a light page")
+        check(onDark.v > Palette.hsv(fromHex: "#4E79A7")!.v, "blue lightens on a dark page")
+    }
 }
 
 
