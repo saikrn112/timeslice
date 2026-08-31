@@ -1,5 +1,6 @@
 import AppIntents
 import SwiftUI
+import TimesliceIntents
 
 @main
 struct TimesliceiOSApp: App {
@@ -19,6 +20,9 @@ struct TimesliceiOSApp: App {
                     // Re-wires the Drive transport when a refresh token is already in the Keychain,
                     // so sync resumes without another sign-in.
                     GoogleAuthiOS.shared.restoreIfPossible()
+                    // Hands the shared Live Activity intents their behaviour. Without this the
+                    // Lock Screen and island buttons render but do nothing.
+                    TimerActionRegistry.register(TimerModel.shared)
 
                     // Tells the system about our App Shortcuts, and — just as importantly — is the
                     // only place in the app that REFERENCES `ShortcutsCatalog` at all.

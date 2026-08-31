@@ -95,6 +95,8 @@ targets:
         product: TimesliceCore
       - package: Timeslice
         product: TimesliceUI
+      - package: Timeslice
+        product: TimesliceIntents
       - target: TimesliceWidgetsExtension
         embed: true
 
@@ -125,6 +127,11 @@ targets:
         product: TimesliceCore
       - package: Timeslice
         product: TimesliceUI
+      # The extension needs the intent TYPES to render `Button(intent:)`. Linking the same library the
+      # app links means one type and one metadata contribution — compiling a copy into each target is
+      # what previously shipped two conflicting AppIntents bundles.
+      - package: Timeslice
+        product: TimesliceIntents
 
 schemes:
   TimesliceiOS:

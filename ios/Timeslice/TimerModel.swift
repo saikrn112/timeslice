@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import TimesliceCore
+import TimesliceIntents
 
 /// The iOS app's single source of truth: wraps `IntervalStore` and keeps the Live Activity in step.
 ///
@@ -269,6 +270,12 @@ final class TimerModel: ObservableObject {
         SyncController.shared.publishSoon()
     }
 
+    /// Switch to the task worked before this one — index 1 of the shared recency order, since index 0
+    /// is the current task. Drives the Live Activity's "previous" button.
+    func switchToPrevious() {
+        if let previous = recencyOrdered.dropFirst().first { toggle(taskID: previous.id) }
+    }
+
     /// Ask the UI to present the switcher wheel. Called from `OpenSwitcherIntent`.
     func requestSwitcher() { showingSwitcher = true }
 
@@ -409,3 +416,10 @@ final class TimerModel: ObservableObject {
                          isRunning: isRunning))
     }
 }
+
+/// Supplies the shared Live Activity intents with behaviour.
+///
+/// The intents live in `TimesliceIntents`, which cannot reach this class — the app owns the store, and
+/// pulling it into an extension process is what `0xdead10cc` punishes. So the app registers itself at
+/// launch and the intents call through.
+extension TimerModel: TimerActions {}

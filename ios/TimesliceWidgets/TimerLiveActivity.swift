@@ -1,5 +1,6 @@
 import ActivityKit
 import SwiftUI
+import TimesliceIntents
 import TimesliceUI
 import WidgetKit
 
@@ -56,19 +57,25 @@ struct TimerLiveActivity: Widget {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
-                        // NOTE: the pause/previous buttons were removed here on purpose.
-                        //
-                        // `Button(intent:)` needs the intent TYPE visible to this extension, which
-                        // meant compiling the intents into both targets. That shipped TWO AppIntents
-                        // metadata bundles declaring the same identifiers — the app's (with an
-                        // AppShortcutsProvider) and the extension's (without one) — and shortcut
-                        // resolution could bind to the extension, failing with
-                        // "Couldn't find AppShortcutsProvider." That broke the ACTION BUTTON, which
-                        // matters more than buttons inside the island.
-                        //
-                        // Restoring them properly means hoisting the intent types into a library both
-                        // targets link (one type, one registration) with the app supplying the
-                        // behaviour — not duplicating them per target.
+                        // Buttons, not gestures: a Live Activity hosts App Intents only, so this is
+                        // the entire available vocabulary. The types come from `TimesliceIntents`,
+                        // which the app links too — an earlier version compiled a copy into each
+                        // target and shipped two conflicting AppIntents metadata bundles.
+                        HStack(spacing: 8) {
+                            Button(intent: ToggleFromActivityIntent()) {
+                                Label(context.state.isRunning ? "Pause" : "Resume",
+                                      systemImage: context.state.isRunning ? "pause.fill" : "play.fill")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(context.state.isRunning ? .orange : .green)
+                            Button(intent: PreviousTaskIntent()) {
+                                Label("Previous", systemImage: "arrow.uturn.backward")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.secondary)
+                        }
                     }
                     .padding(.horizontal, 4)
                 }
@@ -145,8 +152,11 @@ private struct SessionText: View {
     }
 }
 
-/// Lock Screen / banner presentation. Wider than the island, so it can afford the task name, the
-/// day total, and the session all on one row.
+/// Lock Screen / banner presentation, with controls.
+///
+/// The buttons are the point: pausing from the Lock Screen means never unlocking the phone to stop a
+/// timer, which is the whole reason a Live Activity beats a notification. A Live Activity can host
+/// App Intents only — no gestures, no scroll views — so buttons are the entire available vocabulary.
 private struct LockScreenView: View {
     let state: TimerActivityAttributes.ContentState
 
@@ -154,7 +164,7 @@ private struct LockScreenView: View {
         HStack(spacing: 12) {
             RoundedRectangle(cornerRadius: 3)
                 .fill(Color(hex: state.colorHex))
-                .frame(width: 5, height: 38)
+                .frame(width: 5, height: 44)
             VStack(alignment: .leading, spacing: 3) {
                 Text(state.taskName)
                     .font(.headline)
@@ -163,12 +173,32 @@ private struct LockScreenView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Spacer()
+            Spacer(minLength: 6)
             ClockText(state: state)
                 .font(.system(.title2, design: .monospaced))
                 .foregroundStyle(clockColor(state))
+
+            // Pause/resume, then "previous task" — the two things worth doing without unlocking.
+            Button(intent: ToggleFromActivityIntent()) {
+                Image(systemName: state.isRunning ? "pause.fill" : "play.fill")
+                    .font(.system(size: 15, weight: .bold))
+                    .frame(width: 38, height: 38)
+            }
+            .buttonStyle(.plain)
+            .background(Circle().fill(state.isRunning ? Color.orange : Color.green))
+            .foregroundStyle(.white)
+            .clipShape(Circle())
+
+            Button(intent: PreviousTaskIntent()) {
+                Image(systemName: "arrow.uturn.backward")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.plain)
+            .background(Circle().fill(Color.secondary.opacity(0.25)))
+            .clipShape(Circle())
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 14)
         .padding(.vertical, 12)
     }
 }
