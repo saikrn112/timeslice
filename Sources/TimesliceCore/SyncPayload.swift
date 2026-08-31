@@ -25,6 +25,8 @@ public struct SyncPayload: Codable, Equatable, Sendable {
     public var tags: [TagRecord]?
     public var tagLinks: [TagLinkRecord]?
     public var targets: [TargetRecord]?
+    /// Notes. Optional for the same reason as the rest: an older build's payload must still decode.
+    public var feedback: [FeedbackRecord]?
 
     public struct TaskRecord: Codable, Equatable, Sendable {
         public var uid: String
@@ -133,6 +135,23 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         }
     }
 
+    public struct FeedbackRecord: Codable, Equatable, Sendable {
+        public var uid: String
+        public var text: String
+        /// The device it was WRITTEN on, carried so context survives the trip — not the device that
+        /// happened to sync it.
+        public var deviceID: String?
+        public var createdAt: TimeInterval
+        public var resolvedAt: TimeInterval?
+        public var updatedAt: TimeInterval
+
+        public init(uid: String, text: String, deviceID: String?, createdAt: TimeInterval,
+                    resolvedAt: TimeInterval?, updatedAt: TimeInterval) {
+            self.uid = uid; self.text = text; self.deviceID = deviceID
+            self.createdAt = createdAt; self.resolvedAt = resolvedAt; self.updatedAt = updatedAt
+        }
+    }
+
     public struct TombstoneRecord: Codable, Equatable, Sendable {
         public var uid: String
         public var kind: String        // "interval" | "task" | "task_project"
@@ -145,13 +164,14 @@ public struct SyncPayload: Codable, Equatable, Sendable {
 
     public init(deviceID: String, deviceLabel: String? = nil, writtenAt: TimeInterval,
                 tags: [TagRecord]? = nil, tagLinks: [TagLinkRecord]? = nil,
-                targets: [TargetRecord]? = nil,
+                targets: [TargetRecord]? = nil, feedback: [FeedbackRecord]? = nil,
                 tasks: [TaskRecord], projects: [ProjectRecord], intervals: [IntervalRecord],
                 tombstones: [TombstoneRecord]) {
         self.deviceID = deviceID; self.deviceLabel = deviceLabel
         self.writtenAt = writtenAt; self.tasks = tasks
         self.projects = projects; self.intervals = intervals; self.tombstones = tombstones
         self.tags = tags; self.tagLinks = tagLinks; self.targets = targets
+        self.feedback = feedback
     }
 }
 
@@ -222,6 +242,7 @@ public struct MergeReport: Equatable, Sendable {
     public var tagEditsApplied = 0
     public var tagLinksAdded = 0
     public var targetsApplied = 0
+    public var feedbackApplied = 0
     public var deletionsApplied = 0
 
     public init() {}
@@ -232,6 +253,6 @@ public struct MergeReport: Equatable, Sendable {
             && projectEditsApplied == 0 && deletionsApplied == 0
             && intervalsReattributed == 0
             && tagsAdded == 0 && tagsMergedByName.isEmpty && tagEditsApplied == 0
-            && tagLinksAdded == 0 && targetsApplied == 0
+            && tagLinksAdded == 0 && targetsApplied == 0 && feedbackApplied == 0
     }
 }

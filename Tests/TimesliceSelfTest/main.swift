@@ -2524,6 +2524,90 @@ func testAllocationLifecycle() throws {
     }
 }
 
+// MARK: - Notes (feedback)
+
+func testFeedback() throws {
+    print("Notes:")
+
+    do { // written, listed newest first, stamped with the device that wrote it
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        store.localDeviceID = "iphone-b653"
+        try store.addFeedback("budget row feels cramped", at: date(2026, 8, 30, 9, 0))
+        try store.addFeedback("lane labels overlap", at: date(2026, 8, 31, 9, 0))
+        let notes = try store.listFeedback()
+        check(notes.count == 2, "both notes are kept")
+        check(notes[0].text == "lane labels overlap", "newest first")
+        check(notes[0].deviceID == "iphone-b653", "stamped with the device it was written on")
+        check(notes.allSatisfy(\.isOpen), "and open by default")
+    }
+
+    do { // blank input is not a note
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        check(try store.addFeedback("   \n  ") == nil, "whitespace alone doesn't create a note")
+        check(try store.listFeedback().isEmpty, "and nothing is stored")
+    }
+
+    do { // resolving hides it from the open list without losing it
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        try store.addFeedback("fix the thing")
+        let id = try store.listFeedback()[0].id
+        try store.setFeedbackResolved(id: id, resolved: true)
+        check(try store.listFeedback(includeResolved: false).isEmpty, "done notes leave the open list")
+        check(try store.listFeedback().count == 1, "but are still there")
+        try store.setFeedbackResolved(id: id, resolved: false)
+        check(try store.listFeedback(includeResolved: false).count == 1, "and can be reopened")
+    }
+
+    do { // summary is the first line, so a multi-line note fits a one-line row
+        let n = Feedback(id: 1, text: "first line\nsecond line", createdAt: Date(),
+                         deviceID: nil, resolvedAt: nil)
+        check(n.summary == "first line", "the summary is the first line only")
+    }
+
+    do { // SYNC: a note written on one device reaches the other, keeping its origin
+        let (a, ua) = try makeStore(); defer { try? FileManager.default.removeItem(at: ua) }
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        a.localDeviceID = "iphone-b653"; b.localDeviceID = "work"
+        let ea = SyncEngine(store: a, deviceID: "A"), eb = SyncEngine(store: b, deviceID: "B")
+        try a.addFeedback("noticed on the phone", at: date(2026, 8, 30, 9, 0))
+        _ = try eb.merge(try ea.buildPayload())
+        let got = try b.listFeedback()
+        check(got.count == 1 && got[0].text == "noticed on the phone", "the note arrives")
+        check(got[0].deviceID == "iphone-b653",
+              "attributed to the device that WROTE it, not the one that synced it")
+        check(abs(got[0].createdAt.timeIntervalSince(date(2026, 8, 30, 9, 0))) < 2,
+              "with its original timestamp, not the merge time")
+    }
+
+    do { // resolving on one device propagates, and a delete stays deleted
+        let (a, ua) = try makeStore(); defer { try? FileManager.default.removeItem(at: ua) }
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        let ea = SyncEngine(store: a, deviceID: "A"), eb = SyncEngine(store: b, deviceID: "B")
+        try a.addFeedback("something")
+        _ = try eb.merge(try ea.buildPayload())
+        try a.setFeedbackResolved(id: try a.listFeedback()[0].id, resolved: true)
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listFeedback(includeResolved: false).isEmpty, "marking done propagates")
+
+        try a.deleteFeedback(id: try a.listFeedback()[0].id)
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listFeedback().isEmpty, "a deleted note is deleted on the peer too")
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listFeedback().isEmpty, "and the tombstone holds against a re-send")
+    }
+
+    do { // idempotent, like every other merge
+        let (a, ua) = try makeStore(); defer { try? FileManager.default.removeItem(at: ua) }
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        let ea = SyncEngine(store: a, deviceID: "A"), eb = SyncEngine(store: b, deviceID: "B")
+        try a.addFeedback("once")
+        let payload = try ea.buildPayload()
+        _ = try eb.merge(payload)
+        check(try eb.merge(payload).feedbackApplied == 0, "a repeat merge changes nothing")
+        check(try b.listFeedback().count == 1, "and doesn't duplicate the note")
+    }
+}
+
 // MARK: - Run
 
 do {
@@ -2553,6 +2637,7 @@ do {
     try testTags()
     try testTagSync()
     try testAllocationLifecycle()
+    try testFeedback()
     testTagTotals()
     testTargetMath()
 } catch {
