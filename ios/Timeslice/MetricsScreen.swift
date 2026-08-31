@@ -53,15 +53,18 @@ struct MetricsScreen: View {
                     if !data.strip.isEmpty {
                         PeriodStrip(cards: data.strip, selected: range) { range = $0 }
                     }
-                    // Swipeable: the hero card and the timeline are the two views that are *about* the
-                    // selected period, so they're where sliding to change it belongs.
-                    heroCard
-                        .gesture(periodSwipe())
-                    budgets
-                    Group { if isDay { dayTimeline } else { hoursChart } }
-                        .gesture(periodSwipe())
-                    whereTimeWent
-                    if isDay { sessionList } else { weekdayPattern }
+                    // Everything below the strip is *about* the selected period, so a swipe anywhere in
+                    // here moves it. `.gesture` on a `Group` attaches to each child rather than to one
+                    // combined area, which is what's wanted: the strip above keeps its own horizontal
+                    // scrolling, and a parent gesture spanning it would fight that.
+                    Group {
+                        heroCard
+                        budgets
+                        if isDay { dayTimeline } else { hoursChart }
+                        whereTimeWent
+                        if isDay { sessionList } else { weekdayPattern }
+                    }
+                    .gesture(periodSwipe())
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
@@ -96,52 +99,39 @@ struct MetricsScreen: View {
 
     // MARK: - Range
 
-    /// One row: pills, then `‹ label ›`. The "Today" reset is folded INTO the label — when you're
-    /// already on today it was a disabled button restating the text beside it, and reclaiming that
-    /// width is what lets everything fit on a single line.
+    /// Just the unit pills, centred — which period LENGTH you're looking at.
+    ///
+    /// The `‹ Yesterday ›` stepper is gone. Once the card strip browses dates and a swipe moves between
+    /// them, the stepper was a third control for a job two already did, and it was the cluttered half of
+    /// the bar. Nothing is lost with it: the strip shows which period is selected, and the hero card
+    /// spells it out ("tracked yesterday").
+    ///
+    /// Changing the unit rebuilds the strip into that unit's periods, so this control and the strip below
+    /// it are one mechanism — pick a granularity here, pick a position there.
+    ///
+    /// Pills are sized for a thumb now that they own the row: 13pt in a 30pt-tall capsule, against 10pt
+    /// crammed beside the stepper.
     private var rangeBar: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             ForEach(RangeUnit.allCases, id: \.self) { u in
                 let selected = range.unit == u
                 Button {
+                    // Keep your position in time when changing granularity: the week containing the day
+                    // you were on, not the current week.
                     let anchor = range.isCurrent() ? Date() : min(range.start, Date())
                     range = DateRange.resolve(unit: u, anchor: anchor, earliest: earliest)
                 } label: {
                     Text(u.rawValue)
-                        .font(.system(size: 10, weight: selected ? .bold : .medium, design: .rounded))
+                        .font(.system(size: 13, weight: selected ? .bold : .medium, design: .rounded))
                         .foregroundStyle(selected ? Color.white : Color.secondary)
-                        .frame(minWidth: 16)
-                        .padding(.vertical, 3).padding(.horizontal, 4)
+                        .frame(minWidth: 30, minHeight: 30)
                         .background(Capsule().fill(
                             selected ? Color.accentColor : Color.secondary.opacity(0.14)))
                 }
                 .buttonStyle(.plain)
             }
-
-            Spacer(minLength: 2)
-
-            Button { step(-1) } label: { Image(systemName: "chevron.left").font(.system(size: 10)) }
-                .buttonStyle(.plain).disabled(range.unit == .all)
-            Button {
-                range = DateRange.resolve(unit: range.unit, anchor: Date(), earliest: earliest)
-            } label: {
-                Text(range.label())
-                    .font(.system(size: 11, design: .rounded)).fontWeight(.medium)
-                    .foregroundStyle(range.isCurrent() ? Color.primary : Color.accentColor)
-                    .lineLimit(1).minimumScaleFactor(0.75)
-            }
-            .buttonStyle(.plain)
-            .disabled(range.isCurrent())
-            Button { step(1) } label: { Image(systemName: "chevron.right").font(.system(size: 10)) }
-                .buttonStyle(.plain).disabled(range.unit == .all || atPresentEdge)
         }
-        .padding(.horizontal, 9).padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: Theme.cardRadius).fill(Theme.card))
-    }
-
-    /// True when stepping forward would move past now — the future is never browsable.
-    private var atPresentEdge: Bool {
-        range.stepped(by: 1, earliest: earliest).start > Date()
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     /// Move by whole periods. Returns false when the move was refused, so a swipe can decline to buzz.
@@ -282,7 +272,9 @@ struct MetricsScreen: View {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 6) {
                     Text("Budgets").font(Theme.sectionHeader)
-                    Text("each against its own period")
+                    // Says which ring is which. Two nested rings are only concise if you know what
+                    // they mean, and there's nowhere on a 60pt ring to label them.
+                    Text("outer: period · inner: today")
                         .font(Theme.captionSmall).foregroundStyle(.tertiary)
                     Spacer()
                     Button("Edit") { model.showingSettings = true }
@@ -298,69 +290,58 @@ struct MetricsScreen: View {
         }
     }
 
-    /// One budget as a CARD with a ring, rather than a row of two bars in a shared table.
+    /// One budget as a card with BOTH goals as circles: outer the period, inner today.
     ///
-    /// The table version squeezed a name, a spec, two labelled bars and four durations into about 40pt
-    /// of height, at 9pt type. It was complete and nearly unreadable — everything competed and the one
-    /// thing you look for (am I on track) had to be inferred from where a fill sat relative to a 1.5pt
-    /// marker.
+    /// Was a ring plus a labelled `today` bar plus four durations. Two goals, expressed two different
+    /// ways, is what made the grid cluttered — the bar row cost a whole row per card and three of its
+    /// numbers restated what a second ring says at a glance. Both goals are now the same kind of object,
+    /// so the card is read once rather than parsed twice.
     ///
-    /// The ring makes the verdict the largest thing on the card, in the verdict's own colour, with the
-    /// pace tick on the track so "behind" is a position you can see rather than a shade you decode. The
-    /// daily figure — what to do *today*, which a weekly percentage can't tell you — stays as one line
-    /// underneath, because it is the actionable number.
+    /// What's left is the irreducible set: which budget, how much so far, and what the budget is.
+    /// Everything else is in the rings.
     ///
-    /// Percentages and verdicts are `TargetProgress`'s, unchanged.
+    /// Percentages, pace and verdicts are all `TargetProgress`'s, unchanged.
     private func budgetCard(_ row: BudgetRows.Row) -> some View {
         let p = row.progress
         let tint = Theme.verdict(kind(p.verdict))
+        // Today against the period target divided by its nominal days, so a 30h/week floor reads as
+        // "4h 17m a day". This is the figure that says what to do *today*, which a weekly percentage
+        // cannot.
         let perDay = p.target.seconds / max(p.target.period.nominalDays, 1)
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 9) {
-                LabelledRing(fraction: p.percent / 100,
-                             // A pace mark only means something for a floor: a ceiling has no
-                             // "you should be here by now".
-                             pace: p.target.direction == .atLeast ? p.elapsedFraction : nil,
-                             tint: tint, lineWidth: 6) {
-                    Text(percent(p.percent / 100))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(tint)
-                        .lineLimit(1)
-                }
-                .frame(width: 52, height: 52)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 4) {
-                        Circle().fill(Color(hex: row.colorHex)).frame(width: 7, height: 7)
-                        Text(p.name)
-                            .font(.system(size: 12, weight: .semibold))
-                            .lineLimit(1).minimumScaleFactor(0.8)
-                    }
-                    Text(BudgetRows.duration(p.actualSeconds))
-                        .font(.system(size: 15, weight: .medium, design: .rounded))
-                    Text("\(p.target.direction.symbol) \(BudgetRows.duration(p.target.seconds))"
-                         + " / \(shortPeriod(p.target.period))")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-            }
-
-            // Today against the period target divided by its nominal days, so a 30h/week floor reads
-            // as "4h 17m a day".
-            HStack(spacing: 4) {
-                Text("today")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.quaternary)
-                InlineBar(fraction: min(max(perDay > 0 ? p.todaySeconds / perDay : 0, 0), 1),
-                          label: BudgetRows.duration(p.todaySeconds),
-                          fill: Color(hex: row.colorHex), height: 12, marker: nil)
-                Text(BudgetRows.duration(perDay))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
+        let dailyFraction = perDay > 0 ? p.todaySeconds / perDay : 0
+        return HStack(alignment: .center, spacing: 10) {
+            NestedRings(outerFraction: p.percent / 100,
+                        // A pace mark only means something for a floor: a ceiling has no "you should
+                        // be here by now".
+                        outerPace: p.target.direction == .atLeast ? p.elapsedFraction : nil,
+                        outerTint: tint,
+                        innerFraction: dailyFraction,
+                        innerTint: Color(hex: row.colorHex),
+                        lineWidth: 6) {
+                Text(percent(p.percent / 100))
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(tint)
                     .lineLimit(1)
             }
+            .frame(width: 60, height: 60)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    Circle().fill(Color(hex: row.colorHex)).frame(width: 7, height: 7)
+                    Text(p.name)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1).minimumScaleFactor(0.8)
+                }
+                Text(BudgetRows.duration(p.actualSeconds))
+                    .font(.system(size: 16, weight: .medium, design: .rounded))
+                    .lineLimit(1).minimumScaleFactor(0.8)
+                Text("\(p.target.direction.symbol) \(BudgetRows.duration(p.target.seconds))"
+                     + " / \(shortPeriod(p.target.period))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
         }
         .padding(Theme.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)

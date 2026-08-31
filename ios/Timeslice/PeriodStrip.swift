@@ -48,36 +48,55 @@ struct PeriodStrip: View {
     let selected: DateRange
     let onSelect: (DateRange) -> Void
 
+    /// Must match `PeriodCardView`'s own width — the side insets are derived from it.
+    static let cardWidth: CGFloat = 68
+    private static let spacing: CGFloat = 8
+    /// Fixed, because the `GeometryReader` that measures the viewport needs a height from its parent.
+    private static let stripHeight: CGFloat = 96
+
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(cards) { card in
-                        Button { onSelect(card.range) } label: {
-                            PeriodCardView(card: card, isSelected: card.range == selected)
+        GeometryReader { geo in
+            // Half a viewport, less half a card: enough padding at each end that the FIRST and LAST
+            // cards can also sit in the middle. Without it `anchor: .center` clamps at the content's
+            // edge, so the newest period would still stick to the right — which is the behaviour being
+            // fixed here, just moved one card along.
+            let sideInset = max(Self.spacing, (geo.size.width - Self.cardWidth) / 2)
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: Self.spacing) {
+                        ForEach(cards) { card in
+                            Button { onSelect(card.range) } label: {
+                                PeriodCardView(card: card, isSelected: card.range == selected)
+                            }
+                            .buttonStyle(.plain)
+                            .id(card.id)
                         }
-                        .buttonStyle(.plain)
-                        .id(card.id)
                     }
+                    .padding(.horizontal, sideInset)
+                    .padding(.vertical, 2)
                 }
-                .padding(.horizontal, 2)
-                .padding(.vertical, 2)
+                .onAppear { scroll(proxy, animated: false) }
+                // Follow an external change of range — a swipe on the cards below, or switching the
+                // unit, which rebuilds the strip entirely.
+                .onChange(of: selected) { _, _ in scroll(proxy, animated: true) }
             }
-            .onAppear { scroll(proxy, animated: false) }
-            // Follow an external change of range — switching the unit rebuilds the strip entirely, and
-            // without this it would open scrolled to the wrong end.
-            .onChange(of: selected) { _, _ in scroll(proxy, animated: true) }
         }
+        .frame(height: Self.stripHeight)
     }
 
+    /// Bring the selected card to the CENTRE.
+    ///
+    /// It was pinned to the trailing edge, which meant the selected period sat against the right wall
+    /// with its whole future off screen — selecting yesterday hid today. Centring shows neighbours on
+    /// both sides, so the strip reads as a position in time rather than as the end of a list.
     private func scroll(_ proxy: ScrollViewProxy, animated: Bool) {
         guard let target = cards.first(where: { $0.range == selected })?.id ?? cards.last?.id else {
             return
         }
         if animated {
-            withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(target, anchor: .trailing) }
+            withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(target, anchor: .center) }
         } else {
-            proxy.scrollTo(target, anchor: .trailing)
+            proxy.scrollTo(target, anchor: .center)
         }
     }
 }

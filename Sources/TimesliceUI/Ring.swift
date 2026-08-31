@@ -85,6 +85,51 @@ private struct PaceTick: View {
     }
 }
 
+/// Two concentric rings plus a centre label — the Fitness "rings" idiom.
+///
+/// Exists so a budget can show BOTH of its goals as circles instead of a ring plus a labelled bar plus
+/// four durations. The bar version was complete and cluttered: per card it spent a whole row and three
+/// extra numbers restating what a second ring says at a glance.
+///
+/// The two are told apart by colour, consistently across every card — the outer takes the verdict's
+/// colour (is the period on track), the inner takes the subject's own (how much today). Nesting rather
+/// than sitting side by side keeps one focal point per card, which is what makes a grid of them scan.
+public struct NestedRings<Content: View>: View {
+    let outerFraction: Double
+    let outerPace: Double?
+    let outerTint: Color
+    let innerFraction: Double
+    let innerTint: Color
+    let lineWidth: CGFloat
+    let content: Content
+
+    public init(outerFraction: Double, outerPace: Double? = nil, outerTint: Color,
+                innerFraction: Double, innerTint: Color, lineWidth: CGFloat = 6,
+                @ViewBuilder content: () -> Content) {
+        self.outerFraction = outerFraction
+        self.outerPace = outerPace
+        self.outerTint = outerTint
+        self.innerFraction = innerFraction
+        self.innerTint = innerTint
+        self.lineWidth = lineWidth
+        self.content = content()
+    }
+
+    public var body: some View {
+        ZStack {
+            ProgressRing(fraction: outerFraction, pace: outerPace, tint: outerTint,
+                         lineWidth: lineWidth)
+            ProgressRing(fraction: innerFraction, tint: innerTint, lineWidth: lineWidth * 0.75)
+                // One stroke width plus a hairline gap, so the two read as separate rings rather than
+                // as a thick band.
+                .padding(lineWidth + 2.5)
+            content
+                .padding(lineWidth * 2.5 + 4)
+                .minimumScaleFactor(0.5)
+        }
+    }
+}
+
 /// A ring with something in the middle — a number, or a glyph.
 ///
 /// The pairing exists because a bare ring is a proportion with no magnitude: it says "two thirds" but
