@@ -38,6 +38,8 @@ struct MetricsScreen: View {
         var weekdays: [WeekdayAverage] = []
         var sessions: [Interval] = []
         var budgets: [BudgetRows.Row] = []
+        /// The neighbouring periods, for the card strip that browses them.
+        var strip: [PeriodCard] = []
     }
 
     private var isDay: Bool { range.unit == .day }
@@ -47,7 +49,11 @@ struct MetricsScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     rangeBar
-                    tiles
+                    // Browse by tapping a card, not by stepping one period at a time.
+                    if !data.strip.isEmpty {
+                        PeriodStrip(cards: data.strip, selected: range) { range = $0 }
+                    }
+                    heroCard
                     budgets
                     if isDay { dayTimeline } else { hoursChart }
                     whereTimeWent
@@ -140,61 +146,92 @@ struct MetricsScreen: View {
         range = next
     }
 
-    // MARK: - Tiles
+    // MARK: - The selected period, as one card
 
-    /// Four tiles, tinted per metric exactly as the Mac does — Focus purple, Switches orange,
-    /// Longest teal, Best day blue. They were all `.primary` before, which is the main reason the
-    /// screen read as a generic iOS list rather than as Timeslice.
-    private var tiles: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 2),
-                  spacing: 8) {
-            trackedTile
-            tile("Focus", percent(data.summary.focusRatio),
-                 "≥\(model.settings.deepBlockMinutes)m blocks", .purple)
-            if isDay {
-                tile("Switches", "\(data.summary.switches)", "this day", .orange)
-                tile("Longest", Format.compact(data.summary.longestSessionSeconds),
-                     "session", .teal)
-            } else {
-                tile("Avg/day", hoursOnly(data.summary.avgPerActiveDay),
-                     "active days only", .teal)
-                tile("Best day", hoursOnly(data.summary.bestDaySeconds), "in range", .blue)
-            }
-        }
-    }
-
-    /// `7.8h / 16h` with a bar and the percentage beside it — the Mac's goal tile.
+    /// ONE card for the selected period: focus ring, the total beside it, and the supporting figures
+    /// underneath.
     ///
-    /// The denominator counts every CALENDAR day in the range, including ones with nothing tracked:
-    /// a day you recorded nothing is exactly when the gap should be widest, and counting only active
-    /// days would hide that by shrinking the denominator to match.
-    private var trackedTile: some View {
-        let days = max(1, (range.end.timeIntervalSince(range.start) / 86_400).rounded())
-        let awake = model.settings.wakingSeconds * days
-        let ratio = awake > 0 ? data.summary.totalSeconds / awake : 0
-        return VStack(alignment: .leading, spacing: 3) {
-            Text("Tracked").font(Theme.caption).foregroundStyle(.secondary)
-            HStack(alignment: .firstTextBaseline, spacing: 3) {
-                Text(hoursOnly(data.summary.totalSeconds)).font(Theme.tileValue)
-                Text("/ \(hoursOnly(awake))").font(Theme.captionSmall).foregroundStyle(.secondary)
-            }
-            .lineLimit(1).minimumScaleFactor(0.7)
-            HStack(spacing: 5) {
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Theme.track)
-                        Capsule().fill(Color.accentColor)
-                            .frame(width: max(2, geo.size.width * min(1, ratio)))
+    /// Replaces a 2×2 grid of four flat tiles. The tiles each held one number with a caption, which is
+    /// the shape of a table — four of them stacked above three more sections is what made the screen
+    /// read as a page of data rather than as a summary. Grouping them puts the headline (how long) and
+    /// the quality (how focused) in one glance, with the rest as detail where it belongs.
+    ///
+    /// Every figure still comes from `Aggregations.summary`; nothing is recomputed here.
+    private var heroCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 14) {
+                LabelledRing(fraction: data.summary.focusRatio, tint: .purple, lineWidth: 8) {
+                    VStack(spacing: 0) {
+                        Text(percent(data.summary.focusRatio))
+                            .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        Text("focus")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
                     }
                 }
-                .frame(height: 4)
-                Text(percent(ratio)).font(Theme.captionSmall).foregroundStyle(.tertiary)
+                .frame(width: 74, height: 74)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(hoursOnly(data.summary.totalSeconds))
+                        .font(.system(size: 34, weight: .semibold, design: .rounded))
+                        .lineLimit(1).minimumScaleFactor(0.6)
+                    Text("tracked \(range.label().lowercased())")
+                        .font(Theme.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Text("\(hoursOnly(data.summary.deepSeconds)) in blocks of "
+                         + "\(model.settings.deepBlockMinutes)m or more")
+                        .font(Theme.captionSmall)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
             }
-            .frame(height: 11)
+
+            Divider()
+
+            // The supporting figures, as a single row of stats rather than as separate cards. Same
+            // numbers the tiles carried; a third of the vertical space.
+            HStack(alignment: .top, spacing: 0) {
+                if isDay {
+                    stat("Switches", "\(data.summary.switches)", .orange)
+                    stat("Longest", Format.compact(data.summary.longestSessionSeconds), .teal)
+                    stat("Waking", percent(wakingRatio), .blue)
+                } else {
+                    stat("Avg/day", hoursOnly(data.summary.avgPerActiveDay), .teal)
+                    stat("Best day", hoursOnly(data.summary.bestDaySeconds), .blue)
+                    stat("Active", "\(data.summary.activeDays)d", .orange)
+                }
+            }
+        }
+        .padding(Theme.cardPadding + 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: Theme.cardRadius + 4).fill(Theme.card))
+    }
+
+    /// Share of waking hours in the range that got tracked at all.
+    ///
+    /// The denominator counts every CALENDAR day in the range, including ones with nothing recorded: a
+    /// day you tracked nothing is exactly when the gap should be widest, and using only active days
+    /// would hide that by shrinking the denominator to match.
+    private var wakingRatio: Double {
+        let days = max(1, (range.end.timeIntervalSince(range.start) / 86_400).rounded())
+        let awake = model.settings.wakingSeconds * days
+        return awake > 0 ? data.summary.totalSeconds / awake : 0
+    }
+
+    private func stat(_ label: String, _ value: String, _ tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                .foregroundStyle(tint)
+                .lineLimit(1).minimumScaleFactor(0.7)
+            Text(label)
+                .font(Theme.captionSmall)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(Theme.cardPadding)
-        .background(RoundedRectangle(cornerRadius: Theme.cardRadius).fill(Theme.card))
     }
 
     private func percent(_ ratio: Double) -> String { "\(Int((ratio * 100).rounded()))%" }
@@ -204,17 +241,6 @@ struct MetricsScreen: View {
     private func hoursOnly(_ seconds: TimeInterval) -> String {
         let h = seconds / 3600
         return h >= 10 ? String(format: "%.0fh", h) : String(format: "%.1fh", h)
-    }
-
-    private func tile(_ label: String, _ value: String, _ caption: String, _ tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label).font(Theme.caption).foregroundStyle(.secondary)
-            Text(value).font(Theme.tileValue).foregroundStyle(tint)
-            Text(caption).font(Theme.captionSmall).foregroundStyle(.tertiary).lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(Theme.cardPadding)
-        .background(RoundedRectangle(cornerRadius: Theme.cardRadius).fill(Theme.card))
     }
 
     // MARK: - Budgets (a section here, as on the Mac)
@@ -233,73 +259,81 @@ struct MetricsScreen: View {
                         .buttonStyle(.plain)
                         .foregroundStyle(Color.accentColor)
                 }
-                VStack(spacing: 5) {
-                    ForEach(data.budgets) { row in budgetRow(row) }
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 2),
+                          spacing: 8) {
+                    ForEach(data.budgets) { row in budgetCard(row) }
                 }
-                .padding(Theme.cardPadding)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: Theme.cardRadius).fill(Theme.card))
             }
         }
     }
 
-    /// Name + budget spec, then TWO bars: the period goal, and today's share of it.
+    /// One budget as a CARD with a ring, rather than a row of two bars in a shared table.
     ///
-    /// The trend sparkline is gone. At 32pt wide it was a few pixels of dotted line for most rows and
-    /// carried no readable information; the space buys a second bar that does.
+    /// The table version squeezed a name, a spec, two labelled bars and four durations into about 40pt
+    /// of height, at 9pt type. It was complete and nearly unreadable — everything competed and the one
+    /// thing you look for (am I on track) had to be inferred from where a fill sat relative to a 1.5pt
+    /// marker.
     ///
-    /// - **goal** — progress against the budget's own period, with a **pace marker** at
-    ///   `elapsedFraction` showing where the fill should be by now. Fill left of the marker is behind.
-    /// - **daily** — today against the period target divided by its nominal days, so a 35h/week floor
-    ///   reads as 5h/day. This is the figure that tells you what to do *today*, which a
-    ///   weekly percentage cannot.
-    private func budgetRow(_ row: BudgetRows.Row) -> some View {
+    /// The ring makes the verdict the largest thing on the card, in the verdict's own colour, with the
+    /// pace tick on the track so "behind" is a position you can see rather than a shade you decode. The
+    /// daily figure — what to do *today*, which a weekly percentage can't tell you — stays as one line
+    /// underneath, because it is the actionable number.
+    ///
+    /// Percentages and verdicts are `TargetProgress`'s, unchanged.
+    private func budgetCard(_ row: BudgetRows.Row) -> some View {
         let p = row.progress
         let tint = Theme.verdict(kind(p.verdict))
         let perDay = p.target.seconds / max(p.target.period.nominalDays, 1)
-        let dailyFraction = perDay > 0 ? p.todaySeconds / perDay : 0
-        return VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Circle().fill(Color(hex: row.colorHex)).frame(width: 7, height: 7)
-                Text(p.name)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1).minimumScaleFactor(0.85)
-                Spacer(minLength: 4)
-                Text("\(p.target.direction.symbol) \(BudgetRows.duration(p.target.seconds))"
-                     + " / \(shortPeriod(p.target.period))")
-                    .font(.system(size: 9)).foregroundStyle(.tertiary)
-            }
-            barLine("goal", actual: p.actualSeconds, target: p.target.seconds,
-                    fraction: p.percent / 100, tint: tint,
-                    // Only meaningful for a floor — a ceiling has no "should be here by now".
-                    marker: p.target.direction == .atLeast ? p.elapsedFraction : nil)
-            barLine("daily", actual: p.todaySeconds, target: perDay,
-                    fraction: dailyFraction,
-                    // Informational rather than a verdict, so it takes the subject's own colour.
-                    tint: Color(hex: row.colorHex), marker: nil)
-        }
-    }
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 9) {
+                LabelledRing(fraction: p.percent / 100,
+                             // A pace mark only means something for a floor: a ceiling has no
+                             // "you should be here by now".
+                             pace: p.target.direction == .atLeast ? p.elapsedFraction : nil,
+                             tint: tint, lineWidth: 6) {
+                    Text(percent(p.percent / 100))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(tint)
+                        .lineLimit(1)
+                }
+                .frame(width: 52, height: 52)
 
-    private func barLine(_ caption: String, actual: TimeInterval, target: TimeInterval,
-                         fraction: Double, tint: Color, marker: Double?) -> some View {
-        HStack(spacing: 5) {
-            Text(caption)
-                .font(.system(size: 9)).foregroundStyle(.quaternary)
-                .frame(width: 26, alignment: .leading)
-            Text(BudgetRows.duration(actual))
-                .font(.system(size: 9, design: .monospaced))
-                .frame(width: 42, alignment: .trailing)
-                .lineLimit(1)
-            InlineBar(fraction: min(max(fraction, 0), 1), label: percent(fraction),
-                      fill: tint, height: 11, marker: marker)
-            Text(BudgetRows.duration(target))
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(.secondary)
-                // 44, not 32: a pro-rated daily target like "4h 17m" (30h/week) wrapped onto a second
-                // line at 32 and pushed the row's height out.
-                .frame(width: 44, alignment: .leading)
-                .lineLimit(1)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Circle().fill(Color(hex: row.colorHex)).frame(width: 7, height: 7)
+                        Text(p.name)
+                            .font(.system(size: 12, weight: .semibold))
+                            .lineLimit(1).minimumScaleFactor(0.8)
+                    }
+                    Text(BudgetRows.duration(p.actualSeconds))
+                        .font(.system(size: 15, weight: .medium, design: .rounded))
+                    Text("\(p.target.direction.symbol) \(BudgetRows.duration(p.target.seconds))"
+                         + " / \(shortPeriod(p.target.period))")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+
+            // Today against the period target divided by its nominal days, so a 30h/week floor reads
+            // as "4h 17m a day".
+            HStack(spacing: 4) {
+                Text("today")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.quaternary)
+                InlineBar(fraction: min(max(perDay > 0 ? p.todaySeconds / perDay : 0, 0), 1),
+                          label: BudgetRows.duration(p.todaySeconds),
+                          fill: Color(hex: row.colorHex), height: 12, marker: nil)
+                Text(BudgetRows.duration(perDay))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
+        .padding(Theme.cardPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: Theme.cardRadius).fill(Theme.card))
     }
 
     private func shortPeriod(_ p: Target.Period) -> String {
@@ -711,7 +745,52 @@ struct MetricsScreen: View {
             targets: (try? store.listTargets()) ?? [], tasks: model.allTasks,
             groups: model.groups, tags: model.allTags, tagIDsByTask: tagIDsByTask,
             intervals: all, viewedRange: range, now: now)
+        d.strip = buildStrip(intervals: all, deep: deep, now: now)
         data = d
+    }
+
+    /// The card strip: this period and the ones before it.
+    ///
+    /// Built with `DateRange.stepped`, so week and month boundaries come from `Calendar` rather than
+    /// from multiplying by 7 or 30 — the strip has to agree with the range the rest of the screen uses,
+    /// and calendar periods are not fixed lengths.
+    ///
+    /// Anchored at the PRESENT period rather than at the selection, so the strip doesn't slide out from
+    /// under you when you tap; the window then extends backwards far enough to keep an older selection
+    /// visible, capped so browsing a year back doesn't build hundreds of cards.
+    private func buildStrip(intervals: [Interval], deep: TimeInterval, now: Date) -> [PeriodCard] {
+        guard range.unit != .all else { return [] }
+        let present = DateRange.resolve(unit: range.unit, anchor: now, earliest: earliest)
+
+        var windows: [DateRange] = []
+        var cursor = present
+        // 14 covers a fortnight of days or a year of months on screen; the cap bounds the walk back to
+        // an old selection.
+        for step in 0..<60 {
+            windows.append(cursor)
+            let reachedSelection = cursor.start <= range.start
+            if step >= 13 && reachedSelection { break }
+            if let earliest, cursor.start <= earliest, step >= 13 { break }
+            let next = cursor.stepped(by: -1, earliest: earliest)
+            // `stepped` clamps rather than throwing, so an unmoving cursor is the end of the road.
+            guard next.start < cursor.start else { break }
+            cursor = next
+        }
+
+        // Oldest first: the strip reads left-to-right into the present, and scrolls to the right end.
+        var cards = windows.reversed().map { window in
+            let s = Aggregations.summary(intervals: intervals, range: window,
+                                         deepThreshold: deep, now: now)
+            return PeriodCard(range: window, totalSeconds: s.totalSeconds,
+                              deepSeconds: s.deepSeconds)
+        }
+        // Scale the rings to the busiest period on the strip, so the ring and the number inside it
+        // agree. Done after the fact because it's the one figure that depends on the other cards.
+        let busiest = cards.map(\.totalSeconds).max() ?? 0
+        if busiest > 0 {
+            for i in cards.indices { cards[i].fraction = cards[i].totalSeconds / busiest }
+        }
+        return cards
     }
 }
 
