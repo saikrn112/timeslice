@@ -62,9 +62,13 @@ struct MetricsScreen: View {
                         budgets
                         if isDay { dayTimeline } else { hoursChart }
                         whereTimeWent
-                        if isDay { sessionList } else { weekdayPattern }
                     }
                     .gesture(periodSwipe())
+
+                    // Sessions are deliberately OUTSIDE the swipe group: their rows own horizontal
+                    // drags for swipe-to-delete, and a period-change gesture on the same axis would
+                    // either eat the delete or fire alongside it.
+                    if isDay { sessionList } else { weekdayPattern.gesture(periodSwipe()) }
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
@@ -274,7 +278,7 @@ struct MetricsScreen: View {
                     Text("Budgets").font(Theme.sectionHeader)
                     // Says which ring is which. Two nested rings are only concise if you know what
                     // they mean, and there's nowhere on a 60pt ring to label them.
-                    Text("outer: period · inner: today")
+                    Text("outer: period · inner: \(range.label().lowercased())")
                         .font(Theme.captionSmall).foregroundStyle(.tertiary)
                     Spacer()
                     Button("Edit") { model.showingSettings = true }
@@ -282,8 +286,11 @@ struct MetricsScreen: View {
                         .buttonStyle(.plain)
                         .foregroundStyle(Color.accentColor)
                 }
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 2),
-                          spacing: 8) {
+                // ONE column, not two. Two halved the width available for text and the numbers didn't
+                // fit — `41h 52m` truncated to `41h…` and a pro-rated goal to `≥3h…`, which is worse
+                // than any amount of scrolling: a budget you can't read the numbers of has no purpose.
+                // Full width also lets both pairs sit on one line each at full size.
+                VStack(spacing: 8) {
                     ForEach(data.budgets) { row in budgetCard(row) }
                 }
             }
@@ -304,18 +311,22 @@ struct MetricsScreen: View {
     private func budgetCard(_ row: BudgetRows.Row) -> some View {
         let p = row.progress
         let tint = Theme.verdict(kind(p.verdict))
-        // Today against the period target divided by its nominal days, so a 30h/week floor reads as
-        // "4h 17m a day". This is the figure that says what to do *today*, which a weekly percentage
-        // cannot.
-        let perDay = p.target.seconds / max(p.target.period.nominalDays, 1)
-        let dailyFraction = perDay > 0 ? p.todaySeconds / perDay : 0
+        // THE SELECTED RANGE's achievement, pro-rated: `rangeSeconds` over `rangeExpectedSeconds`,
+        // which is the target scaled onto whatever the filter is showing (a 30h/week floor expects
+        // 4h17m of a single day, ~4.3× over a month).
+        //
+        // This was today-against-a-daily-share, which ignored the filter entirely — so paging to last
+        // Tuesday changed every number on the screen except these, and the budgets silently kept
+        // describing this week. Now the whole card answers the range you're looking at. When the filter
+        // IS a day, the two are the same thing, so nothing is lost in the common case.
+        let rangeFraction = p.rangePercent / 100
         return HStack(alignment: .center, spacing: 10) {
             NestedRings(outerFraction: p.percent / 100,
                         // A pace mark only means something for a floor: a ceiling has no "you should
                         // be here by now".
                         outerPace: p.target.direction == .atLeast ? p.elapsedFraction : nil,
                         outerTint: tint,
-                        innerFraction: dailyFraction,
+                        innerFraction: rangeFraction,
                         innerTint: Color(hex: row.colorHex),
                         lineWidth: 6) {
                 Text(percent(p.percent / 100))
@@ -325,27 +336,67 @@ struct MetricsScreen: View {
             }
             .frame(width: 60, height: 60)
 
-            VStack(alignment: .leading, spacing: 2) {
+            // ACHIEVED / GOAL for each ring, one line per ring, each in its ring's colour.
+            //
+            // The rings alone didn't say what they were counting: the period pair was legible only
+            // because the raw total happened to be shown, and the inner ring's two numbers appeared
+            // nowhere at all. Colour is what ties a line to its ring, which is why no legend is
+            // needed and why these two colours must not be reused elsewhere on the card.
+            VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
                     Circle().fill(Color(hex: row.colorHex)).frame(width: 7, height: 7)
                     Text(p.name)
                         .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1).minimumScaleFactor(0.8)
                 }
-                Text(BudgetRows.duration(p.actualSeconds))
-                    .font(.system(size: 16, weight: .medium, design: .rounded))
-                    .lineLimit(1).minimumScaleFactor(0.8)
-                Text("\(p.target.direction.symbol) \(BudgetRows.duration(p.target.seconds))"
-                     + " / \(shortPeriod(p.target.period))")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+
+                // Outer ring: the budget's own period.
+                pair(achieved: p.actualSeconds,
+                     goal: p.target.seconds,
+                     symbol: p.target.direction.symbol,
+                     unit: shortPeriod(p.target.period),
+                     tint: tint,
+                     size: 14)
+
+                // Inner ring: the range the page is filtered to, with the target pro-rated onto it.
+                pair(achieved: p.rangeSeconds,
+                     goal: p.rangeExpectedSeconds,
+                     symbol: p.target.direction.symbol,
+                     unit: rangeUnitLabel,
+                     tint: Color(hex: row.colorHex),
+                     size: 11)
             }
             Spacer(minLength: 0)
         }
         .padding(Theme.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: Theme.cardRadius).fill(Theme.card))
+    }
+
+    /// `1h 4m / ≥2h` plus what the pair is measured over — one ring's whole story on one line.
+    ///
+    /// Achieved is weighted, goal is not, so which number is which reads without the labels: the thing
+    /// you did is emphasised, the thing you're aiming at is reference.
+    private func pair(achieved: TimeInterval, goal: TimeInterval, symbol: String, unit: String,
+                      tint: Color, size: CGFloat) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 3) {
+            Text(BudgetRows.duration(achieved))
+                .font(.system(size: size, weight: .semibold, design: .rounded))
+                .foregroundStyle(tint)
+            Text("/ \(symbol)\(BudgetRows.duration(goal))")
+                .font(.system(size: size - 2, design: .rounded))
+                .foregroundStyle(.secondary)
+            Text(unit)
+                .font(.system(size: size - 3))
+                .foregroundStyle(.tertiary)
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.7)
+    }
+
+    /// What the inner ring is measured over: "today" reads better than "day" for the common filter.
+    private var rangeUnitLabel: String {
+        range.unit == .day && range.isCurrent() ? "today" : range.unit.rawValue.lowercased()
     }
 
     private func shortPeriod(_ p: Target.Period) -> String {
@@ -633,45 +684,68 @@ struct MetricsScreen: View {
 
     // MARK: - Sessions
 
+    /// Row height, fixed because the `List` below is measured rather than scrolled.
+    private static let sessionRowHeight: CGFloat = 38
+
+    /// Sessions, with the system swipe-to-delete.
+    ///
+    /// A real `List`, not the `VStack` this was, because `.swipeActions` exists only on `List` rows —
+    /// there is no way to bolt the system behaviour (reveal on a short swipe, delete on a full one,
+    /// with the rubber-banding and the haptic) onto a stack. Hand-rolling it from a `DragGesture` gets
+    /// the geometry approximately right and the feel wrong.
+    ///
+    /// It replaces a permanent `✕` on every row, which advertised destruction 40 times over on a screen
+    /// you come to in order to read, and put a tap target where a mis-tap deletes tracked time.
+    ///
+    /// Scrolling is disabled and the height is computed, so the outer `ScrollView` stays in charge of
+    /// scrolling — two nested scrollers fight each other, and this one exists purely for its row
+    /// behaviour.
     private var sessionList: some View {
-        section("Sessions", subtitle: "\(data.sessions.count) blocks") {
+        section("Sessions", subtitle: "\(data.sessions.count) blocks · swipe to delete") {
             if data.sessions.isEmpty {
                 placeholder("No sessions on this day")
             } else {
-                VStack(spacing: 0) {
+                List {
                     ForEach(data.sessions, id: \.id) { s in
-                        HStack(spacing: 7) {
-                            Circle().fill(Color(hex: colorHex(for: s.projectID)))
-                                .frame(width: 7, height: 7)
-                            Text(model.task(id: s.projectID)?.name ?? "(deleted task)")
-                                .font(Theme.caption).lineLimit(1)
-                            if let id = s.deviceID, let label = model.deviceLabels[id],
-                               model.knownDevices.count > 1 {
-                                Text(label).font(Theme.captionSmall).foregroundStyle(.tertiary)
+                        sessionRow(s)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                            .listRowBackground(Color.clear)
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) { delete(s) } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
                             }
-                            Spacer()
-                            // WHEN it happened, not just how long — a list of durations can't be
-                            // matched up against the timeline above it.
-                            Text(sessionClock(s))
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.tertiary)
-                            Text(Format.compact(s.seconds()))
-                                .font(.system(size: 11, design: .monospaced))
-                            Button {
-                                delete(s)
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.vertical, 3)
-                        if s.id != data.sessions.last?.id { Divider() }
                     }
                 }
+                .listStyle(.plain)
+                .scrollDisabled(true)
+                .scrollContentBackground(.hidden)
+                .environment(\.defaultMinListRowHeight, Self.sessionRowHeight)
+                .frame(height: Self.sessionRowHeight * CGFloat(data.sessions.count))
             }
         }
+    }
+
+    private func sessionRow(_ s: Interval) -> some View {
+        HStack(spacing: 7) {
+            Circle().fill(Color(hex: colorHex(for: s.projectID)))
+                .frame(width: 7, height: 7)
+            Text(model.task(id: s.projectID)?.name ?? "(deleted task)")
+                .font(Theme.caption).lineLimit(1)
+            if let id = s.deviceID, let label = model.deviceLabels[id],
+               model.knownDevices.count > 1 {
+                Text(label).font(Theme.captionSmall).foregroundStyle(.tertiary)
+            }
+            Spacer()
+            // WHEN it happened, not just how long — a list of durations can't be matched up against
+            // the timeline above it.
+            Text(sessionClock(s))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.tertiary)
+            Text(Format.compact(s.seconds()))
+                .font(.system(size: 11, design: .monospaced))
+        }
+        .frame(height: Self.sessionRowHeight)
     }
 
     // MARK: - Shell

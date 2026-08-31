@@ -69,11 +69,11 @@ struct TasksView: View {
                     }
                     Button { showingAdd = true } label: { Image(systemName: "plus") }
                 }
-                ToolbarItem(placement: .topBarLeading) {
-                    if model.currentTaskID != nil {
-                        Button("Stop") { model.stop() }.font(Theme.caption)
-                    }
-                }
+                // No "Stop" here. On the Mac, stop and pause are meaningfully different — stop clears
+                // the current task so the menu bar goes idle. On the phone the hero card's pause button
+                // is right there and does the thing you actually want, so a second verb in the corner
+                // was a choice you had to think about for no benefit. Stopping is still available from
+                // the switcher and a Shortcut.
             }
             .alert("New task", isPresented: $showingAdd) {
                 TextField("Name, or name /project", text: $newTaskName)
