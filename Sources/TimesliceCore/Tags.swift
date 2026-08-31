@@ -102,14 +102,54 @@ public struct Target: Identifiable, Hashable, Sendable {
     public let seconds: TimeInterval
     public let direction: Direction
     public let period: Period
+    /// When this allocation started, and when it was retired (nil while live).
+    public let createdAt: Date
+    public let completedAt: Date?
+
+    public var isLive: Bool { completedAt == nil }
 
     public init(id: Int64, subject: TargetSubject, seconds: TimeInterval,
-                direction: Direction, period: Period) {
+                direction: Direction, period: Period,
+                createdAt: Date = Date(), completedAt: Date? = nil) {
         self.id = id
         self.subject = subject
         self.seconds = seconds
         self.direction = direction
         self.period = period
+        self.createdAt = createdAt
+        self.completedAt = completedAt
+    }
+}
+
+/// A retired allocation, measured over the span it was live for.
+public struct AllocationHistory: Identifiable, Sendable {
+    public let target: Target
+    public let name: String
+    /// The span actually measured: creation to completion.
+    public let start: Date
+    public let end: Date
+    /// Amount × whole-and-part periods in the span.
+    public let allocatedSeconds: TimeInterval
+    /// Unioned actual time on the subject across the span.
+    public let spentSeconds: TimeInterval
+
+    public var id: Int64 { target.id }
+    public var deltaSeconds: TimeInterval { spentSeconds - allocatedSeconds }
+
+    /// Spent as a share of allocated. Over 100 means more time went in than was set aside — which for
+    /// a ceiling is the failure and for a floor is the success, so the UI supplies the judgement.
+    public var percent: Double {
+        allocatedSeconds > 0 ? spentSeconds / allocatedSeconds * 100 : 0
+    }
+
+    public init(target: Target, name: String, start: Date, end: Date,
+                allocatedSeconds: TimeInterval, spentSeconds: TimeInterval) {
+        self.target = target
+        self.name = name
+        self.start = start
+        self.end = end
+        self.allocatedSeconds = allocatedSeconds
+        self.spentSeconds = spentSeconds
     }
 }
 
@@ -215,6 +255,30 @@ public struct TargetProgress: Identifiable, Sendable {
 }
 
 public enum TargetMath {
+
+    /// How much a live-for-`span` allocation added up to.
+    ///
+    /// Fractional periods count pro-rata: an allocation retired mid-week allocated part of that week,
+    /// not all or none of it. Computed from the CURRENT amount, so editing the number during an
+    /// allocation's life retroactively changes its history — acceptable because a retired allocation
+    /// stops changing, and the honest alternative is versioning every edit.
+    public static func allocated(_ target: Target, from start: Date, to end: Date) -> TimeInterval {
+        let days = max(0, end.timeIntervalSince(start)) / 86_400
+        return target.seconds * days / max(target.period.nominalDays, 0.0001)
+    }
+
+    /// Where to measure a budget's period from, given the range being viewed.
+    ///
+    /// `now` while the viewed range contains it — that's what keeps "on pace" meaningful — otherwise a
+    /// point inside the range. Anchoring at `now` unconditionally meant navigating back a week still
+    /// reported the CURRENT week, so the budget section contradicted every other number on the page.
+    ///
+    /// For a past range the anchor is one second inside the end, not the end itself: `rangeEnd` is
+    /// exclusive, so for a week it IS the following Sunday and would resolve to the wrong week.
+    public static func periodAnchor(rangeStart: Date, rangeEnd: Date, now: Date = Date()) -> Date {
+        if now >= rangeStart && now < rangeEnd { return now }
+        return now < rangeStart ? rangeStart : rangeEnd.addingTimeInterval(-1)
+    }
 
     /// Measure `target` against `actualSeconds` tracked over [rangeStart, rangeEnd).
     ///

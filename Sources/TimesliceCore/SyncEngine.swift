@@ -73,13 +73,21 @@ public struct SyncEngine {
             SyncPayload.TargetRecord(uid: $0.uid, subjectKind: $0.subjectKind,
                                      subjectUID: $0.subjectUID, seconds: $0.seconds,
                                      direction: $0.direction, period: $0.period,
-                                     updatedAt: $0.updatedAt)
+                                     updatedAt: $0.updatedAt, createdAt: $0.createdAt,
+                                     completedAt: $0.completedAt)
+        }
+
+        let feedbackRecords = try store.feedbackForExport().map {
+            SyncPayload.FeedbackRecord(uid: $0.uid, text: $0.text, deviceID: $0.deviceID,
+                                       createdAt: $0.createdAt, resolvedAt: $0.resolvedAt,
+                                       updatedAt: $0.updatedAt)
         }
 
         let tombs = try store.tombstoneRecords()
         return SyncPayload(deviceID: deviceID, deviceLabel: deviceLabel,
                            writtenAt: now.timeIntervalSince1970,
                            tags: tagRecords, tagLinks: linkRecords, targets: targetRecords,
+                           feedback: feedbackRecords,
                            tasks: taskRecords, projects: projectRecords,
                            intervals: intervalRecords, tombstones: tombs)
     }
@@ -256,8 +264,17 @@ public struct SyncEngine {
             if case .tag = subject, deleted.contains(t.subjectUID) { continue }
             if try store.applyRemoteTarget(uid: t.uid, subject: subject, seconds: t.seconds,
                                            direction: direction, period: period,
-                                           remoteUpdatedAt: t.updatedAt) {
+                                           remoteUpdatedAt: t.updatedAt,
+                                           createdAt: t.createdAt, completedAt: t.completedAt) {
                 report.targetsApplied += 1
+            }
+        }
+        // Notes: independent of everything else, so order doesn't matter — no subject to resolve.
+        for f in (remote.feedback ?? []) where !deleted.contains(f.uid) {
+            if try store.applyRemoteFeedback(uid: f.uid, text: f.text, deviceID: f.deviceID,
+                                             createdAt: f.createdAt, resolvedAt: f.resolvedAt,
+                                             remoteUpdatedAt: f.updatedAt) {
+                report.feedbackApplied += 1
             }
         }
         return report

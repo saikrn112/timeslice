@@ -13,18 +13,51 @@ struct TargetsSheet: View {
 
     @State private var tags: [Tag] = []
     @State private var targets: [Target] = []
+    /// Retired allocations with their allocated-vs-spent figures, for the history list.
+    @State private var history: [AllocationHistory] = []
     @State private var newTagName = ""
     /// Re-read after every edit. Cheap (a handful of rows) and avoids the whole class of bugs where
     /// the sheet shows something the store no longer agrees with.
     private func reload() {
         tags = (try? store.listTags()) ?? []
         targets = (try? store.listTargets()) ?? []
+        history = loadHistory()
+    }
+
+    /// Retired allocations, newest first, each measured over the span it was actually live for.
+    private func loadHistory() -> [AllocationHistory] {
+        let all = (try? store.listTargets(includeCompleted: true)) ?? []
+        let retired = all.filter { !$0.isLive }
+        guard !retired.isEmpty else { return [] }
+        let tasks = (try? store.listProjects(includeArchived: true)) ?? []
+        let tagsByID = Dictionary(uniqueKeysWithValues: tags.map { ($0.id, $0) })
+        let intervals = (try? store.intervals()) ?? []
+        let byTask = (try? store.effectiveTagIDsByTask()) ?? [:]
+
+        return retired.compactMap { t in
+            guard let end = t.completedAt else { return nil }
+            let name: String?
+            switch t.subject {
+            case .task(let id): name = tasks.first { $0.id == id }?.name
+            case .project(let id): name = appState.taskProjects.first { $0.id == id }?.name
+            case .tag(let id): name = tagsByID[id]?.name
+            }
+            guard let name else { return nil }   // subject deleted: nothing meaningful to show
+            let span = DateRange(unit: .all, start: t.createdAt, end: end)
+            let spent = Aggregations.secondsForSubject(t.subject, intervals: intervals, tasks: tasks,
+                                                       tagIDsByTask: byTask, range: span, now: end)
+            return AllocationHistory(
+                target: t, name: name, start: t.createdAt, end: end,
+                allocatedSeconds: TargetMath.allocated(t, from: t.createdAt, to: end),
+                spentSeconds: spent)
+        }
+        .sorted { $0.end > $1.end }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Tags & budgets").font(.headline)
+                Text("Tags & allocations").font(.headline)
                 Spacer()
                 Button("Done") { onClose() }.keyboardShortcut(.defaultAction)
             }
@@ -36,6 +69,7 @@ struct TargetsSheet: View {
                 VStack(alignment: .leading, spacing: 18) {
                     tagSection
                     projectSection
+                    historySection
                 }
                 .padding(16)
             }
@@ -97,7 +131,7 @@ struct TargetsSheet: View {
     private var projectSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("PROJECTS").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
-            Text("A budget can sit directly on a project too, without needing a tag.")
+            Text("An allocation can sit directly on a project too, without needing a tag.")
                 .font(.caption2).foregroundStyle(.secondary)
             if appState.taskProjects.isEmpty {
                 Text("No projects yet").font(.caption).foregroundStyle(.tertiary)
@@ -109,6 +143,64 @@ struct TargetsSheet: View {
             }
         }
     }
+
+    // MARK: - History
+
+    /// Retired allocations: what was set aside against what actually went in.
+    ///
+    /// Lives here rather than on the Metrics page because it's something you go and look at, not
+    /// something you glance at while working.
+    @ViewBuilder
+    private var historySection: some View {
+        if !history.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("PAST ALLOCATIONS")
+                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
+                Text("Allocated is the amount × the time it was live for. Editing an amount while an "
+                     + "allocation is running changes its history too — the figure isn't versioned.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(history) { row in historyRow(row) }
+            }
+        }
+    }
+
+    private func historyRow(_ row: AllocationHistory) -> some View {
+        // For a floor, spending less than allocated is the miss; for a ceiling it's the win. Same
+        // number, opposite meaning — so the arithmetic is shared and only the colour differs.
+        let under = row.deltaSeconds < 0
+        let good = row.target.direction == .atLeast ? !under : under
+        return HStack(spacing: 8) {
+            Circle().fill(good ? Color.green : Color.orange).frame(width: 7, height: 7)
+            Text(row.name).font(.callout).lineLimit(1).frame(width: 120, alignment: .leading)
+            Text("\(Self.dayFormatter.string(from: row.start)) – \(Self.dayFormatter.string(from: row.end))")
+                .font(.system(size: 10)).foregroundStyle(.tertiary)
+                .frame(width: 108, alignment: .leading)
+            Text("\(hoursLabel(row.allocatedSeconds)) set aside")
+                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 104, alignment: .trailing)
+            Text("\(hoursLabel(row.spentSeconds)) spent")
+                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
+                .foregroundStyle(.primary)
+                .frame(width: 92, alignment: .trailing)
+            Text("\(row.deltaSeconds < 0 ? "−" : "+")\(hoursLabel(abs(row.deltaSeconds)))")
+                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
+                .foregroundStyle(good ? .green : .orange)
+                .frame(width: 56, alignment: .trailing)
+            Spacer(minLength: 4)
+            Button("Reopen") {
+                try? store.setTargetCompleted(id: row.target.id, completed: false)
+                reload()
+            }
+            .buttonStyle(.link).font(.system(size: 10))
+            .help("Put it back in the live list")
+        }
+    }
+
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "d MMM"; return f
+    }()
 
     // MARK: - Shared row
 
@@ -163,6 +255,17 @@ struct TargetsSheet: View {
                 .labelsHidden()
                 .frame(width: 90)
 
+                // Retire rather than delete: the allocation leaves the live list but keeps its
+                // history, which is the whole reason for the state.
+                Button {
+                    try? store.setTargetCompleted(id: existing.id, completed: true)
+                    reload()
+                } label: {
+                    Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .help("Done with this — keeps it in history")
+
                 Button {
                     try? store.deleteTarget(id: existing.id)
                     reload()
@@ -170,9 +273,9 @@ struct TargetsSheet: View {
                     Image(systemName: "xmark").font(.system(size: 8, weight: .semibold))
                 }
                 .buttonStyle(.borderless)
-                .help("Remove this budget")
+                .help("Delete this allocation and its history")
             } else {
-                Button("Set budget") {
+                Button("Set allocation") {
                     // A weekly floor is the common case; both are one tap from here.
                     save(subject: subject, seconds: 5 * 3600, direction: .atLeast, period: .week)
                 }

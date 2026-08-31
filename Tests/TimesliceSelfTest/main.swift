@@ -1529,6 +1529,18 @@ func testDeviceLanes() {
               "a device's overlapping blocks count once, not twice")
     }
 
+    do { // a raw device id reads as its model in a narrow lane label
+        check(TimeslicePaths.shortDeviceName("iphone-b653") == "iphone",
+              "the 4-hex disambiguator is dropped for display")
+        check(TimeslicePaths.shortDeviceName("macbook-air-1e01") == "macbook-air",
+              "a model slug containing a dash survives")
+        check(TimeslicePaths.shortDeviceName("work") == "work", "a plain name is untouched")
+        check(TimeslicePaths.shortDeviceName("my-desk-mac") == "my-desk-mac",
+              "a user-chosen name whose last part isn't 4 hex chars is left alone")
+        check(TimeslicePaths.shortDeviceName("80a9970a4461-57ec") == "80a9970a4461",
+              "and a MAC-address-shaped id still loses only its suffix")
+    }
+
     do { // ordering is stable and named devices come before unattributed rows
         let segs = Aggregations.daySegments(
             intervals: [iv(1, 9, 10, nil), iv(2, 11, 12, "b")], day: day, calendar: cal)
@@ -2223,6 +2235,42 @@ func testTargetMath() {
                                     rangeStart: weekStart, rangeEnd: weekEnd,
                                     rangeSeconds: 0, viewedRangeDays: 0)
         check(p.rangeExpectedSeconds == 0 && p.rangePercent == 0, "inert, not NaN")
+    }
+
+    do { // the reported bug: a past range must report ITS period, not the current one
+        let now = date(2026, 8, 28, 12, 0)                     // a Friday
+        // Viewing the week two weeks earlier.
+        let pastStart = date(2026, 8, 10, 0, 0), pastEnd = date(2026, 8, 17, 0, 0)
+        let anchor = TargetMath.periodAnchor(rangeStart: pastStart, rangeEnd: pastEnd, now: now)
+        check(anchor >= pastStart && anchor < pastEnd,
+              "the anchor lands inside the range being viewed, not on today")
+        // One second inside the end, not the end itself: rangeEnd is exclusive, so for a week it is
+        // the FOLLOWING Sunday and would resolve to the wrong week.
+        check(anchor == pastEnd.addingTimeInterval(-1), "and at the last instant of it")
+    }
+
+    do { // while you're on the current range the anchor stays `now`, so pace still means something
+        let now = date(2026, 8, 26, 9, 0)
+        let anchor = TargetMath.periodAnchor(rangeStart: date(2026, 8, 24, 0, 0),
+                                            rangeEnd: date(2026, 8, 31, 0, 0), now: now)
+        check(anchor == now, "an anchor inside the range is `now` itself")
+    }
+
+    do { // a future range hasn't started; anchor at its beginning rather than extrapolating
+        let now = date(2026, 8, 1, 0, 0)
+        let anchor = TargetMath.periodAnchor(rangeStart: date(2026, 9, 7, 0, 0),
+                                            rangeEnd: date(2026, 9, 14, 0, 0), now: now)
+        check(anchor == date(2026, 9, 7, 0, 0), "a future range anchors at its start")
+    }
+
+    do { // a past period reads as fully elapsed, so a missed floor is behind rather than "on pace"
+        let p = TargetMath.progress(target: weekly(30, .atLeast), name: "office",
+                                    actualSeconds: 5 * 3600,
+                                    rangeStart: date(2026, 8, 10, 0, 0),
+                                    rangeEnd: date(2026, 8, 17, 0, 0),
+                                    now: date(2026, 8, 28, 12, 0))
+        check(p.elapsedFraction == 1, "a finished week is fully elapsed")
+        check(p.verdict == .behind, "and a floor it missed is behind, not still on pace")
     }
 
     do { // a zero-length range can't divide by zero
@@ -2997,6 +3045,179 @@ func testDemoSeedInvariants() throws {
           "a valid database needs ONE timeline lane; lanes only appear for anomalies")
 }
 
+// MARK: - Allocation done state and history
+
+func testAllocationLifecycle() throws {
+    print("Allocation lifecycle:")
+
+    do { // retiring one takes it out of the live list but keeps it for history
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let g = try store.upsertTaskProject(name: "recon paper", colorHex: "#fff")
+        try store.setTarget(subject: .project(g), seconds: 7 * 3600, direction: .atLeast, period: .week)
+        let id = try store.listTargets()[0].id
+
+        try store.setTargetCompleted(id: id, completed: true)
+        check(try store.listTargets().isEmpty, "a retired allocation leaves the live list")
+        let all = try store.listTargets(includeCompleted: true)
+        check(all.count == 1 && !all[0].isLive, "but is still there, marked done")
+        check(all[0].completedAt != nil, "with when it ended")
+
+        try store.setTargetCompleted(id: id, completed: false)
+        check(try store.listTargets().count == 1, "and reopening puts it back")
+    }
+
+    do { // a subject can carry a NEW allocation after the old one is retired
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let g = try store.upsertTaskProject(name: "recon paper", colorHex: "#fff")
+        try store.setTarget(subject: .project(g), seconds: 7 * 3600, direction: .atLeast, period: .week)
+        try store.setTargetCompleted(id: try store.listTargets()[0].id, completed: true)
+        // The unique index is scoped to live rows, so this must be allowed rather than rejected.
+        try store.setTarget(subject: .project(g), seconds: 3 * 3600, direction: .atMost, period: .week)
+        check(try store.listTargets().count == 1, "one live allocation")
+        check(try store.listTargets(includeCompleted: true).count == 2,
+              "alongside the retired one — starting again is normal, not a conflict")
+    }
+
+    do { // editing a live allocation still edits rather than duplicating
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let g = try store.upsertTaskProject(name: "x", colorHex: "#fff")
+        try store.setTarget(subject: .project(g), seconds: 3600, direction: .atLeast, period: .week)
+        try store.setTarget(subject: .project(g), seconds: 7200, direction: .atMost, period: .day)
+        let live = try store.listTargets()
+        check(live.count == 1 && live[0].seconds == 7200 && live[0].period == .day,
+              "the live row is updated in place")
+    }
+
+    do { // allocated is the amount pro-rated over the span it was live
+        let t = Target(id: 1, subject: .tag(1), seconds: 7 * 3600, direction: .atLeast, period: .week)
+        let start = date(2026, 8, 3, 0, 0)
+        check(approx(TargetMath.allocated(t, from: start, to: date(2026, 8, 31, 0, 0)) / 3600, 28, 0.1),
+              "7h/week live for 4 weeks allocated 28h")
+        // A part-week counts pro-rata rather than all-or-nothing.
+        check(approx(TargetMath.allocated(t, from: start, to: date(2026, 8, 6, 12, 0)) / 3600, 3.5, 0.1),
+              "retired mid-week allocates that fraction of the week")
+        check(TargetMath.allocated(t, from: start, to: start) == 0, "a zero span allocates nothing")
+    }
+
+    do { // the done state SYNCS — otherwise it's retired on one Mac and live on the other
+        let (a, ua) = try makeStore(); defer { try? FileManager.default.removeItem(at: ua) }
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        let ea = SyncEngine(store: a, deviceID: "A"), eb = SyncEngine(store: b, deviceID: "B")
+        let g = try a.upsertTaskProject(name: "recon paper", colorHex: "#fff")
+        try a.setTarget(subject: .project(g), seconds: 7 * 3600, direction: .atLeast, period: .week)
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listTargets().count == 1, "precondition: B has it live")
+
+        try a.setTargetCompleted(id: try a.listTargets()[0].id, completed: true)
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listTargets().isEmpty, "marking done propagates")
+        let bAll = try b.listTargets(includeCompleted: true)
+        check(bAll.count == 1 && !bAll[0].isLive, "and B keeps it as history, not deletes it")
+
+        // Reopening propagates too.
+        try a.setTargetCompleted(id: try a.listTargets(includeCompleted: true)[0].id, completed: false)
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listTargets().count == 1, "and so does reopening")
+    }
+
+    do { // created_at survives the trip, or history would restart on the peer
+        let (a, ua) = try makeStore(); defer { try? FileManager.default.removeItem(at: ua) }
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        let ea = SyncEngine(store: a, deviceID: "A"), eb = SyncEngine(store: b, deviceID: "B")
+        let g = try a.upsertTaskProject(name: "x", colorHex: "#fff")
+        try a.setTarget(subject: .project(g), seconds: 3600, direction: .atLeast, period: .week)
+        let mine = try a.listTargets()[0]
+        _ = try eb.merge(try ea.buildPayload())
+        let theirs = try b.listTargets()[0]
+        check(abs(theirs.createdAt.timeIntervalSince(mine.createdAt)) < 2,
+              "the start date carries, so the span isn't reset to the merge time")
+    }
+}
+
+// MARK: - Notes (feedback)
+
+func testFeedback() throws {
+    print("Notes:")
+
+    do { // written, listed newest first, stamped with the device that wrote it
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        store.localDeviceID = "iphone-b653"
+        try store.addFeedback("budget row feels cramped", at: date(2026, 8, 30, 9, 0))
+        try store.addFeedback("lane labels overlap", at: date(2026, 8, 31, 9, 0))
+        let notes = try store.listFeedback()
+        check(notes.count == 2, "both notes are kept")
+        check(notes[0].text == "lane labels overlap", "newest first")
+        check(notes[0].deviceID == "iphone-b653", "stamped with the device it was written on")
+        check(notes.allSatisfy(\.isOpen), "and open by default")
+    }
+
+    do { // blank input is not a note
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        check(try store.addFeedback("   \n  ") == nil, "whitespace alone doesn't create a note")
+        check(try store.listFeedback().isEmpty, "and nothing is stored")
+    }
+
+    do { // resolving hides it from the open list without losing it
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        try store.addFeedback("fix the thing")
+        let id = try store.listFeedback()[0].id
+        try store.setFeedbackResolved(id: id, resolved: true)
+        check(try store.listFeedback(includeResolved: false).isEmpty, "done notes leave the open list")
+        check(try store.listFeedback().count == 1, "but are still there")
+        try store.setFeedbackResolved(id: id, resolved: false)
+        check(try store.listFeedback(includeResolved: false).count == 1, "and can be reopened")
+    }
+
+    do { // summary is the first line, so a multi-line note fits a one-line row
+        let n = Feedback(id: 1, text: "first line\nsecond line", createdAt: Date(),
+                         deviceID: nil, resolvedAt: nil)
+        check(n.summary == "first line", "the summary is the first line only")
+    }
+
+    do { // SYNC: a note written on one device reaches the other, keeping its origin
+        let (a, ua) = try makeStore(); defer { try? FileManager.default.removeItem(at: ua) }
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        a.localDeviceID = "iphone-b653"; b.localDeviceID = "work"
+        let ea = SyncEngine(store: a, deviceID: "A"), eb = SyncEngine(store: b, deviceID: "B")
+        try a.addFeedback("noticed on the phone", at: date(2026, 8, 30, 9, 0))
+        _ = try eb.merge(try ea.buildPayload())
+        let got = try b.listFeedback()
+        check(got.count == 1 && got[0].text == "noticed on the phone", "the note arrives")
+        check(got[0].deviceID == "iphone-b653",
+              "attributed to the device that WROTE it, not the one that synced it")
+        check(abs(got[0].createdAt.timeIntervalSince(date(2026, 8, 30, 9, 0))) < 2,
+              "with its original timestamp, not the merge time")
+    }
+
+    do { // resolving on one device propagates, and a delete stays deleted
+        let (a, ua) = try makeStore(); defer { try? FileManager.default.removeItem(at: ua) }
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        let ea = SyncEngine(store: a, deviceID: "A"), eb = SyncEngine(store: b, deviceID: "B")
+        try a.addFeedback("something")
+        _ = try eb.merge(try ea.buildPayload())
+        try a.setFeedbackResolved(id: try a.listFeedback()[0].id, resolved: true)
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listFeedback(includeResolved: false).isEmpty, "marking done propagates")
+
+        try a.deleteFeedback(id: try a.listFeedback()[0].id)
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listFeedback().isEmpty, "a deleted note is deleted on the peer too")
+        _ = try eb.merge(try ea.buildPayload())
+        check(try b.listFeedback().isEmpty, "and the tombstone holds against a re-send")
+    }
+
+    do { // idempotent, like every other merge
+        let (a, ua) = try makeStore(); defer { try? FileManager.default.removeItem(at: ua) }
+        let (b, ub) = try makeStore(); defer { try? FileManager.default.removeItem(at: ub) }
+        let ea = SyncEngine(store: a, deviceID: "A"), eb = SyncEngine(store: b, deviceID: "B")
+        try a.addFeedback("once")
+        let payload = try ea.buildPayload()
+        _ = try eb.merge(payload)
+        check(try eb.merge(payload).feedbackApplied == 0, "a repeat merge changes nothing")
+        check(try b.listFeedback().count == 1, "and doesn't duplicate the note")
+    }
+}
+
 // MARK: - Run
 
 do {
@@ -3037,6 +3258,10 @@ do {
     testLanesByOverlap()
     testReversedClientID()
     try testDemoSeedInvariants()
+    try testAllocationLifecycle()
+    try testFeedback()
+    testTagTotals()
+    testTargetMath()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1

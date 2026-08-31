@@ -4,9 +4,18 @@ import TimesliceCore
 /// Compact settings for the metrics: daily goal, deep-block threshold, trend window.
 struct SettingsPanel: View {
     @ObservedObject var settings: AppSettings
+    /// The store, for the notes sheet. Passed in rather than reached for through the sync
+    /// controller, which owns its copy privately and shouldn't be a back door to it.
+    let store: IntervalStore
     /// nil when the app is running without sync wired up (tests, previews).
     var sync: SyncController? = nil
     var auth: GoogleAuth? = nil
+
+    @State private var showNotes = false
+
+    /// Read once per panel appearance, not per render — a computed DB read in a view body re-queries
+    /// on every redraw.
+    @State private var openNoteCount = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -68,10 +77,34 @@ struct SettingsPanel: View {
             )
 
             Divider()
+
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Notes")
+                    Text("jotted on any device, synced here")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button(openNoteCount > 0 ? "Open (\(openNoteCount))" : "Open") {
+                    showNotes = true
+                }
+                .buttonStyle(.link).font(.system(size: 11))
+            }
+
+            Divider()
             syncSection
         }
         .padding(16)
         .frame(width: 360)
+        .onAppear {
+            openNoteCount = ((try? store.listFeedback(includeResolved: false)) ?? []).count
+        }
+        .sheet(isPresented: $showNotes) {
+            FeedbackSheet(store: store) {
+                showNotes = false
+                openNoteCount = ((try? store.listFeedback(includeResolved: false)) ?? []).count
+            }
+        }
     }
 
     /// Delegates to an observing child: `@ObservedObject` can't be optional, and a plain `var`

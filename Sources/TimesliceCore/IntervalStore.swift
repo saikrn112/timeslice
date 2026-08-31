@@ -192,7 +192,21 @@ public final class IntervalStore {
                 updated_at   REAL
             )
             """, nil, nil, nil)
+        // When an allocation started and, once retired, when it finished. Needed for the historical
+        // "allocated vs spent" view: without a start there's no span to measure over.
+        //
+        // created_at backfills to NOW for existing rows rather than to their real creation time,
+        // which isn't recorded. Their history therefore begins today — wrong but bounded, and the
+        // alternative (guessing) would be worse.
+        _ = sqlite3_exec(db, "ALTER TABLE targets ADD COLUMN created_at REAL", nil, nil, nil)
+        _ = sqlite3_exec(db, "ALTER TABLE targets ADD COLUMN completed_at REAL", nil, nil, nil)
+        _ = sqlite3_exec(db, "UPDATE targets SET created_at = strftime('%s','now') WHERE created_at IS NULL", nil, nil, nil)
+
         // ONE target per subject — the period is a property of it, not part of its identity.
+        //
+        // Scoped to LIVE allocations only: retiring one and starting a fresh allocation for the same
+        // subject later is the normal case, and a plain unique index would forbid it.
+        _ = sqlite3_exec(db, "DROP INDEX IF EXISTS idx_targets_one_per_subject", nil, nil, nil)
         //
         // Keying on (subject, period) meant changing the period in the editor INSERTED a second
         // target instead of moving the existing one, and the editor only ever showed the first: the
@@ -203,8 +217,14 @@ public final class IntervalStore {
         // unique index below would otherwise fail and leave the old one in place.
         _ = sqlite3_exec(db, "DELETE FROM targets WHERE id NOT IN (SELECT MAX(id) FROM targets GROUP BY subject_kind, subject_id)", nil, nil, nil)
         _ = sqlite3_exec(db, "DROP INDEX IF EXISTS idx_targets_subject", nil, nil, nil)
-        _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_one_per_subject ON targets(subject_kind, subject_id)", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_one_live_per_subject ON targets(subject_kind, subject_id) WHERE completed_at IS NULL", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_targets_uid ON targets(uid)", nil, nil, nil)
+
+        // Notes written while using the app. Its own table rather than a flag on an existing
+        // row: a note has no duration and is never aggregated, so keeping it out of the
+        // interval tables means it cannot accidentally land in a time total.
+        _ = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, device_id TEXT, created_at REAL NOT NULL, resolved_at REAL, uid TEXT, updated_at REAL)", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_uid ON feedback(uid)", nil, nil, nil)
 
         try backfillSyncColumns()
     }
@@ -215,7 +235,8 @@ public final class IntervalStore {
         let now = Date().timeIntervalSince1970
         // tags/tag_links/targets included: a row with no uid can't be addressed by a peer, so it
         // would stay invisible to sync forever.
-        for table in ["intervals", "projects", "task_projects", "tags", "tag_links", "targets"] {
+        for table in ["intervals", "projects", "task_projects", "tags", "tag_links", "targets",
+                      "feedback"] {
             let stmt = try prepare("SELECT id FROM \(table) WHERE uid IS NULL")
             var ids: [Int64] = []
             while sqlite3_step(stmt) == SQLITE_ROW { ids.append(sqlite3_column_int64(stmt, 0)) }
@@ -242,7 +263,7 @@ public final class IntervalStore {
         }
 
         // Seed updated_at so LWW has a baseline; real edits overwrite it.
-        for table in ["projects", "task_projects", "tags", "tag_links", "targets"] {
+        for table in ["projects", "task_projects", "tags", "tag_links", "targets", "feedback"] {
             let stmt = try prepare("UPDATE \(table) SET updated_at = ? WHERE updated_at IS NULL")
             sqlite3_bind_double(stmt, 1, now)
             try step(stmt)
@@ -601,6 +622,7 @@ public final class IntervalStore {
             case "tag": table = "tags"
             case "tag_link": table = "tag_links"
             case "target": table = "targets"
+            case "feedback": table = "feedback"
             default: return          // an unknown kind from a newer build: record it, touch nothing
             }
             if let id = try localID(table: table, uid: uid) {
@@ -1230,8 +1252,13 @@ public final class IntervalStore {
 
     // MARK: - Targets
 
-    public func listTargets() throws -> [Target] {
-        let stmt = try prepare("SELECT id, subject_kind, subject_id, seconds, direction, period FROM targets")
+    /// Allocations. LIVE ones by default — a retired allocation shouldn't reappear in the section
+    /// that asks "am I on track", only in history.
+    public func listTargets(includeCompleted: Bool = false) throws -> [Target] {
+        let sql = "SELECT id, subject_kind, subject_id, seconds, direction, period, "
+            + "COALESCE(created_at, 0), completed_at FROM targets"
+            + (includeCompleted ? "" : " WHERE completed_at IS NULL")
+        let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         var out: [Target] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
@@ -1240,9 +1267,23 @@ public final class IntervalStore {
                   let period = Target.Period(rawValue: text(stmt, 5)) else { continue }
             out.append(Target(id: sqlite3_column_int64(stmt, 0), subject: subject,
                               seconds: sqlite3_column_double(stmt, 3),
-                              direction: direction, period: period))
+                              direction: direction, period: period,
+                              createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6)),
+                              completedAt: sqlite3_column_type(stmt, 7) == SQLITE_NULL
+                                  ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7))))
         }
         return out
+    }
+
+    /// Retire an allocation, or bring it back. Never deletes: the point is to keep it for history.
+    public func setTargetCompleted(id: Int64, completed: Bool, at when: Date = Date()) throws {
+        let stmt = try prepare("UPDATE targets SET completed_at = ?, updated_at = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        if completed { sqlite3_bind_double(stmt, 1, when.timeIntervalSince1970) }
+        else { sqlite3_bind_null(stmt, 1) }
+        sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(stmt, 3, id)
+        try step(stmt)
     }
 
     /// Create or replace the target for a subject. Exactly one per subject: changing the amount,
@@ -1250,9 +1291,11 @@ public final class IntervalStore {
     @discardableResult
     public func setTarget(subject: TargetSubject, seconds: TimeInterval,
                           direction: Target.Direction, period: Target.Period) throws -> Int64 {
-        let sql = "INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at) "
-            + "VALUES (?, ?, ?, ?, ?, ?, ?) "
-            + "ON CONFLICT(subject_kind, subject_id) DO UPDATE SET "
+        // The conflict target names the partial index's predicate too, so this upserts against the
+        // LIVE allocation and a retired one for the same subject is left alone.
+        let sql = "INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at, created_at) "
+            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            + "ON CONFLICT(subject_kind, subject_id) WHERE completed_at IS NULL DO UPDATE SET "
             + "seconds = excluded.seconds, direction = excluded.direction, "
             + "period = excluded.period, updated_at = excluded.updated_at"
         let stmt = try prepare(sql)
@@ -1264,6 +1307,7 @@ public final class IntervalStore {
         bindText(stmt, 5, period.rawValue)
         bindText(stmt, 6, UUID().uuidString)
         sqlite3_bind_double(stmt, 7, Date().timeIntervalSince1970)
+        sqlite3_bind_double(stmt, 8, Date().timeIntervalSince1970)
         try step(stmt)
         return sqlite3_last_insert_rowid(db)
     }
@@ -1353,33 +1397,52 @@ public final class IntervalStore {
     @discardableResult
     public func applyRemoteTarget(uid: String, subject: TargetSubject, seconds: TimeInterval,
                                   direction: Target.Direction, period: Target.Period,
-                                  remoteUpdatedAt: TimeInterval) throws -> Bool {
-        let existing = try prepare("SELECT id, updated_at FROM targets WHERE subject_kind = ? AND subject_id = ? LIMIT 1")
-        bindText(existing, 1, subject.kind)
-        sqlite3_bind_int64(existing, 2, subject.id)
+                                  remoteUpdatedAt: TimeInterval,
+                                  createdAt: TimeInterval? = nil,
+                                  completedAt: TimeInterval? = nil) throws -> Bool {
+        // By UID first — that's the row's identity. Matching on the subject alone broke as soon as
+        // the done state existed: a REOPENED allocation has no live row for its subject here, so the
+        // subject lookup missed and the insert collided with the uid we already held.
         var mineID: Int64?
         var mineUpdated: Double = 0
-        if sqlite3_step(existing) == SQLITE_ROW {
-            mineID = sqlite3_column_int64(existing, 0)
-            mineUpdated = sqlite3_column_type(existing, 1) == SQLITE_NULL
-                ? 0 : sqlite3_column_double(existing, 1)
+        let byUID = try prepare("SELECT id, COALESCE(updated_at, 0) FROM targets WHERE uid = ? LIMIT 1")
+        bindText(byUID, 1, uid)
+        if sqlite3_step(byUID) == SQLITE_ROW {
+            mineID = sqlite3_column_int64(byUID, 0)
+            mineUpdated = sqlite3_column_double(byUID, 1)
         }
-        sqlite3_finalize(existing)
+        sqlite3_finalize(byUID)
+
+        if mineID == nil {
+            // No row with that uid: fall back to the LIVE allocation for this subject, which is the
+            // convergence case — two devices each set one up independently, so they're the same
+            // intention under different uids.
+            let bySubject = try prepare("SELECT id, COALESCE(updated_at, 0) FROM targets WHERE subject_kind = ? AND subject_id = ? AND completed_at IS NULL LIMIT 1")
+            bindText(bySubject, 1, subject.kind)
+            sqlite3_bind_int64(bySubject, 2, subject.id)
+            if sqlite3_step(bySubject) == SQLITE_ROW {
+                mineID = sqlite3_column_int64(bySubject, 0)
+                mineUpdated = sqlite3_column_double(bySubject, 1)
+            }
+            sqlite3_finalize(bySubject)
+        }
 
         if let mineID {
             guard remoteUpdatedAt > mineUpdated else { return false }
-            let stmt = try prepare("UPDATE targets SET seconds = ?, direction = ?, period = ?, uid = ?, updated_at = ? WHERE id = ?")
+            let stmt = try prepare("UPDATE targets SET seconds = ?, direction = ?, period = ?, uid = ?, updated_at = ?, completed_at = ? WHERE id = ?")
             defer { sqlite3_finalize(stmt) }
             sqlite3_bind_double(stmt, 1, seconds)
             bindText(stmt, 2, direction.rawValue)
             bindText(stmt, 3, period.rawValue)
             bindText(stmt, 4, uid)
             sqlite3_bind_double(stmt, 5, remoteUpdatedAt)
-            sqlite3_bind_int64(stmt, 6, mineID)
+            if let completedAt { sqlite3_bind_double(stmt, 6, completedAt) }
+            else { sqlite3_bind_null(stmt, 6) }
+            sqlite3_bind_int64(stmt, 7, mineID)
             try step(stmt)
             return true
         }
-        let stmt = try prepare("INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        let stmt = try prepare("INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, subject.kind)
         sqlite3_bind_int64(stmt, 2, subject.id)
@@ -1388,6 +1451,11 @@ public final class IntervalStore {
         bindText(stmt, 5, period.rawValue)
         bindText(stmt, 6, uid)
         sqlite3_bind_double(stmt, 7, remoteUpdatedAt)
+        // Fall back to the sender's update time when it predates created_at — better than "now",
+        // which would restart the history of an allocation that has been running for weeks.
+        sqlite3_bind_double(stmt, 8, createdAt ?? remoteUpdatedAt)
+        if let completedAt { sqlite3_bind_double(stmt, 9, completedAt) }
+        else { sqlite3_bind_null(stmt, 9) }
         try step(stmt)
         return true
     }
@@ -1415,17 +1483,23 @@ public final class IntervalStore {
     /// Budgets with their subject resolved to a uid — the export half.
     public func targetsForExport() throws -> [(uid: String, subjectKind: String, subjectUID: String,
                                                seconds: TimeInterval, direction: String,
-                                               period: String, updatedAt: TimeInterval)] {
-        let stmt = try prepare("SELECT uid, subject_kind, subject_id, seconds, direction, period, COALESCE(updated_at, 0) FROM targets WHERE uid IS NOT NULL")
+                                               period: String, updatedAt: TimeInterval,
+                                               createdAt: TimeInterval, completedAt: TimeInterval?)] {
+        // Completed ones travel too: history is the point of keeping them, so a peer must learn both
+        // that an allocation ended and when.
+        let stmt = try prepare("SELECT uid, subject_kind, subject_id, seconds, direction, period, COALESCE(updated_at, 0), COALESCE(created_at, 0), completed_at FROM targets WHERE uid IS NOT NULL")
         defer { sqlite3_finalize(stmt) }
-        var out: [(String, String, String, TimeInterval, String, String, TimeInterval)] = []
+        var out: [(String, String, String, TimeInterval, String, String, TimeInterval,
+                   TimeInterval, TimeInterval?)] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let kind = text(stmt, 1)
             guard let table = Self.table(forSubjectKind: kind),
                   let subjectUID = try uidLocked(table: table, id: sqlite3_column_int64(stmt, 2))
             else { continue }
             out.append((text(stmt, 0), kind, subjectUID, sqlite3_column_double(stmt, 3),
-                        text(stmt, 4), text(stmt, 5), sqlite3_column_double(stmt, 6)))
+                        text(stmt, 4), text(stmt, 5), sqlite3_column_double(stmt, 6),
+                        sqlite3_column_double(stmt, 7),
+                        sqlite3_column_type(stmt, 8) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 8)))
         }
         return out
     }
@@ -1441,6 +1515,110 @@ public final class IntervalStore {
             out.append((tag, text(stmt, 4), sqlite3_column_double(stmt, 5)))
         }
         return out
+    }
+
+    // MARK: - Feedback
+
+    /// Newest first — a note list is read from the top.
+    public func listFeedback(includeResolved: Bool = true) throws -> [Feedback] {
+        let sql = "SELECT id, text, device_id, created_at, resolved_at FROM feedback"
+            + (includeResolved ? "" : " WHERE resolved_at IS NULL")
+            + " ORDER BY created_at DESC"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        var out: [Feedback] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(Feedback(
+                id: sqlite3_column_int64(stmt, 0),
+                text: text(stmt, 1),
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3)),
+                deviceID: sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : text(stmt, 2),
+                resolvedAt: sqlite3_column_type(stmt, 4) == SQLITE_NULL
+                    ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4))))
+        }
+        return out
+    }
+
+    /// Record a note. Stamped with the local device so "where was I" is answerable later.
+    @discardableResult
+    public func addFeedback(_ body: String, at when: Date = Date()) throws -> Int64? {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let stmt = try prepare("INSERT INTO feedback (text, device_id, created_at, uid, updated_at) VALUES (?, ?, ?, ?, ?)")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, trimmed)
+        if let localDeviceID { bindText(stmt, 2, localDeviceID) } else { sqlite3_bind_null(stmt, 2) }
+        sqlite3_bind_double(stmt, 3, when.timeIntervalSince1970)
+        bindText(stmt, 4, UUID().uuidString)
+        sqlite3_bind_double(stmt, 5, Date().timeIntervalSince1970)
+        try step(stmt)
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    public func setFeedbackResolved(id: Int64, resolved: Bool, at when: Date = Date()) throws {
+        let stmt = try prepare("UPDATE feedback SET resolved_at = ?, updated_at = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        if resolved { sqlite3_bind_double(stmt, 1, when.timeIntervalSince1970) }
+        else { sqlite3_bind_null(stmt, 1) }
+        sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(stmt, 3, id)
+        try step(stmt)
+    }
+
+    /// Really delete one — for a note written by mistake. Tombstoned, or the peer re-adds it.
+    public func deleteFeedback(id: Int64) throws {
+        try transaction {
+            try recordTombstoneLocked(uid: try uidLocked(table: "feedback", id: id), kind: "feedback")
+            let stmt = try prepare("DELETE FROM feedback WHERE id = ?")
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int64(stmt, 1, id)
+            try step(stmt)
+        }
+    }
+
+    /// The export half: notes with their uids.
+    public func feedbackForExport() throws -> [(uid: String, text: String, deviceID: String?,
+                                                createdAt: TimeInterval, resolvedAt: TimeInterval?,
+                                                updatedAt: TimeInterval)] {
+        let stmt = try prepare("SELECT uid, text, device_id, created_at, resolved_at, COALESCE(updated_at, 0) FROM feedback WHERE uid IS NOT NULL")
+        defer { sqlite3_finalize(stmt) }
+        var out: [(String, String, String?, TimeInterval, TimeInterval?, TimeInterval)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append((text(stmt, 0), text(stmt, 1),
+                        sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : text(stmt, 2),
+                        sqlite3_column_double(stmt, 3),
+                        sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 4),
+                        sqlite3_column_double(stmt, 5)))
+        }
+        return out
+    }
+
+    /// Insert or update a note from a peer, keyed on its uid, newest write winning.
+    @discardableResult
+    public func applyRemoteFeedback(uid: String, text body: String, deviceID: String?,
+                                    createdAt: TimeInterval, resolvedAt: TimeInterval?,
+                                    remoteUpdatedAt: TimeInterval) throws -> Bool {
+        if let id = try localID(table: "feedback", uid: uid) {
+            guard remoteUpdatedAt > (try updatedAt(table: "feedback", id: id) ?? 0) else { return false }
+            let stmt = try prepare("UPDATE feedback SET text = ?, resolved_at = ?, updated_at = ? WHERE id = ?")
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, body)
+            if let resolvedAt { sqlite3_bind_double(stmt, 2, resolvedAt) } else { sqlite3_bind_null(stmt, 2) }
+            sqlite3_bind_double(stmt, 3, remoteUpdatedAt)
+            sqlite3_bind_int64(stmt, 4, id)
+            try step(stmt)
+            return true
+        }
+        let stmt = try prepare("INSERT INTO feedback (text, device_id, created_at, resolved_at, uid, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, body)
+        if let deviceID { bindText(stmt, 2, deviceID) } else { sqlite3_bind_null(stmt, 2) }
+        sqlite3_bind_double(stmt, 3, createdAt)
+        if let resolvedAt { sqlite3_bind_double(stmt, 4, resolvedAt) } else { sqlite3_bind_null(stmt, 4) }
+        bindText(stmt, 5, uid)
+        sqlite3_bind_double(stmt, 6, remoteUpdatedAt)
+        try step(stmt)
+        return true
     }
 
     // MARK: - Transactions

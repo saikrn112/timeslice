@@ -97,7 +97,8 @@ struct MainWindowView: View {
         .buttonStyle(.borderless)
         .help("Settings")
         .popover(isPresented: $showSettings, arrowEdge: .bottom) {
-            SettingsPanel(settings: settings, sync: sync, auth: auth)
+            SettingsPanel(settings: settings, store: appState.storeForEditing,
+                          sync: sync, auth: auth)
         }
     }
 

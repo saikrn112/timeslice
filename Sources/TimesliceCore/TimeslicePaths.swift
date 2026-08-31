@@ -30,6 +30,19 @@ public enum TimeslicePaths {
     ///
     /// Deliberately NOT synced: restoring another device's id would make two devices claim the
     /// same identity, so each would ignore the other's files.
+    /// A device id trimmed for display: `iphone-b653` reads as `iphone`.
+    ///
+    /// Ids are `<model-slug>-<4 hex>`; the suffix only exists to keep two machines of the same model
+    /// apart. It's noise in a 40pt timeline lane label, so it's dropped for display and kept in the
+    /// tooltip. Only a trailing 4-char hex group is trimmed, so a user-chosen name containing a dash
+    /// survives intact.
+    public static func shortDeviceName(_ id: String) -> String {
+        let parts = id.split(separator: "-")
+        guard parts.count >= 2, let last = parts.last, last.count == 4,
+              last.allSatisfy({ $0.isHexDigit }) else { return id }
+        return parts.dropLast().joined(separator: "-")
+    }
+
     public static func deviceID(databaseURL: URL = defaultDatabaseURL()) -> String {
         let file = databaseURL.deletingLastPathComponent().appendingPathComponent("device-id")
         if let existing = try? String(contentsOf: file, encoding: .utf8) {

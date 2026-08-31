@@ -284,7 +284,7 @@ struct MetricsView: View {
                         xStart: .value("From", seg.startHour),
                         xEnd: .value("To", seg.endHour),
                         y: .value("Lane", lanes > 1 ? "\(seg.lane)" : ""),
-                        height: .fixed(lanes > 1 ? max(24, 110 / Double(lanes)) : 110)
+                        height: .fixed(laneHeight(lanes: lanes))
                     )
                     .foregroundStyle(colorForProject(seg.projectID))
                     .opacity(segmentOpacity(seg))
@@ -401,7 +401,7 @@ struct MetricsView: View {
                         }
                     }
                 }
-                .frame(height: 150)
+                .frame(height: plotHeight(lanes: lanes) + 40)
                 }
                 deviceTotals
                 if let summary = windowSummary { selectionReadout(summary) }
@@ -468,6 +468,16 @@ struct MetricsView: View {
         }
     }
 
+    /// Height of the plot area, and of one lane within it.
+    ///
+    /// Grows with the number of lanes instead of dividing a fixed 110pt: with three devices each lane
+    /// was 36pt, which is too short for a rotated name to fit beside it. A floor of 110 keeps the
+    /// single-device case looking as it did.
+    private func plotHeight(lanes: Int) -> CGFloat { max(110, CGFloat(lanes) * 46) }
+    private func laneHeight(lanes: Int) -> CGFloat {
+        lanes > 1 ? plotHeight(lanes: lanes) / CGFloat(lanes) : 110
+    }
+
     /// Devices contributing to this day, in the same first-appearance order the lanes use.
     private var timelineDevices: [String?] { Aggregations.orderedDevices(daySegments) }
 
@@ -475,7 +485,8 @@ struct MetricsView: View {
     /// rows recorded before device attribution existed.
     private func deviceName(_ id: String?) -> String {
         guard let id else { return "unknown" }
-        return deviceLabels[id] ?? id
+        // A device that hasn't been named yet shows its model rather than its raw id.
+        return deviceLabels[id] ?? TimeslicePaths.shortDeviceName(id)
     }
 
     /// Rotated device names down the left edge, aligned to their lanes.
@@ -487,7 +498,6 @@ struct MetricsView: View {
         // names (one device may span several lanes when its own blocks overlap).
         var owner: [Int: String?] = [:]
         for seg in daySegments where owner[seg.lane] == nil { owner[seg.lane] = seg.deviceID }
-        let laneHeight = 110.0 / Double(max(1, lanes))
         return VStack(spacing: 0) {
             ForEach(0..<lanes, id: \.self) { lane in
                 let device = owner[lane] ?? nil
@@ -496,21 +506,17 @@ struct MetricsView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .minimumScaleFactor(0.75)
-                    .frame(width: 64, height: laneHeight, alignment: .trailing)
-                    .help("\(deviceName(device)) — \(compactDuration(deviceSeconds(device)))")
+                    // A width here, NOT `.fixedSize()`: rotation is a render transform, so this
+                    // width becomes the label's visible height. `.fixedSize()` let the text grow to
+                    // whatever the name needed and run straight over the lane above and below — with
+                    // three devices the three names overlapped into an unreadable stack.
+                    .frame(width: laneHeight(lanes: lanes) - 6)
+                    .rotationEffect(.degrees(-90))
+                    .frame(maxHeight: .infinity)
+                    .help("\(device ?? "unattributed") — \(compactDuration(deviceSeconds(device)))")
             }
         }
-        // HORIZONTAL, right-aligned in a fixed column — not rotated.
-        //
-        // The labels used to be rotated -90 with `.fixedSize()` inside a 14x110 column. `fixedSize`
-        // makes the text refuse to shrink, and after rotation its unrotated WIDTH becomes its vertical
-        // extent — so "iphone-b653" (~60pt wide at 9pt) needed 60pt of height in a slot that is only
-        // 110/lanes tall. With three devices that is ~36pt each, so every label overflowed into its
-        // neighbours and rendered as one illegible smear ("persoiphone-b653work").
-        //
-        // Reading sideways was never good anyway; the window has width to spare for a real column.
-        .frame(width: 64, height: 110)
+        .frame(width: 14, height: plotHeight(lanes: lanes))
         // Nudge down so the labels line up with the plot area, not the axis strip.
         .padding(.bottom, 22)
     }
@@ -1386,7 +1392,7 @@ struct MetricsView: View {
     private var targetsSection: some View {
         let rows = targetProgress
         if !rows.isEmpty {
-            section("Budgets", subtitle: nil, accessory: { editTargetsButton }) {
+            section("Allocations", subtitle: nil, accessory: { editTargetsButton }) {
                 VStack(spacing: 2) {
                     budgetHeaderRow
                     ForEach(rows) { row in targetRow(row) }
@@ -1403,7 +1409,7 @@ struct MetricsView: View {
     }
 
     private var editTargetsButton: some View {
-        Button(targets.isEmpty ? "Set up tags & budgets…" : "Edit") { showTargetsSheet = true }
+        Button(targets.isEmpty ? "Set up tags & allocations…" : "Edit") { showTargetsSheet = true }
             .buttonStyle(.link)
             .font(.system(size: 11))
     }
@@ -1419,20 +1425,63 @@ struct MetricsView: View {
         max(1, (range.end.timeIntervalSince(range.start) / 86_400).rounded())
     }
 
-    /// Rows for the Budgets section. The composition lives in `BudgetRows.build` (Core) so the
-    /// phone's Budgets screen measures each budget over the identical three windows; see there for
-    /// why each figure uses the window it does.
-    private var budgetRows: [BudgetRows.Row] {
-        let tasks = (try? appState.storeForEditing.listProjects(includeArchived: true)) ?? []
-        return BudgetRows.build(
-            targets: targets, tasks: tasks, groups: appState.taskProjects, tags: tags,
-            tagIDsByTask: tagIDsByTask, intervals: rangeIntervals, viewedRange: range)
+    /// Where a budget's period is measured from: `now` while you're on the current range, otherwise a
+    /// point inside the range being viewed. So navigating to a past week reports THAT week.
+    private var budgetAnchor: Date {
+        TargetMath.periodAnchor(rangeStart: range.start, rangeEnd: range.end)
     }
 
-    private var targetProgress: [TargetProgress] { budgetRows.map(\.progress) }
+    private var targetProgress: [TargetProgress] {
+        let tasks = (try? appState.storeForEditing.listProjects(includeArchived: true)) ?? []
+        let now = Date()
+        return targets.compactMap { target in
+            guard let name = targetName(target.subject, tasks: tasks) else { return nil }
+            let unit: RangeUnit = {
+                switch target.period {
+                case .day: return .day
+                case .week: return .week
+                case .month: return .month
+                }
+            }()
+            // Anchored INSIDE the range you're looking at, not at `now`. Keeping the budget's own
+            // period (a weekly budget always shows a week) was right; anchoring it to today was not —
+            // navigating back a week still reported this week's progress, so the section contradicted
+            // every other number on the page.
+            //
+            // Clamped rather than just using `range.start`: while you're on the current period the
+            // anchor stays `now`, which is what makes "on pace" meaningful.
+            let window = DateRange.resolve(unit: unit, anchor: budgetAnchor)
+            let secs = Aggregations.secondsForSubject(
+                target.subject, intervals: rangeIntervals, tasks: tasks,
+                tagIDsByTask: tagIDsByTask, range: window, now: now)
+            // The anchor day's slice, not literally today's: on a past range "today" would be a day
+            // outside what you're looking at.
+            let today = Aggregations.secondsForSubject(
+                target.subject, intervals: rangeIntervals, tasks: tasks,
+                tagIDsByTask: tagIDsByTask,
+                range: DateRange.resolve(unit: .day, anchor: budgetAnchor), now: now)
+            // The subject's slice of the RANGE BEING VIEWED, for the share bar. A separate clock
+            // from the budget period above, on purpose.
+            let inRange = Aggregations.secondsForSubject(
+                target.subject, intervals: rangeIntervals, tasks: tasks,
+                tagIDsByTask: tagIDsByTask, range: range, now: now)
+            return TargetMath.progress(target: target, name: name, actualSeconds: secs,
+                                       rangeStart: window.start, rangeEnd: window.end, now: now,
+                                       todaySeconds: today, rangeSeconds: inRange,
+                                       viewedRangeDays: viewedRangeDays)
+        }
+        // Trouble first: breached ceilings, then things falling behind.
+        .sorted { rank($0.verdict) < rank($1.verdict) }
+    }
 
-    // The verdict ordering (trouble first) is now `BudgetRows.rank`, applied inside
-    // `BudgetRows.build`, so there's no local copy left to drift from the phone's.
+    private func rank(_ v: TargetProgress.Verdict) -> Int {
+        switch v {
+        case .over: return 0
+        case .behind: return 1
+        case .onPace: return 2
+        case .met: return 3
+        }
+    }
 
     /// nil when the subject has been deleted — a stale target shouldn't render as a blank row.
     private func targetName(_ subject: TargetSubject, tasks: [Project]) -> String? {
@@ -1448,7 +1497,7 @@ struct MetricsView: View {
     private var budgetHeaderRow: some View {
         HStack(spacing: 5) {
             Color.clear.frame(width: 9 + 96 + 42 + 10, height: 1)
-            caption("goal", leading: 56, trailing: 36)
+            caption("allocated", leading: 56, trailing: 36)
             Color.clear.frame(width: 1, height: 1)
             caption("this \(rangeWord)", leading: 52, trailing: 44)
             Text("trend").font(.system(size: 8)).foregroundStyle(.quaternary)
