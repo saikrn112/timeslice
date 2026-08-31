@@ -53,9 +53,13 @@ struct MetricsScreen: View {
                     if !data.strip.isEmpty {
                         PeriodStrip(cards: data.strip, selected: range) { range = $0 }
                     }
+                    // Swipeable: the hero card and the timeline are the two views that are *about* the
+                    // selected period, so they're where sliding to change it belongs.
                     heroCard
+                        .gesture(periodSwipe())
                     budgets
-                    if isDay { dayTimeline } else { hoursChart }
+                    Group { if isDay { dayTimeline } else { hoursChart } }
+                        .gesture(periodSwipe())
                     whereTimeWent
                     if isDay { sessionList } else { weekdayPattern }
                 }
@@ -140,10 +144,37 @@ struct MetricsScreen: View {
         range.stepped(by: 1, earliest: earliest).start > Date()
     }
 
-    private func step(_ delta: Int) {
+    /// Move by whole periods. Returns false when the move was refused, so a swipe can decline to buzz.
+    @discardableResult
+    private func step(_ delta: Int) -> Bool {
         let next = range.stepped(by: delta, earliest: earliest)
-        guard next.start <= Date() else { return }
+        guard next.start <= Date(), next != range else { return false }
         range = next
+        return true
+    }
+
+    /// Swipe horizontally to change period.
+    ///
+    /// Tapping a card in the strip was the only way to change the date, which meant the one gesture a
+    /// phone makes you reach for wasn't wired to anything: the strip scrolls under your finger but
+    /// scrolling it selects nothing, so sliding felt like it should work and didn't.
+    ///
+    /// Content follows the finger — dragging LEFT moves forward in time, as in every calendar app.
+    ///
+    /// Attached to individual cards rather than to the scroll view, and gated on the drag being
+    /// predominantly horizontal, because a gesture that fires on a mostly-vertical drag steals the
+    /// page's own scrolling. `step` refuses to cross into the future, and declining to move also
+    /// declines the haptic, so the edge of the range feels like an edge.
+    private func periodSwipe() -> some Gesture {
+        DragGesture(minimumDistance: 24)
+            .onEnded { value in
+                // Direction and the vertical-drag veto live in `DateRange.swipeDelta`, which is pure and
+                // self-tested — the gesture can't be exercised headlessly, so the decision it makes is
+                // the part worth pinning down.
+                guard let delta = DateRange.swipeDelta(dx: value.translation.width,
+                                                       dy: value.translation.height) else { return }
+                if step(delta) { Haptics.switched() }
+            }
     }
 
     // MARK: - The selected period, as one card

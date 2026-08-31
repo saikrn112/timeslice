@@ -91,6 +91,22 @@ public struct DateRange: Equatable, Sendable {
         contains(now)
     }
 
+    /// How many periods a horizontal swipe of `(dx, dy)` should move, or nil to ignore it.
+    ///
+    /// Pure and in Core so the convention is covered by `TimesliceSelfTest`, because the gesture itself
+    /// cannot be tested headlessly — `simctl` has no way to drag — and an inverted direction is exactly
+    /// the kind of bug that survives a build and a screenshot.
+    ///
+    /// **Content follows the finger:** dragging LEFT (negative `dx`) moves FORWARD in time, matching
+    /// every calendar app. Getting this backwards feels broken rather than merely unfamiliar.
+    ///
+    /// Mostly-vertical drags return nil. A gesture that fired on those would fight the page's own
+    /// scrolling, which is worse than not having the gesture.
+    public static func swipeDelta(dx: Double, dy: Double, dominance: Double = 1.5) -> Int? {
+        guard abs(dx) > abs(dy) * dominance else { return nil }
+        return dx < 0 ? 1 : -1
+    }
+
     /// Human label for the range bar.
     public func label(calendar: Calendar = .current, now: Date = Date()) -> String {
         let f = DateFormatter()

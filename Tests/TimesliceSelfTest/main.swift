@@ -2790,6 +2790,30 @@ func testCreateProjectFilesIntoGroup() throws {
 }
 
 
+/// The swipe-to-change-period convention.
+///
+/// Here because the gesture cannot be exercised headlessly — `simctl` has no drag — so the decision the
+/// gesture delegates to is the only part that can be pinned down. An inverted direction builds cleanly
+/// and screenshots identically, and would only show up as the screen going the wrong way in your hand.
+func testSwipeDelta() {
+    print("\nSwipe delta:")
+
+    // Content follows the finger: left goes forward in time, right goes back.
+    check(DateRange.swipeDelta(dx: -80, dy: 0) == 1, "dragging left moves forward")
+    check(DateRange.swipeDelta(dx: 80, dy: 0) == -1, "dragging right moves back")
+
+    // Mostly-vertical drags belong to the scroll view, not to us.
+    check(DateRange.swipeDelta(dx: 10, dy: 90) == nil, "a vertical drag is ignored")
+    check(DateRange.swipeDelta(dx: 30, dy: 30) == nil, "a diagonal drag is ignored")
+    check(DateRange.swipeDelta(dx: 0, dy: 0) == nil, "a tap-sized drag is ignored")
+
+    // Comfortably horizontal still wins even with some vertical drift, which every real thumb has.
+    check(DateRange.swipeDelta(dx: -100, dy: 40) == 1, "horizontal wins despite drift")
+
+    // The magnitude never matters — a long swipe is still one period, so a flick can't skip a week.
+    check(DateRange.swipeDelta(dx: -1000, dy: 0) == 1, "a long swipe is still one period")
+}
+
 /// `rangeTotals` is the general form of `todayTotals`. Added because "Where time went" needs per-task
 /// figures for an arbitrary range, and every caller was otherwise trimming intervals by hand — the
 /// DST/midnight-sensitive arithmetic that must not exist twice.
@@ -3008,6 +3032,7 @@ do {
     testTaskOrdering()
     try testCreateProjectFilesIntoGroup()
     try testBudgetRows()
+    testSwipeDelta()
     try testRangeTotals()
     testLanesByOverlap()
     testReversedClientID()
