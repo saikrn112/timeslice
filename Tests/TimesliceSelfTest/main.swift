@@ -2750,6 +2750,41 @@ func testBudgetRows() throws {
               "task colour is its display shade, not its raw swatch")
     }
 
+    do { // the budget PERIOD follows the viewed range, not today
+        //
+        // `TargetMath.periodAnchor` is tested on its own elsewhere; this asserts `BudgetRows.build`
+        // actually routes through it. It didn't: every window was anchored at `now`, so paging back a
+        // day still judged TODAY's budget and the section contradicted every other number on the page.
+        // Both front-ends read these rows, so the regression would hit the Mac and the phone at once.
+        for t in try store.listTargets() { try store.deleteTarget(id: t.id) }
+        _ = try store.setTarget(subject: .task(a), seconds: 4 * 3600,
+                                direction: .atLeast, period: .day)
+
+        // 3h on alpha two days earlier, so the past day has a different total from today's 2h.
+        try store.insertClosedInterval(projectID: a, start: date(2026, 3, 9, 9, 0),
+                                       end: date(2026, 3, 9, 12, 0))
+        let withPast = try store.intervals()
+
+        let pastDay = DateRange.resolve(unit: .day, anchor: date(2026, 3, 9, 12, 0))
+        let rows = BudgetRows.build(targets: try store.listTargets(), tasks: tasks, groups: groups,
+                                    tags: tags, tagIDsByTask: tagIDsByTask, intervals: withPast,
+                                    viewedRange: pastDay, now: now)
+        guard let row = rows.first else { check(false, "past-range target produced a row"); return }
+        check(approx(row.progress.actualSeconds, 3 * 3600, 1),
+              "viewing a past day judges THAT day's 3h, not today's 2h")
+        // A fully elapsed period is 100% elapsed, so "behind" is a verdict about the finished day
+        // rather than about a pace that no longer applies.
+        check(row.progress.elapsedFraction >= 0.999,
+              "a past period counts as fully elapsed")
+
+        // And the current range still reports today, so the fix didn't invert the common case.
+        let todayRows = BudgetRows.build(targets: try store.listTargets(), tasks: tasks,
+                                        groups: groups, tags: tags, tagIDsByTask: tagIDsByTask,
+                                        intervals: withPast, viewedRange: dayRange, now: now)
+        check(approx(todayRows.first?.progress.actualSeconds ?? 0, 2 * 3600, 1),
+              "the current range still judges today")
+    }
+
     do { // a TAG subject aggregates every task carrying it (via its project)
         for t in try store.listTargets() { try store.deleteTarget(id: t.id) }
         _ = try store.setTarget(subject: .tag(tagID), seconds: 1 * 3600,

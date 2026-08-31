@@ -366,7 +366,20 @@ struct MetricsScreen: View {
                      tint: Color(hex: row.colorHex),
                      size: 11)
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: 8)
+
+            // The trend, filling what was dead space on the right of a full-width card.
+            //
+            // I removed this from the old two-bar row because at 32pt it was a few pixels of line that
+            // said nothing. At ~96pt it's legible, and it answers the one question the rings can't:
+            // whether this budget is heading the right way or just happens to sit where it does today.
+            // `row.sparkline` is already computed by `BudgetRows`, so this costs nothing new.
+            // At least two buckets: a Day range has exactly one, and a one-bar "trend" is a stray
+            // vertical line that reads as a rendering glitch rather than as information.
+            if row.sparkline.count > 1, row.sparkline.contains(where: { $0 > 0 }) {
+                Sparkline(values: row.sparkline, tint: Color(hex: row.colorHex))
+                    .frame(width: 96, height: 34)
+            }
         }
         .padding(Theme.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -685,7 +698,11 @@ struct MetricsScreen: View {
     // MARK: - Sessions
 
     /// Row height, fixed because the `List` below is measured rather than scrolled.
-    private static let sessionRowHeight: CGFloat = 38
+    ///
+    /// 28, not 38: moving to a `List` for swipe-to-delete brought the system's roomier row metrics with
+    /// it, which made a dense list you scan turn into a sparse one you scroll. This is close to the
+    /// old `.padding(.vertical, 3)` stack while keeping the swipe.
+    private static let sessionRowHeight: CGFloat = 28
 
     /// Sessions, with the system swipe-to-delete.
     ///

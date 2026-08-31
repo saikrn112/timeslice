@@ -44,6 +44,9 @@ final class TimerModel: ObservableObject {
     /// than the intent presenting anything itself: an AppIntent has no view hierarchy to present in.
     @Published var showingSwitcher = false
     @Published var showingSettings = false
+    /// The task palette. On the model rather than in `TasksView` so it can be opened from
+    /// the root — which is what lets the headless `start-tab` hint screenshot it.
+    @Published var showingAddTask = false
 
     /// Shared with the Mac via Core, so the deep-block and nudge thresholds mean the same thing on
     /// both. The phone used to hardcode its own copies.

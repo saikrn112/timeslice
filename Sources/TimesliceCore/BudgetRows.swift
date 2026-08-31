@@ -99,7 +99,14 @@ public enum BudgetRows {
                 }
             }()
             // The budget's OWN period — the window the verdict is judged in.
-            let window = DateRange.resolve(unit: unit, anchor: now)
+            //
+            // Anchored via `TargetMath.periodAnchor`, NOT at `now`. Anchoring at `now` meant paging back
+            // a week still judged the CURRENT week, so the budgets contradicted every other number on
+            // the page — the Mac hit this and fixed it there; this is the shared path the phone reads,
+            // so it had the same bug until now.
+            let anchor = TargetMath.periodAnchor(rangeStart: viewedRange.start,
+                                                 rangeEnd: viewedRange.end, now: now)
+            let window = DateRange.resolve(unit: unit, anchor: anchor)
             let secs = Aggregations.secondsForSubject(
                 target.subject, intervals: intervals, tasks: tasks,
                 tagIDsByTask: tagIDsByTask, range: window, now: now)

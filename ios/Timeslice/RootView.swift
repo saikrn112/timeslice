@@ -58,6 +58,7 @@ struct RootView: View {
             switch Self.launchHint {
             case "switcher": model.requestSwitcher()
             case "settings": model.showingSettings = true
+            case "add": model.showingAddTask = true
             default: break
             }
         }
@@ -65,5 +66,6 @@ struct RootView: View {
         // was last open, and so Settings is reachable from either.
         .sheet(isPresented: $model.showingSwitcher) { SwitchWheelSheet() }
         .sheet(isPresented: $model.showingSettings) { SettingsSheet() }
+        .sheet(isPresented: $model.showingAddTask) { AddTaskSheet() }
     }
 }

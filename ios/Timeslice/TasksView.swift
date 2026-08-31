@@ -13,8 +13,6 @@ import TimesliceUI
 struct TasksView: View {
     @ObservedObject private var model = TimerModel.shared
     @State private var query = ""
-    @State private var showingAdd = false
-    @State private var newTaskName = ""
     @State private var editing: Project?
     @State private var showArchived = false
     @State private var scope: TimeScope = .today
@@ -32,9 +30,14 @@ struct TasksView: View {
                             .font(Theme.caption).foregroundStyle(.red).padding(.bottom, 6)
                     }
                     // First thing on screen, above the list: start/stop without hunting for a row.
+                    //
+                    // The recents chip strip that used to sit under this is gone. It clipped at both
+                    // edges so half the chips read as fragments ("tch idea"), and every route it offered
+                    // now exists somewhere better: the expanded Dynamic Island's switcher, the switcher
+                    // sheet, and the Action Button. It was costing vertical space above the list to
+                    // duplicate them badly.
                     if !(model.tasks.isEmpty && model.archivedTasks.isEmpty) {
                         NowCard()
-                        RecentsStrip()
                             .padding(.bottom, 12)
                     }
                     controlRow
@@ -67,20 +70,13 @@ struct TasksView: View {
                     Button { model.requestSwitcher() } label: {
                         Image(systemName: "arrow.triangle.swap")
                     }
-                    Button { showingAdd = true } label: { Image(systemName: "plus") }
+                    Button { model.showingAddTask = true } label: { Image(systemName: "plus") }
                 }
                 // No "Stop" here. On the Mac, stop and pause are meaningfully different — stop clears
                 // the current task so the menu bar goes idle. On the phone the hero card's pause button
                 // is right there and does the thing you actually want, so a second verb in the corner
                 // was a choice you had to think about for no benefit. Stopping is still available from
                 // the switcher and a Shortcut.
-            }
-            .alert("New task", isPresented: $showingAdd) {
-                TextField("Name, or name /project", text: $newTaskName)
-                Button("Add") { model.addTask(named: newTaskName); newTaskName = "" }
-                Button("Cancel", role: .cancel) { newTaskName = "" }
-            } message: {
-                Text("“/project” files it into that project, creating it if needed.")
             }
             .sheet(item: $editing) { TaskDetailSheet(task: $0) }
         }
@@ -357,58 +353,5 @@ struct NowCard: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 16).fill(Theme.card))
-    }
-}
-
-/// The tasks you actually bounce between, as one-tap targets.
-///
-/// This is the answer to "switching has friction". Every previous route made you HUNT: the list meant
-/// scrolling past project sections you don't care about, and the Action Button's wheel meant a scroll
-/// plus a precise commit tap. In practice a day involves alternating between a handful of tasks, so
-/// those few belong on screen permanently, one tap from running.
-///
-/// Fed by `TaskOrdering.recencyOrdered` — the same order the Mac's switcher uses — with the current
-/// task dropped, since a chip for what's already running would do nothing. Frozen per appearance is
-/// deliberately NOT done here: unlike the wheel, nothing is under your thumb mid-scroll, and having
-/// the chip you just used move to the front is what keeps alternation to one tap.
-struct RecentsStrip: View {
-    @ObservedObject private var model = TimerModel.shared
-
-    private var picks: [Project] {
-        model.recencyOrdered.filter { $0.id != model.currentTaskID }.prefix(4).map { $0 }
-    }
-
-    var body: some View {
-        if !picks.isEmpty {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(picks, id: \.id) { task in
-                        Button {
-                            model.toggle(taskID: task.id)
-                        } label: {
-                            HStack(spacing: 6) {
-                                Circle().fill(Color(hex: model.colorHex(for: task)))
-                                    .frame(width: 9, height: 9)
-                                Text(task.name)
-                                    .font(.system(size: 15, weight: .medium))
-                                    .lineLimit(1)
-                                let secs = model.committedTodaySeconds[task.id] ?? 0
-                                if secs > 0 {
-                                    Text(Format.compact(secs))
-                                        .font(.system(size: 13, design: .monospaced))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            // Tall enough to hit without aiming.
-                            .padding(.horizontal, 13).padding(.vertical, 11)
-                            .background(Capsule().fill(Theme.card))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 1)
-            }
-            .padding(.top, 8)
-        }
     }
 }
