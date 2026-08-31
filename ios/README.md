@@ -42,24 +42,53 @@ xcrun simctl launch booted com.timeslice.ios
 
 ### Device builds
 
-`project.yml` sets `CODE_SIGNING_ALLOWED: NO`, which is fine for the simulator and keeps the repo
-free of anyone's team id. For a real phone, pass your own:
+`project.yml` **ad-hoc** signs (`CODE_SIGN_IDENTITY: "-"`, `CODE_SIGNING_ALLOWED: YES`), which is what
+the Simulator wants and keeps the repo free of anyone's team id. An ad-hoc signature is **not** installable
+on a real iPhone: the device rejects it, and `generic/platform=IOS` fails with
+
+```
+"TimesliceiOS" requires a provisioning profile.
+"TimesliceWidgetsExtension" requires a provisioning profile.
+```
+
+Two targets, so a profile is needed for each — the widget extension is a separate signed bundle.
+
+**A signing identity must exist first, and creating one is a human step.** Check with:
+
+```bash
+security find-identity -v -p codesigning        # "0 valid identities found" == nothing to sign with
+```
+
+If that is empty, no CLI flag helps. Open Xcode → Settings → Accounts, add an Apple ID (a **free**
+personal team is enough), then select each target's Signing & Capabilities → Automatically manage
+signing → pick the team. Xcode requests the certificate and profiles for you.
+
+Then the easy path is Xcode itself: open `ios/Timeslice.xcodeproj`, pick the connected iPhone, Run.
+Or from the CLI, overriding the ad-hoc identity as well as the style — the `CODE_SIGN_IDENTITY`
+override is the part that's easy to miss, since `project.yml` pins it to `-`:
 
 ```bash
 xcodebuild -project ios/Timeslice.xcodeproj -scheme TimesliceiOS \
   -destination 'generic/platform=iOS' \
-  DEVELOPMENT_TEAM=XXXXXXXXXX CODE_SIGNING_ALLOWED=YES CODE_SIGN_STYLE=Automatic
+  DEVELOPMENT_TEAM=XXXXXXXXXX CODE_SIGN_STYLE=Automatic \
+  CODE_SIGN_IDENTITY='Apple Development' -allowProvisioningUpdates
 ```
+
+On a free personal team, expect: the app **stops launching after 7 days** and must be reinstalled, and
+you're limited to a handful of app ids. A paid account removes both. Either way the first launch needs
+Settings → General → VPN & Device Management → trust the developer.
 
 ### Screenshotting a specific tab (headless, no human)
 
-`simctl` can boot, install, launch and screenshot, but it **cannot tap a tab bar**. So the app reads
-a `TimesliceStartTab` preference on launch:
+`simctl` can boot, install, launch and screenshot, but it **cannot tap a tab bar**. So the app reads a
+plain `start-tab` **file** on launch — a file, because four preference-based routes all silently failed
+(see below). Values: `tasks`, `metrics`, `add`, `switcher`, `settings`; the last three also open that
+sheet, which is otherwise only reachable by a tap `simctl` cannot perform:
 
 ```bash
 xcrun simctl install booted "$APP"                                  # install FIRST
 C=$(xcrun simctl get_app_container booted com.timeslice.ios data)   # container UUID changes on install
-printf metrics > "$C/Library/Application Support/Timeslice/start-tab"   # tasks | metrics | budgets
+printf metrics >| "$C/Library/Application Support/Timeslice/start-tab"   # >| because zsh noclobber
 xcrun simctl terminate booted com.timeslice.ios
 xcrun simctl launch booted com.timeslice.ios
 xcrun simctl io booted screenshot /tmp/shot.png
@@ -68,7 +97,7 @@ xcrun simctl io booted screenshot /tmp/shot.png
 Resolve the container **after** installing — reinstalling changes its UUID, and writing to the old
 path silently does nothing.
 
-Write the plist **inside the app's data container**, as above. Three other routes were tried and all
+Write the file **inside the app's data container**, as above. Four other routes were tried and all
 silently fail on Xcode 26:
 
 | Attempt | Result |
