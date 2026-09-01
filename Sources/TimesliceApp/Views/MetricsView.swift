@@ -1516,16 +1516,6 @@ struct MetricsView: View {
         // Bar clamps at full; the label carries the real number (or "over" for a blown ceiling).
         let goalFraction = min(max(row.percent / 100, 0), 1)
         return HStack(spacing: 5) {
-            // Reordering belongs here, on the list you actually read, not in the edit sheet.
-            // Grip-only drag: on the whole row it would swallow the click that pins a highlight.
-            GripDots()
-                .foregroundStyle(.tertiary)
-                .opacity(hoveredTargetID == row.target.id || draggingTargetID == row.target.id ? 1 : 0)
-                .onDrag {
-                    draggingTargetID = row.target.id
-                    return NSItemProvider(object: String(row.target.id) as NSString)
-                }
-
             Circle().fill(color).frame(width: 9, height: 9)
             Text(row.name).font(.callout).lineLimit(1).truncationMode(.tail)
                 .frame(width: 96, alignment: .leading)
@@ -1584,6 +1574,21 @@ struct MetricsView: View {
         .onTapGesture {
             let me = focusFor(row.target.subject)
             pinnedFocus = (pinnedFocus == me) ? nil : me
+        }
+        // The grip sits in the section's left margin as an overlay, NOT in the HStack: in the flow it
+        // pushed every column right and left the captions above pointing at the wrong things.
+        .overlay(alignment: .leading) {
+            GripDots()
+                .foregroundStyle(.tertiary)
+                .opacity(hoveredTargetID == row.target.id || draggingTargetID == row.target.id ? 1 : 0)
+                // Without this only the 2pt dots themselves are hit-testable, so a drag almost never
+                // starts — which is why the grip appeared to do nothing.
+                .contentShape(Rectangle())
+                .onDrag {
+                    draggingTargetID = row.target.id
+                    return NSItemProvider(object: String(row.target.id) as NSString)
+                }
+                .offset(x: -14)
         }
         .onDrop(of: [.text], isTargeted: Binding(
             get: { dropTargetID == row.target.id },
