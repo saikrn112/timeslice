@@ -94,6 +94,9 @@ struct MetricsView: View {
     @State private var showTargetsSheet = false
     /// Budget row under the pointer, purely so the row shows it can be clicked.
     @State private var hoveredTargetID: Int64?
+    /// Allocation being dragged by its handle, and the row it's currently over.
+    @State private var draggingTargetID: Int64?
+    @State private var dropTargetID: Int64?
 
 
     /// Bucket under the cursor on the hours / focus charts.
@@ -1513,7 +1516,28 @@ struct MetricsView: View {
         // Bar clamps at full; the label carries the real number (or "over" for a blown ceiling).
         let goalFraction = min(max(row.percent / 100, 0), 1)
         return HStack(spacing: 5) {
-            Circle().fill(color).frame(width: 9, height: 9)
+            // Drag handle, in the status dot's own cell.
+            //
+            // It has to live INSIDE the row's bounds: SwiftUI doesn't hit-test what a view draws
+            // outside its parent's frame, so the three earlier attempts at an overlay offset into
+            // the left margin rendered dots that could never be hovered or grabbed. Swapping in
+            // place rather than adding a column also keeps every caption over its own bar.
+            Group {
+                if hoveredTargetID == row.target.id || draggingTargetID == row.target.id {
+                    GripDots()
+                        .foregroundStyle(.tertiary)
+                        .contentShape(Rectangle())
+                        // Drag from the handle only — on the whole row it ate vertical drags and
+                        // the page couldn't be scrolled.
+                        .onDrag {
+                            draggingTargetID = row.target.id
+                            return NSItemProvider(object: String(row.target.id) as NSString)
+                        }
+                } else {
+                    Circle().fill(color).frame(width: 9, height: 9)
+                }
+            }
+            .frame(width: 10, height: 14)
             Text(row.name).font(.callout).lineLimit(1).truncationMode(.tail)
                 .frame(width: 96, alignment: .leading)
             Text("\(row.target.direction.symbol) \(row.target.period.rawValue)")
@@ -1572,24 +1596,31 @@ struct MetricsView: View {
             let me = focusFor(row.target.subject)
             pinnedFocus = (pinnedFocus == me) ? nil : me
         }
-        // Reordering by right-click, not by dragging.
-        //
-        // Three attempts at a drag grip here didn't work: `.onDrag` from an overlay offset outside its
-        // parent's bounds, inside a ScrollView, competing with the row's own tap gesture, never
-        // started reliably — and every failure looked identical from the outside. A menu item cannot
-        // half-work, and reordering four rows is not a gesture worth debugging further.
-        .contextMenu {
-            Button("Move up") {
-                try? appState.storeForEditing.moveTarget(id: row.target.id, up: true)
-                recompute()
+        // Dropping on a row puts the dragged allocation in its place.
+        .onDrop(of: [.text], isTargeted: Binding(
+            get: { dropTargetID == row.target.id },
+            set: { over in dropTargetID = over ? row.target.id : nil }
+        )) { _ in dropAllocation(onto: row.target.id) }
+        .overlay(alignment: .top) {
+            // Where it will land, drawn only while a drag is in flight.
+            if dropTargetID == row.target.id, draggingTargetID != row.target.id {
+                Rectangle().fill(Color.accentColor).frame(height: 2)
             }
-            .disabled(targets.first?.id == row.target.id)
-            Button("Move down") {
-                try? appState.storeForEditing.moveTarget(id: row.target.id, up: false)
-                recompute()
-            }
-            .disabled(targets.last?.id == row.target.id)
         }
+    }
+
+    /// Move the dragged allocation to `onto`'s position and persist the whole order.
+    private func dropAllocation(onto: Int64) -> Bool {
+        defer { draggingTargetID = nil; dropTargetID = nil }
+        guard let dragged = draggingTargetID, dragged != onto else { return false }
+        var ids = targets.map(\.id)
+        guard let from = ids.firstIndex(of: dragged), let to = ids.firstIndex(of: onto)
+        else { return false }
+        ids.remove(at: from)
+        ids.insert(dragged, at: to)
+        try? appState.storeForEditing.reorderTargets(ids)
+        recompute()
+        return true
     }
 
     /// The one thing the row can't show: how far off target it is.

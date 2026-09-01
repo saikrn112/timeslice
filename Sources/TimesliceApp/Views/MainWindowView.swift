@@ -48,6 +48,7 @@ struct MainWindowView: View {
 
             Spacer()
 
+            notesButton
             settingsButton
             privacyIndicator
         }
@@ -89,6 +90,33 @@ struct MainWindowView: View {
     }
 
     @State private var showSettings = false
+    @State private var showNotes = false
+    @State private var openNoteCount = 0
+
+    /// Notes live up here rather than inside Settings: they're written whenever something is
+    /// noticed, which is while using the app, and a thing you reach for often shouldn't be two
+    /// clicks deep in a panel of preferences.
+    private var notesButton: some View {
+        Button { showNotes.toggle() } label: {
+            Image(systemName: openNoteCount > 0 ? "bubble.left.fill" : "bubble.left")
+                .font(.system(size: 12))
+                .foregroundStyle(openNoteCount > 0 ? Color.accentColor : Color.secondary)
+        }
+        .buttonStyle(.borderless)
+        .help(openNoteCount > 0 ? "Notes — \(openNoteCount) open" : "Notes")
+        .onAppear { refreshNoteCount() }
+        .sheet(isPresented: $showNotes) {
+            FeedbackSheet(store: appState.storeForEditing) {
+                showNotes = false
+                refreshNoteCount()
+            }
+        }
+    }
+
+    private func refreshNoteCount() {
+        openNoteCount =
+            ((try? appState.storeForEditing.listFeedback(includeResolved: false)) ?? []).count
+    }
 
     private var settingsButton: some View {
         Button { showSettings.toggle() } label: {

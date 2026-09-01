@@ -258,14 +258,14 @@ struct TargetsSheet: View {
 
                 // Retire rather than delete: the allocation leaves the live list but keeps its
                 // history, which is the whole reason for the state.
-                Button {
+                // Spelled out, not a tick. A bare checkmark next to a value reads as "confirm
+                // this number", which is not what it does — it retires the allocation.
+                Button("Done") {
                     try? store.setTargetCompleted(id: existing.id, completed: true)
                     reload()
-                } label: {
-                    Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold))
                 }
-                .buttonStyle(.borderless)
-                .help("Done with this — keeps it in history")
+                .buttonStyle(.link).font(.system(size: 11))
+                .help("Finished with this — moves it to past allocations")
 
                 Button {
                     try? store.deleteTarget(id: existing.id)
