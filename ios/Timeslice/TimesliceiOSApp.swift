@@ -46,6 +46,11 @@ struct TimesliceiOSApp: App {
                 // Foreground is the one moment a phone can sync promptly, so take it — the
                 // background task is opportunistic and may not have run for hours.
                 Task { await SyncController.shared.syncOnce() }
+                // And keep polling while you're looking at it: a takeover started on another device
+                // was previously never noticed by an open phone, so both counted the same minutes.
+                SyncController.shared.startForegroundPolling()
+            } else {
+                SyncController.shared.stopForegroundPolling()
             }
         }
     }

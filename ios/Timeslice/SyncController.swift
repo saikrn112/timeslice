@@ -75,6 +75,42 @@ final class SyncController {
         }
     }
 
+    // MARK: - Polling while the app is open
+
+    private var pollTimer: Timer?
+
+    /// Poll while the app is FOREGROUND, so a takeover started on another device is noticed here.
+    ///
+    /// This was the bug behind "auto pause is not working across devices". The phone only ever synced on
+    /// three occasions: a foreground transition, its own local change, and an opportunistic
+    /// `BGAppRefreshTask`. None of them fires while you're simply *looking* at the app — so if you started
+    /// a timer on the Mac with the phone open in front of you, the phone never found out and both devices
+    /// counted the same wall-clock minutes.
+    ///
+    /// The Mac has always polled on a timer; the phone never did. Same intervals as the Mac's active case,
+    /// and the same reasoning: a device that is itself running only needs to notice a takeover, while an
+    /// idle one is also waiting to pull in new work.
+    ///
+    /// Foreground only. A suspended app doesn't get timers anyway, and asking for background execution to
+    /// poll a file store is exactly what iOS declines to grant.
+    func startForegroundPolling() {
+        stopForegroundPolling()
+        let interval: TimeInterval = TimerModel.shared.isRunning ? 15 : 10
+        pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.transport != nil else { return }
+                await self.syncOnce()
+                // Re-arm: `isRunning` may have changed, and the two cases want different rates.
+                self.startForegroundPolling()
+            }
+        }
+    }
+
+    func stopForegroundPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+    }
+
     // MARK: - Publishing a local change
 
     private var publishTask: Task<Void, Never>?

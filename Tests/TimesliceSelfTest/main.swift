@@ -3169,6 +3169,137 @@ func testAllocationLifecycle() throws {
     }
 }
 
+// MARK: - Two devices through a transport (the takeover the phone was missing)
+
+/// An in-memory `SyncTransport`, so two stores can be driven against each other with no network.
+///
+/// The gap this closes: `TakeoverPolicy.decide` and `SyncEngine.merge` were each well covered in
+/// ISOLATION, and both were correct — yet "auto pause is not working across devices" was still a real
+/// bug, because nothing tested the two of them wired together through a transport. A unit test per
+/// component can't catch a missing caller.
+final class MemoryTransport: SyncTransport, @unchecked Sendable {
+    var payloads: [String: Data] = [:]
+    var markers: [String: Data] = [:]
+    /// What the transport reports as each marker's write time — the server clock `TakeoverPolicy`
+    /// prefers over any peer's self-report.
+    var modified: [String: Date] = [:]
+
+    func put(payload: Data, deviceID: String) throws { payloads[deviceID] = payload }
+    func fetchOthers(excluding deviceID: String) throws -> [Data] {
+        payloads.filter { $0.key != deviceID }.map(\.value)
+    }
+    func putRunning(_ marker: Data?, deviceID: String) throws {
+        if let marker { markers[deviceID] = marker; modified[deviceID] = Date() }
+        else { markers[deviceID] = nil; modified[deviceID] = nil }
+    }
+    func fetchOtherRunning(excluding deviceID: String) throws -> [Data] {
+        markers.filter { $0.key != deviceID }.map(\.value)
+    }
+    func fetchOtherRunningWithTimes(excluding deviceID: String) throws -> [(data: Data, modified: Date?)] {
+        markers.filter { $0.key != deviceID }.map { ($0.value, modified[$0.key]) }
+    }
+    func deletePayload(deviceID: String) throws {
+        payloads[deviceID] = nil; markers[deviceID] = nil; modified[deviceID] = nil
+    }
+    /// Nothing here is ever unreadable — this transport only holds what these tests put in it.
+    func deleteUnreadablePayloads(excluding deviceID: String) -> Int { 0 }
+}
+
+func testCrossDeviceTakeover() throws {
+    print("\nCross-device takeover:")
+    let (macStore, macURL) = try makeStore()
+    let (phoneStore, phoneURL) = try makeStore()
+    defer {
+        try? FileManager.default.removeItem(at: macURL)
+        try? FileManager.default.removeItem(at: phoneURL)
+    }
+    let transport = MemoryTransport()
+
+    // Same task on both sides, sharing a uid — which is the only handle that means anything across
+    // devices. Row ids differ deliberately: the phone gets a decoy first so its ids can't line up.
+    _ = try phoneStore.createProject(name: "decoy", colorHex: "#000000")
+    let macTask = try macStore.createProject(name: "deep work", colorHex: "#4E79A7")
+    let uid = try macStore.uid(table: "projects", id: macTask)!
+    _ = try phoneStore.insertRemoteTask(uid: uid, name: "deep work", colorHex: "#4E79A7",
+                                        sortOrder: 0, archived: false, finished: false,
+                                        finishedAt: nil, taskProjectID: nil,
+                                        updatedAt: Date().timeIntervalSince1970)
+    let phoneTask = try phoneStore.localID(table: "projects", uid: uid)!
+    check(phoneTask != macTask, "the same task has DIFFERENT row ids on the two devices")
+
+    /// One device's settle step, mirroring what both `SyncController`s do.
+    func settle(_ store: IntervalStore, deviceID: String, now: Date) throws -> String? {
+        let observed = try transport.fetchOtherRunningWithTimes(excluding: deviceID)
+        var marks: [RunningMarker] = []
+        var observedAt: [String: Date] = [:]
+        for e in observed {
+            guard let m = try? JSONDecoder().decode(RunningMarker.self, from: e.data) else { continue }
+            marks.append(m)
+            if let mod = e.modified { observedAt[m.deviceID] = mod }
+        }
+        guard let d = TakeoverPolicy.decide(localRunningSince: try store.openInterval()?.start,
+                                            markers: marks, now: now, observedAt: observedAt)
+        else { return nil }
+        try store.stopOpenInterval(at: d.pauseAt)
+        return d.byDeviceID
+    }
+
+    func publishMarker(_ store: IntervalStore, deviceID: String, now: Date) throws {
+        guard let open = try store.openInterval(),
+              let taskUID = try store.uid(table: "projects", id: open.projectID) else {
+            try transport.putRunning(nil, deviceID: deviceID)
+            return
+        }
+        let m = RunningMarker(deviceID: deviceID, taskUID: taskUID,
+                             since: open.start.timeIntervalSince1970,
+                             isRunning: true, writtenAt: now.timeIntervalSince1970)
+        try transport.putRunning(try JSONEncoder().encode(m), deviceID: deviceID)
+    }
+
+    let t0 = Date().addingTimeInterval(-600)      // phone started 10 minutes ago
+
+    do { // the reported case: the phone is running, the Mac starts later, the phone must yield
+        try phoneStore.switchTo(projectID: phoneTask, at: t0)
+        try publishMarker(phoneStore, deviceID: "phone", now: t0)
+
+        let macStart = t0.addingTimeInterval(300) // Mac starts 5 minutes later
+        try macStore.switchTo(projectID: macTask, at: macStart)
+        try publishMarker(macStore, deviceID: "mac", now: macStart)
+
+        // The Mac shouldn't stop itself: its own start is the later one.
+        check(try settle(macStore, deviceID: "mac", now: macStart) == nil,
+              "the device that started LAST keeps running")
+
+        // The phone notices and yields.
+        let by = try settle(phoneStore, deviceID: "phone", now: macStart.addingTimeInterval(1))
+        check(by == "mac", "the earlier device is taken over by the later one")
+        check(try phoneStore.openInterval() == nil, "and its timer is actually stopped")
+
+        // Back-dated to the Mac's start, so the two intervals ABUT rather than overlap. This is the
+        // whole reason a late wake-up is harmless: no wall-clock second is counted twice.
+        let phoneEnd = try phoneStore.intervals().compactMap(\.end).max()
+        check(phoneEnd.map { abs($0.timeIntervalSince(macStart)) < 1 } == true,
+              "the phone's interval ends exactly where the Mac's began")
+    }
+
+    do { // a STALE claim must not pause anyone — a slept device's marker never expires on its own
+        try phoneStore.switchTo(projectID: phoneTask, at: Date().addingTimeInterval(-60))
+        // The Mac's marker is old: written well beyond the liveness cutoff.
+        transport.modified["mac"] = Date().addingTimeInterval(-TakeoverPolicy.livenessCutoff - 120)
+        check(try settle(phoneStore, deviceID: "phone", now: Date()) == nil,
+              "a stale marker is ignored, so a slept device can't pause this one forever")
+        check(try phoneStore.openInterval() != nil, "the phone keeps running")
+    }
+
+    do { // clearing the marker on pause stops it taking anyone over afterwards
+        try macStore.stopOpenInterval(at: Date())
+        try publishMarker(macStore, deviceID: "mac", now: Date())
+        check(transport.markers["mac"] == nil, "pausing clears the running marker")
+        check(try settle(phoneStore, deviceID: "phone", now: Date()) == nil,
+              "and a cleared marker takes nobody over")
+    }
+}
+
 // MARK: - Chunked running intervals
 
 /// `rollOpenInterval` replaces prompt-based auto-pause: a long run becomes consecutive blocks instead of
@@ -3368,6 +3499,7 @@ do {
     testReversedClientID()
     try testDemoSeedInvariants()
     try testAllocationLifecycle()
+    try testCrossDeviceTakeover()
     try testRollOpenInterval()
     try testFeedback()
     testTagTotals()
