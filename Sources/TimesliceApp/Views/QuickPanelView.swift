@@ -95,4 +95,7 @@ struct QuickPanelView: View {
 
 extension Notification.Name {
     static let openMainWindow = Notification.Name("com.timeslice.openMainWindow")
+    /// Asks for the task palette. Posted by the window's + button so it opens the SAME palette the
+    /// hotkey does, rather than a second, weaker add form that has to be kept in step.
+    static let openTaskPalette = Notification.Name("com.timeslice.openTaskPalette")
 }

@@ -9,7 +9,6 @@ struct ProjectListView: View {
     @ObservedObject var appState: AppState
     @ObservedObject var engine: TimerEngine
 
-    @State private var newTaskName: String = ""
     @State private var editingID: Int64?
     @State private var editingName: String = ""
     @State private var showArchived: Bool = false
@@ -53,14 +52,14 @@ struct ProjectListView: View {
     /// Cleared once it has tasks or the scope changes.
     @State private var justCreatedProjectID: Int64?
 
-    private enum Field: Hashable { case list, newTask, rename, renameGroup, newProject }
+    private enum Field: Hashable { case list, rename, renameGroup, newProject }
     @FocusState private var focus: Field?
 
     private var store: IntervalStore { appState.storeForEditing }
     /// Any in-place text entry. Missing a case here means the list's ↑/↓/space handlers steal
     /// keys mid-typing — which is exactly what broke spaces in project names.
     private var isTyping: Bool {
-        focus == .newTask || focus == .rename || focus == .renameGroup || focus == .newProject
+        focus == .rename || focus == .renameGroup || focus == .newProject
     }
 
     var body: some View {
@@ -722,14 +721,15 @@ struct ProjectListView: View {
 
     private var addBar: some View {
         HStack {
-            TextField("New task…", text: $newTaskName)
-                .textFieldStyle(.roundedBorder)
-                .focused($focus, equals: .newTask)
-                .onSubmit(addTask)
-            Button(action: addTask) {
-                Label("Add", systemImage: "plus")
+            // Opens the palette rather than being a second, weaker add form. The field here could
+            // only create a plain task, so the two entry points disagreed about what adding means —
+            // fuzzy search, resuming a finished task and the `/project` token were hotkey-only.
+            Button {
+                NotificationCenter.default.post(name: .openTaskPalette, object: nil)
+            } label: {
+                Label("New task", systemImage: "plus")
             }
-            .disabled(newTaskName.trimmingCharacters(in: .whitespaces).isEmpty)
+            .help("New task or resume an existing one (Fn + ⌘ + ⇧ + A)")
 
             Divider().frame(height: 16)
 
@@ -864,16 +864,6 @@ struct ProjectListView: View {
     }
 
     // MARK: - Actions
-
-    private func addTask() {
-        // Parsed like the palette, so `/project` files the task here too. This field used to call the
-        // store directly and drop the token silently, so the two entry points disagreed.
-        let parsed = TaskSearch.parse(newTaskName)
-        guard !parsed.name.isEmpty else { return }
-        appState.addTask(name: parsed.name, groupName: parsed.groupToken)
-        newTaskName = ""
-        focus = .newTask
-    }
 
     private func beginRename(_ project: Project) {
         editingName = project.name

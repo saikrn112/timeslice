@@ -87,6 +87,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in self?.showMainWindow() }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: .openTaskPalette)
+            .sink { [weak self] _ in self?.showTaskPalette() }
+            .store(in: &cancellables)
+
         if DemoData.isRequested {
             // Start a live timer so the running/paused UI shows, and open the window for capture.
             if let first = appState.projects.first { engine.switchTo(projectID: first.id) }
@@ -135,6 +139,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// What privacy still does: redact the menu-bar label and blank the windows in a capture.
 
+    /// Opens the task palette — fuzzy search, resume, create with a `/project` token.
+    ///
+    /// One implementation, two triggers: the global hotkey and the window's + button. The window used
+    /// to have its own text field that could only create a plain task, so the two disagreed about
+    /// what "add a task" means.
+    func showTaskPalette() {
+        // The palette stands alone — it shows matches, statuses and today's times, so there's no
+        // reason to drag the whole window forward just to add or resume a task.
+        quickAdd.show(
+
+                search: { [weak self] q in self?.appState.searchTasks(q) ?? [] },
+                todaySeconds: { [weak self] id in self?.appState.todaySeconds(for: id) ?? 0 },
+                onResume: { [weak self] id in
+                    self?.appState.resumeAndStart(projectID: id)
+                    self?.showHUDForRunning()
+                },
+                onCreate: { [weak self] name, group in
+                    self?.appState.addAndStart(name: name, groupName: group)
+                    self?.showHUDForRunning()
+                },
+                groups: { [weak self] in self?.appState.taskProjects ?? [] },
+                displayColor: { [weak self] id in self?.appState.displayColorHex(forTaskID: id) ?? "#8E8E93" },
+                groupName: { [weak self] id in self?.appState.shortGroupName(forTaskID: id) }
+        )
+    }
+
     private func setupHotkeys() {
         hotkeys = GlobalHotkeyManager()
 
@@ -181,26 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         hotkeys.onPrivacy = { [weak self] in self?.privacy.cycleLevel() }
 
-        hotkeys.onQuickAdd = { [weak self] in
-            guard let self else { return }
-            // The palette stands alone — it shows matches, statuses and today's times, so
-            // there's no reason to drag the whole window forward just to add or resume a task.
-            self.quickAdd.show(
-                search: { [weak self] q in self?.appState.searchTasks(q) ?? [] },
-                todaySeconds: { [weak self] id in self?.appState.todaySeconds(for: id) ?? 0 },
-                onResume: { [weak self] id in
-                    self?.appState.resumeAndStart(projectID: id)
-                    self?.showHUDForRunning()
-                },
-                onCreate: { [weak self] name, group in
-                    self?.appState.addAndStart(name: name, groupName: group)
-                    self?.showHUDForRunning()
-                },
-                groups: { [weak self] in self?.appState.taskProjects ?? [] },
-                displayColor: { [weak self] id in self?.appState.displayColorHex(forTaskID: id) ?? "#8E8E93" },
-                groupName: { [weak self] id in self?.appState.shortGroupName(forTaskID: id) }
-            )
-        }
+        hotkeys.onQuickAdd = { [weak self] in self?.showTaskPalette() }
 
         // Requires Accessibility permission. If not yet granted, guide the user, then poll.
         // Only a screenshot run skips this — the modal would sit on top of the window being
