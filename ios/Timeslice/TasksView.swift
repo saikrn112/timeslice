@@ -20,6 +20,7 @@ struct TasksView: View {
     /// simply groups whenever any project exists. The toggle stays because a phone benefits from a
     /// recency view the Mac gets from its switcher, but the default now agrees.
     @State private var grouped = true
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -44,14 +45,17 @@ struct TasksView: View {
                     if model.tasks.isEmpty && model.archivedTasks.isEmpty {
                         empty
                     } else if !query.isEmpty {
-                        card { rows(model.searchResults(query).map(\.project)) }
+                        if showsCreateRow {
+                            card { createRow }
+                        }
+                        rows(matches)
                     } else if grouped && !model.groups.isEmpty {
                         ForEach(model.sections) { section in
                             groupHeader(section)
-                            card { rows(section.tasks) }
+                            rows(section.tasks)
                         }
                     } else {
-                        card { rows(model.recencyOrdered) }
+                        rows(model.recencyOrdered)
                     }
                     archived
                 }
@@ -61,7 +65,6 @@ struct TasksView: View {
             }
             .background(Theme.page)
             .navigationTitle("Timeslice")
-            .searchable(text: $query, prompt: "Search tasks or /project")
             // Add and switch live at the BOTTOM, not in the top-right corner.
             //
             // Those are the two most-used actions in the app and they were in the hardest place on the
@@ -71,41 +74,115 @@ struct TasksView: View {
             // No "Stop": on the Mac stop and pause differ (stop clears the current task so the menu bar
             // goes idle), but here the hero card's pause is right above and does what you want, so a
             // second verb would be a decision for no benefit. Stop stays in the switcher and Shortcuts.
-            .safeAreaInset(edge: .bottom) { bottomBar }
+            .safeAreaInset(edge: .bottom) { searchBar }
+            // The launch hint and any "add a task" entry point now focus the ONE field rather than
+            // presenting a second, weaker add UI.
+            .onChange(of: model.showingAddTask) { _, wants in
+                if wants { searchFocused = true; model.showingAddTask = false }
+            }
             .sheet(item: $editing) { TaskDetailSheet(task: $0) }
         }
     }
 
     // MARK: - Controls
 
-    /// Thumb-reachable Add and Switch, sitting above the tab bar.
+    /// ONE field at the bottom: search and create, in the place Add/Switch used to be.
     ///
-    /// Full-width tappable halves rather than two small glyphs: at the bottom of the screen there's room,
-    /// and a 44pt-tall target you can hit without looking is the whole point of moving them here.
-    private var bottomBar: some View {
-        HStack(spacing: 10) {
-            Button { model.showingAddTask = true } label: {
-                Label("Add task", systemImage: "plus")
-                    .font(.system(size: 15, weight: .semibold))
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                    .background(Capsule().fill(Color.accentColor.opacity(0.18)))
+    /// Three things collapse into this.
+    ///
+    /// **Search and add were the same gesture all along.** You type a name; either it exists, in which case
+    /// you want to start it, or it doesn't, in which case you want to create it. Two separate entry points
+    /// made you decide which up front — and the "add" one was a sheet that couldn't show you what already
+    /// existed, so it invited duplicates.
+    ///
+    /// **Switch is gone.** A custom wheel is a control you have to learn; a filtered list is one you
+    /// already know. Anything the wheel did, typing two letters does faster.
+    ///
+    /// **At the bottom, not the top.** `.searchable` puts the field under the navigation title, which is
+    /// the far end of the screen from your thumb — the same reason Add and Switch moved down here.
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 15))
+                .foregroundStyle(.secondary)
+            TextField("Search or add a task", text: $query)
+                .font(.system(size: 16))
+                .focused($searchFocused)
+                .submitLabel(.go)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                // Enter does the obvious thing: start the top match, or create when there is none.
+                .onSubmit {
+                    if let first = matches.first { model.toggle(taskID: first.id); clearSearch() }
+                    else { createFromQuery() }
+                }
+            if !query.isEmpty {
+                Button { clearSearch() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
             }
-            Button { model.requestSwitcher() } label: {
-                Label("Switch", systemImage: "arrow.triangle.swap")
-                    .font(.system(size: 15, weight: .semibold))
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                    .background(Capsule().fill(Color.secondary.opacity(0.18)))
-            }
-            // Disabled with nothing to switch to: one task means the switcher would open on a list of
-            // itself.
-            .disabled(model.tasks.count < 2)
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .frame(minHeight: 44)
+        .background(Capsule().fill(Color.secondary.opacity(0.16)))
         .padding(.horizontal, 14)
         .padding(.top, 6)
         .padding(.bottom, 4)
         // Lets the list scroll visibly under it rather than ending at a hard edge.
         .background(.bar)
+    }
+
+    /// Ranked matches for the typed text — `TaskSearch` from Core, the Mac's palette ranking.
+    private var matches: [Project] {
+        query.isEmpty ? [] : model.searchResults(query).map(\.project)
+    }
+
+    /// The `/project` token stripped, which is what a new task would actually be named.
+    private var typedName: String {
+        TaskSearch.parse(query).name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Offer create unless the text already names something exactly — otherwise the row invites a
+    /// duplicate of the match directly above it.
+    private var showsCreateRow: Bool {
+        !typedName.isEmpty
+            && !matches.contains { $0.name.caseInsensitiveCompare(typedName) == .orderedSame }
+    }
+
+    /// Create, start, and clear — you typed a task name into a time tracker.
+    private func createFromQuery() {
+        guard !typedName.isEmpty, let id = model.addTask(named: query) else { return }
+        model.toggle(taskID: id)
+        clearSearch()
+    }
+
+    private func clearSearch() {
+        query = ""
+        searchFocused = false
+    }
+
+    /// The create affordance, shown in the list above the matches.
+    private var createRow: some View {
+        Button { createFromQuery() } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "plus.circle.fill")
+                    .font(.system(size: 20))
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Create \u{201C}\(typedName)\u{201D}").font(Theme.rowTitle)
+                    // Names where it will land, since filing is no longer a picker in a sheet. A
+                    // `/project` token still works and is honoured here.
+                    Text(TaskSearch.parse(query).groupToken.map { "in \($0)" } ?? "in Inbox")
+                        .font(Theme.captionSmall).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
     }
 
     /// One low-chrome row: scope on the left, grouping on the right — the Mac's arrangement, where
@@ -157,7 +234,14 @@ struct TasksView: View {
     }
 
     /// Row height, fixed because the `List` below is measured rather than scrolled.
-    private static let taskRowHeight: CGFloat = 46
+    ///
+    /// 56, up from 46: a row is the primary tap target — tapping it starts a timer — and these were tight
+    /// enough that hitting the right one felt like a decision. Apple's floor is 44pt for a target with
+    /// nothing around it; a stack of adjacent ones wants more.
+    private static let taskRowHeight: CGFloat = 56
+    /// Gap between cards. What turns a table into separate objects: a divider says "same thing, next
+    /// line", a gap says "different thing", and the second is what makes a mis-tap feel unlikely.
+    private static let taskRowGap: CGFloat = 8
 
     /// Task rows in a `List`, so **done** and **archive** are system swipes.
     ///
@@ -184,8 +268,19 @@ struct TasksView: View {
                         isCurrent: model.currentTaskID == task.id,
                         onToggle: { model.toggle(taskID: task.id) })
                     .frame(height: Self.taskRowHeight)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-                    .listRowBackground(Color.clear)
+                    .padding(.horizontal, Theme.cardPadding)
+                    // Each row is its OWN card: no separators, its own rounded background, and a gap
+                    // either side. Reported as "having in one table feels like I have to be careful
+                    // while clicking" — which is what a shared container with hairline dividers
+                    // communicates, since nothing says where one target ends.
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: Self.taskRowGap / 2, leading: 0,
+                                              bottom: Self.taskRowGap / 2, trailing: 0))
+                    .listRowBackground(
+                        RoundedRectangle(cornerRadius: Theme.cardRadius)
+                            .fill(Theme.card)
+                            .padding(.vertical, Self.taskRowGap / 2)
+                    )
                     .contentShape(Rectangle())
                     .onTapGesture { model.toggle(taskID: task.id) }
                     .onLongPressGesture { editing = task }
@@ -209,7 +304,7 @@ struct TasksView: View {
         .scrollDisabled(true)
         .scrollContentBackground(.hidden)
         .environment(\.defaultMinListRowHeight, Self.taskRowHeight)
-        .frame(height: Self.taskRowHeight * CGFloat(tasks.count))
+        .frame(height: (Self.taskRowHeight + Self.taskRowGap) * CGFloat(tasks.count))
     }
 
     /// Today or All Time, matching the Mac's scope toggle.
