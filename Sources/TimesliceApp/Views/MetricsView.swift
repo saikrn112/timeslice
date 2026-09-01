@@ -481,7 +481,11 @@ struct MetricsView: View {
     }
 
     /// Devices contributing to this day, in the same first-appearance order the lanes use.
-    private var timelineDevices: [String?] { Aggregations.orderedDevices(daySegments) }
+    private var timelineDevices: [String?] {
+        // Same order the lanes were assigned with, or the labels would sit beside the wrong rows.
+        Aggregations.orderedDevices(
+            daySegments, deviceOrder: (try? appState.storeForEditing.deviceOrder()) ?? [])
+    }
 
     /// Short display name for a device: its user-set label, else the raw id, else "unknown" for
     /// rows recorded before device attribution existed.
@@ -1862,7 +1866,9 @@ struct MetricsView: View {
             .filter { $0.seconds > 0 }
             .sorted { $0.seconds > $1.seconds }
         if isDay {
-            daySegments = Aggregations.daySegments(intervals: all, day: range.start)
+            daySegments = Aggregations.daySegments(
+                intervals: all, day: range.start,
+                deviceOrder: (try? appState.storeForEditing.deviceOrder()) ?? [])
             // Stable legend: first appearance order along the day, computed once here.
             // One entry per GROUP (or per Inbox task), in first-appearance order — a day with
             // 30 tasks across 5 groups gets 5 chips, not 30.

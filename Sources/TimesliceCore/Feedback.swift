@@ -8,6 +8,35 @@ import Foundation
 ///
 /// Deliberately not an interval: it has no duration and is never aggregated. A separate table keeps
 /// it out of every time query rather than needing to be filtered out of all of them.
+/// Which app a note is about.
+///
+/// A note written on the phone is very often about the Mac, and the reverse, so this can't be
+/// inferred from `deviceID` — it has to be said. Three values rather than a free-form tag: the
+/// only question being asked is who has to act on it.
+public enum FeedbackPlatform: String, CaseIterable, Hashable, Sendable, Identifiable {
+    case macOS = "macos"
+    case iOS = "ios"
+    case both = "both"
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .macOS: return "macOS"
+        case .iOS: return "iOS"
+        case .both: return "Both"
+        }
+    }
+
+    public var symbol: String {
+        switch self {
+        case .macOS: return "laptopcomputer"
+        case .iOS: return "iphone"
+        case .both: return "laptopcomputer.and.iphone"
+        }
+    }
+}
+
 public struct Feedback: Identifiable, Hashable, Sendable {
     public let id: Int64
     public let text: String
@@ -17,15 +46,20 @@ public struct Feedback: Identifiable, Hashable, Sendable {
     /// Set once it's been dealt with. Kept rather than deleted, so the list of what's been done
     /// survives; `deleteFeedback` exists for genuine mistakes.
     public let resolvedAt: Date?
+    /// Which app it's about. Optional because notes written before the tag existed have no answer,
+    /// and guessing one from the device that wrote them would be wrong about half the time.
+    public let platform: FeedbackPlatform?
 
     public var isOpen: Bool { resolvedAt == nil }
 
-    public init(id: Int64, text: String, createdAt: Date, deviceID: String?, resolvedAt: Date?) {
+    public init(id: Int64, text: String, createdAt: Date, deviceID: String?, resolvedAt: Date?,
+                platform: FeedbackPlatform? = nil) {
         self.id = id
         self.text = text
         self.createdAt = createdAt
         self.deviceID = deviceID
         self.resolvedAt = resolvedAt
+        self.platform = platform
     }
 
     /// First line, for a one-line list row.

@@ -229,6 +229,9 @@ public final class IntervalStore {
         // row: a note has no duration and is never aggregated, so keeping it out of the
         // interval tables means it cannot accidentally land in a time total.
         _ = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, device_id TEXT, created_at REAL NOT NULL, resolved_at REAL, uid TEXT, updated_at REAL)", nil, nil, nil)
+        // Which app the note is about — added later, so it's a migration for existing notes and
+        // stays NULL on them rather than being guessed from the device that wrote them.
+        _ = sqlite3_exec(db, "ALTER TABLE feedback ADD COLUMN platform TEXT", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_uid ON feedback(uid)", nil, nil, nil)
 
         try backfillSyncColumns()
@@ -1554,11 +1557,21 @@ public final class IntervalStore {
         return out
     }
 
+    /// Every device this database knows about, in display order. One source for the timeline's
+    /// lanes and the sync panel's list.
+    public func deviceOrder() throws -> [String] {
+        var known = try deviceLabels().map { (id: $0.key, label: Optional($0.value)) }
+        if let localDeviceID, !known.contains(where: { $0.id == localDeviceID }) {
+            known.append((id: localDeviceID, label: nil))
+        }
+        return DeviceOrder.sorted(known)
+    }
+
     // MARK: - Feedback
 
     /// Newest first — a note list is read from the top.
     public func listFeedback(includeResolved: Bool = true) throws -> [Feedback] {
-        let sql = "SELECT id, text, device_id, created_at, resolved_at FROM feedback"
+        let sql = "SELECT id, text, device_id, created_at, resolved_at, platform FROM feedback"
             + (includeResolved ? "" : " WHERE resolved_at IS NULL")
             + " ORDER BY created_at DESC"
         let stmt = try prepare(sql)
@@ -1571,23 +1584,27 @@ public final class IntervalStore {
                 createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3)),
                 deviceID: sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : text(stmt, 2),
                 resolvedAt: sqlite3_column_type(stmt, 4) == SQLITE_NULL
-                    ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4))))
+                    ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4)),
+                platform: sqlite3_column_type(stmt, 5) == SQLITE_NULL
+                    ? nil : FeedbackPlatform(rawValue: text(stmt, 5))))
         }
         return out
     }
 
     /// Record a note. Stamped with the local device so "where was I" is answerable later.
     @discardableResult
-    public func addFeedback(_ body: String, at when: Date = Date()) throws -> Int64? {
+    public func addFeedback(_ body: String, platform: FeedbackPlatform? = nil,
+                            at when: Date = Date()) throws -> Int64? {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        let stmt = try prepare("INSERT INTO feedback (text, device_id, created_at, uid, updated_at) VALUES (?, ?, ?, ?, ?)")
+        let stmt = try prepare("INSERT INTO feedback (text, device_id, created_at, uid, updated_at, platform) VALUES (?, ?, ?, ?, ?, ?)")
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, trimmed)
         if let localDeviceID { bindText(stmt, 2, localDeviceID) } else { sqlite3_bind_null(stmt, 2) }
         sqlite3_bind_double(stmt, 3, when.timeIntervalSince1970)
         bindText(stmt, 4, UUID().uuidString)
         sqlite3_bind_double(stmt, 5, Date().timeIntervalSince1970)
+        if let platform { bindText(stmt, 6, platform.rawValue) } else { sqlite3_bind_null(stmt, 6) }
         try step(stmt)
         return sqlite3_last_insert_rowid(db)
     }
@@ -1599,6 +1616,18 @@ public final class IntervalStore {
         let stmt = try prepare("UPDATE feedback SET text = ?, updated_at = ? WHERE id = ?")
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, trimmed)
+        sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(stmt, 3, id)
+        try step(stmt)
+    }
+
+    /// Retag a note. Separate from `updateFeedback` because the tag is edited by clicking a pill,
+    /// with no text change to commit — and passing nil is a real value here (untagged), which an
+    /// optional argument on the reword call couldn't express.
+    public func setFeedbackPlatform(id: Int64, _ platform: FeedbackPlatform?) throws {
+        let stmt = try prepare("UPDATE feedback SET platform = ?, updated_at = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        if let platform { bindText(stmt, 1, platform.rawValue) } else { sqlite3_bind_null(stmt, 1) }
         sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
         sqlite3_bind_int64(stmt, 3, id)
         try step(stmt)
@@ -1628,16 +1657,17 @@ public final class IntervalStore {
     /// The export half: notes with their uids.
     public func feedbackForExport() throws -> [(uid: String, text: String, deviceID: String?,
                                                 createdAt: TimeInterval, resolvedAt: TimeInterval?,
-                                                updatedAt: TimeInterval)] {
-        let stmt = try prepare("SELECT uid, text, device_id, created_at, resolved_at, COALESCE(updated_at, 0) FROM feedback WHERE uid IS NOT NULL")
+                                                updatedAt: TimeInterval, platform: String?)] {
+        let stmt = try prepare("SELECT uid, text, device_id, created_at, resolved_at, COALESCE(updated_at, 0), platform FROM feedback WHERE uid IS NOT NULL")
         defer { sqlite3_finalize(stmt) }
-        var out: [(String, String, String?, TimeInterval, TimeInterval?, TimeInterval)] = []
+        var out: [(String, String, String?, TimeInterval, TimeInterval?, TimeInterval, String?)] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             out.append((text(stmt, 0), text(stmt, 1),
                         sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : text(stmt, 2),
                         sqlite3_column_double(stmt, 3),
                         sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 4),
-                        sqlite3_column_double(stmt, 5)))
+                        sqlite3_column_double(stmt, 5),
+                        sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : text(stmt, 6)))
         }
         return out
     }
@@ -1646,19 +1676,23 @@ public final class IntervalStore {
     @discardableResult
     public func applyRemoteFeedback(uid: String, text body: String, deviceID: String?,
                                     createdAt: TimeInterval, resolvedAt: TimeInterval?,
-                                    remoteUpdatedAt: TimeInterval) throws -> Bool {
+                                    remoteUpdatedAt: TimeInterval,
+                                    platform: String? = nil) throws -> Bool {
         if let id = try localID(table: "feedback", uid: uid) {
             guard remoteUpdatedAt > (try updatedAt(table: "feedback", id: id) ?? 0) else { return false }
-            let stmt = try prepare("UPDATE feedback SET text = ?, resolved_at = ?, updated_at = ? WHERE id = ?")
+            // The tag rides the same LWW as the text: retagging a note on the phone has to land
+            // here, and an older peer that doesn't send the column would otherwise clear it.
+            let stmt = try prepare("UPDATE feedback SET text = ?, resolved_at = ?, updated_at = ?, platform = ? WHERE id = ?")
             defer { sqlite3_finalize(stmt) }
             bindText(stmt, 1, body)
             if let resolvedAt { sqlite3_bind_double(stmt, 2, resolvedAt) } else { sqlite3_bind_null(stmt, 2) }
             sqlite3_bind_double(stmt, 3, remoteUpdatedAt)
-            sqlite3_bind_int64(stmt, 4, id)
+            if let platform { bindText(stmt, 4, platform) } else { sqlite3_bind_null(stmt, 4) }
+            sqlite3_bind_int64(stmt, 5, id)
             try step(stmt)
             return true
         }
-        let stmt = try prepare("INSERT INTO feedback (text, device_id, created_at, resolved_at, uid, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+        let stmt = try prepare("INSERT INTO feedback (text, device_id, created_at, resolved_at, uid, updated_at, platform) VALUES (?, ?, ?, ?, ?, ?, ?)")
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, body)
         if let deviceID { bindText(stmt, 2, deviceID) } else { sqlite3_bind_null(stmt, 2) }
@@ -1666,6 +1700,7 @@ public final class IntervalStore {
         if let resolvedAt { sqlite3_bind_double(stmt, 4, resolvedAt) } else { sqlite3_bind_null(stmt, 4) }
         bindText(stmt, 5, uid)
         sqlite3_bind_double(stmt, 6, remoteUpdatedAt)
+        if let platform { bindText(stmt, 7, platform) } else { sqlite3_bind_null(stmt, 7) }
         try step(stmt)
         return true
     }

@@ -98,9 +98,12 @@ struct MainWindowView: View {
     /// clicks deep in a panel of preferences.
     private var notesButton: some View {
         Button { showNotes.toggle() } label: {
-            Image(systemName: openNoteCount > 0 ? "bubble.left.fill" : "bubble.left")
+            // Outline and secondary, like the gear and the eye beside it. A filled accent bubble
+            // read as a live alert rather than as a third utility button — the open count belongs
+            // in the tooltip, not in the chrome.
+            Image(systemName: "bubble.left")
                 .font(.system(size: 12))
-                .foregroundStyle(openNoteCount > 0 ? Color.accentColor : Color.secondary)
+                .foregroundStyle(Color.secondary)
         }
         .buttonStyle(.borderless)
         .help(openNoteCount > 0 ? "Notes — \(openNoteCount) open" : "Notes")

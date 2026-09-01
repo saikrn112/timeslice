@@ -515,16 +515,17 @@ final class SyncController: ObservableObject {
                         lastSeen: Date(), isThisDevice: true,
                         currentTask: myTask, isRunning: engine.runningSince != nil,
                         isStale: false)
-        // Sorted by device id, the same key the day timeline's lanes use, and with this device
-        // NOT hoisted to the top — so a device sits in the same position in both places. Ordering by
-        // last-seen looked reasonable but meant the list reshuffled as devices synced, and never
-        // matched the lane order beside it.
+        // Sorted by `DeviceOrder`, the same comparator the day timeline's lanes use, and with this
+        // device NOT hoisted to the top — so a device sits in the same position in both places.
+        // Ordering by last-seen looked reasonable but meant the list reshuffled as devices synced,
+        // and never matched the lane order beside it.
         peers = ([mine] + discovered
             .map { Peer(id: $0.id, label: $0.label, lastSeen: $0.lastSeen, isThisDevice: false,
                         currentTask: taskByDevice[$0.id]?.name,
                         isRunning: taskByDevice[$0.id]?.running ?? false,
                         isStale: taskByDevice[$0.id].map { !$0.live } ?? false) })
-            .sorted { $0.id < $1.id }
+            .sorted { DeviceOrder.key(id: $0.id, label: $0.label)
+                    < DeviceOrder.key(id: $1.id, label: $1.label) }
         runningElsewhere = markers
             .filter { $0.claimsTimer && $0.isFresh(now: now, cutoff: TakeoverPolicy.livenessCutoff,
                                                    observedAt: observedAt[$0.deviceID]) }
