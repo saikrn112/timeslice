@@ -66,8 +66,12 @@ struct ProjectListView: View {
         VStack(spacing: 0) {
             selectionToolbar
             list
-            Divider()
-            if selecting { selectionActionBar } else { addBar }
+            // The divider and bar only exist while selecting now — the add buttons moved up beside
+            // Select, so there's nothing to show here otherwise.
+            if selecting {
+                Divider()
+                selectionActionBar
+            }
             KeybindingsFooter()
         }
         .focusable()
@@ -679,6 +683,28 @@ struct ProjectListView: View {
                     .buttonStyle(.borderless).font(.system(size: 11))
                 } else {
                     Spacer()
+
+                    // Up here beside Select rather than in a bar at the bottom: both are list-level
+                    // actions, so they belong in the list's own header.
+                    Button {
+                        NotificationCenter.default.post(name: .openTaskPalette, object: nil)
+                    } label: {
+                        Label("New task", systemImage: "plus").font(.system(size: 12))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("New task or resume an existing one (Fn + ⌘ + ⇧ + A)")
+
+                    Divider().frame(height: 14)
+
+                    // Create an empty project up front, then drag tasks into it — the reverse of
+                    // assigning from a task, and how you'd set up groups before categorising.
+                    Button {
+                        creatingEmptyProject = true
+                    } label: {
+                        Label("Project", systemImage: "folder.badge.plus").font(.system(size: 12))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("New project")
                 }
             }
             .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 0)
@@ -717,32 +743,6 @@ struct ProjectListView: View {
     private func finishSelecting() {
         ticked.removeAll()
         selecting = false
-    }
-
-    private var addBar: some View {
-        HStack {
-            // Opens the palette rather than being a second, weaker add form. The field here could
-            // only create a plain task, so the two entry points disagreed about what adding means —
-            // fuzzy search, resuming a finished task and the `/project` token were hotkey-only.
-            Button {
-                NotificationCenter.default.post(name: .openTaskPalette, object: nil)
-            } label: {
-                Label("New task", systemImage: "plus")
-            }
-            .help("New task or resume an existing one (Fn + ⌘ + ⇧ + A)")
-
-            Divider().frame(height: 16)
-
-            // Create an empty project up front, then drag tasks into it — the reverse of
-            // assigning from a task, and how you'd set up groups before categorising.
-            Button {
-                creatingEmptyProject = true
-            } label: {
-                Label("Project", systemImage: "folder.badge.plus")
-            }
-            .help("New project")
-        }
-        .padding(12)
     }
 
     // MARK: - Building blocks
@@ -910,7 +910,10 @@ struct KeybindingsFooter: View {
 }
 
 /// Two columns of dots — the conventional "this is draggable" grip, as on reorderable list rows.
-private struct GripDots: View {
+///
+/// Internal rather than private: the allocations sheet reorders by drag too, and a second copy of
+/// this would be a second thing to keep looking the same.
+struct GripDots: View {
     var body: some View {
         HStack(spacing: 2) {
             ForEach(0..<2, id: \.self) { _ in

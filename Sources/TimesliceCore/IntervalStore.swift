@@ -1295,6 +1295,23 @@ public final class IntervalStore {
         }
     }
 
+    /// Persist an explicit order for the live allocations, by position in `orderedIDs`.
+    ///
+    /// Used by drag-and-drop, where a row can land anywhere — `moveTarget` only swaps neighbours,
+    /// which can't express "moved to the top".
+    public func reorderTargets(_ orderedIDs: [Int64]) throws {
+        try transaction {
+            for (index, id) in orderedIDs.enumerated() {
+                let stmt = try prepare("UPDATE targets SET sort_order = ?, updated_at = ? WHERE id = ?")
+                sqlite3_bind_int(stmt, 1, Int32(index))
+                sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+                sqlite3_bind_int64(stmt, 3, id)
+                try step(stmt)
+                sqlite3_finalize(stmt)
+            }
+        }
+    }
+
     /// Retire an allocation, or bring it back. Never deletes: the point is to keep it for history.
     public func setTargetCompleted(id: Int64, completed: Bool, at when: Date = Date()) throws {
         let stmt = try prepare("UPDATE targets SET completed_at = ?, updated_at = ? WHERE id = ?")

@@ -2628,6 +2628,13 @@ func testAllocationOrdering() throws {
     check(try order() == [a, c, b], "moving the first one up is a no-op, not a crash")
     try store.moveTarget(id: try store.listTargets()[2].id, up: false)
     check(try order() == [a, c, b], "and so is moving the last one down")
+
+    // Drag-and-drop moves a row to an arbitrary position, which a neighbour swap can't express.
+    let ids = try store.listTargets().map(\.id)
+    try store.reorderTargets([ids[2], ids[0], ids[1]])
+    check(try order() == [b, a, c], "an explicit order is persisted as given")
+    try store.reorderTargets(try store.listTargets().map(\.id).reversed())
+    check(try order() == [c, a, b], "and reversing it works too")
 }
 
 func testDuplicateNameIsProjectScoped() throws {
