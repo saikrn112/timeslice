@@ -35,24 +35,33 @@ struct TimerLiveActivity: Widget {
                     .padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    ClockText(state: context.state)
-                        .font(.system(.title3, design: .monospaced))
-                        .foregroundStyle(clockColor(context.state))
-                        // Monospaced digits still reflow as the hour rolls over; a fixed width
-                        // stops the whole region shifting once a session passes an hour.
-                        .frame(minWidth: 82, alignment: .trailing)
-                        .padding(.trailing, 4)
+                    // Labelled "today", because the bottom row also shows the session. Two unlabelled
+                    // times is what made this ambiguous; naming the big one resolves it without
+                    // dropping either.
+                    VStack(alignment: .trailing, spacing: 0) {
+                        ClockText(state: context.state)
+                            .font(.system(.title3, design: .monospaced))
+                            .foregroundStyle(clockColor(context.state))
+                        Text("today")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                    }
+                    // Monospaced digits still reflow as the hour rolls over; a fixed width stops the
+                    // whole region shifting once a session passes an hour.
+                    .frame(minWidth: 82, alignment: .trailing)
+                    .padding(.trailing, 4)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(spacing: 6) {
+                        // Two times here, both LABELLED. The expanded island is opened deliberately and
+                        // has the width for it, so "session" and "today" can coexist — unlike the Lock
+                        // Screen, where an unlabelled second number just raised "why are there two?".
                         HStack {
                             Label(context.state.isRunning ? "Tracking" : "Paused",
                                   systemImage: context.state.isRunning ? "record.circle" : "pause.circle")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            // The session, since the big clock is already today's total — the two
-                            // together answer "how long on this?" and "how much today?".
                             SessionText(state: context.state)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
@@ -202,7 +211,10 @@ private struct SessionText: View {
                     .monospacedDigit()
             }
         } else {
-            Text("paused · today \(Format.compact(state.committedTodaySeconds))")
+            // Just "session —". It used to read "paused · today 17s", which repeated the Paused label
+            // beside it AND restated the today figure already shown above it — three copies of two
+            // facts, in the smallest text on the card.
+            Text("session —")
         }
     }
 }
@@ -215,55 +227,59 @@ private struct SessionText: View {
 private struct LockScreenView: View {
     let state: TimerActivityAttributes.ContentState
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            header
-            // NO switcher here, deliberately. The Lock Screen is a status surface — it should answer
-            // "what am I on and for how long", and a row of OTHER tasks turned it into a menu of things
-            // you aren't doing. Pause/resume and previous stay, because those act on the current task.
-            // The switcher lives in the expanded island, which you open on purpose.
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-    }
+    /// Width reserved for the clock in EVERY state.
+    ///
+    /// The name and the time drifted sideways between running and paused, because both the clock's digits
+    /// and the subtitle's length changed and the layout re-flowed around them. Reserving the widest case
+    /// pins the whole row: the name column is then whatever is left, which is a constant.
+    private static let clockWidth: CGFloat = 96
 
-    private var header: some View {
+    var body: some View {
         HStack(spacing: 12) {
             RoundedRectangle(cornerRadius: 3)
                 .fill(Color(hex: state.colorHex))
-                .frame(width: 5, height: 44)
-            VStack(alignment: .leading, spacing: 3) {
+                .frame(width: 5, height: 42)
+
+            VStack(alignment: .leading, spacing: 2) {
                 Text(state.taskName)
                     .font(.headline)
                     .lineLimit(1)
-                SessionText(state: state)
+                    .minimumScaleFactor(0.85)
+                // STATUS ONLY — no second time.
+                //
+                // This used to read "session 0:02" while the big clock read today's total, which is two
+                // different quantities in one card with nothing saying which was which. On a surface you
+                // glance at while locked, one number is the entire budget. The session figure still
+                // exists in the expanded island, where there's room to label both.
+                Text(state.isRunning ? "tracking" : "paused")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Spacer(minLength: 6)
+            // Takes the slack, so the name always starts at the same x and the clock always ends at the
+            // same one.
+            .frame(maxWidth: .infinity, alignment: .leading)
+
             ClockText(state: state)
                 .font(.system(.title2, design: .monospaced))
                 .foregroundStyle(clockColor(state))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(width: Self.clockWidth, alignment: .trailing)
 
-            // Pause/resume, then "previous task" — the two things worth doing without unlocking.
+            // ONE control: pause/resume. The "previous task" button next to it was a second, unlabelled
+            // circle doing something you can't verify from a locked screen — and switching tasks isn't a
+            // lock-screen job. That lives in the expanded island, which you open on purpose.
             Button(intent: ToggleFromActivityIntent()) {
                 Image(systemName: state.isRunning ? "pause.fill" : "play.fill")
-                    .font(.system(size: 15, weight: .bold))
-                    .frame(width: 38, height: 38)
+                    .font(.system(size: 16, weight: .bold))
+                    .frame(width: 40, height: 40)
             }
             .buttonStyle(.plain)
             .background(Circle().fill(state.isRunning ? Color.orange : Color.green))
             .foregroundStyle(.white)
             .clipShape(Circle())
-
-            Button(intent: PreviousTaskIntent()) {
-                Image(systemName: "arrow.uturn.backward")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 34, height: 34)
-            }
-            .buttonStyle(.plain)
-            .background(Circle().fill(Color.secondary.opacity(0.25)))
-            .clipShape(Circle())
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
     }
 }
