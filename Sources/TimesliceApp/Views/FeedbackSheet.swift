@@ -87,6 +87,14 @@ struct FeedbackSheet: View {
             .buttonStyle(.plain)
             .help(note.isOpen ? "Mark done" : "Reopen")
 
+            // The id, so a note can be referred to by number when handing work to an agent.
+            // Monospaced and fixed-width so the text column still lines up down the list.
+            Text("#\(note.id)")
+                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
+                .foregroundStyle(.tertiary)
+                .frame(width: 30, alignment: .trailing)
+                .textSelection(.enabled)
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(note.text)
                     .font(.callout)
