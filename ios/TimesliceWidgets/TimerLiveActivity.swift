@@ -157,20 +157,36 @@ private struct SwitcherRow: View {
 /// Showing only the session was the original bug: switching tasks made the number visibly collapse
 /// to zero instead of continuing the day's total, which reads as the timer having been reset.
 ///
-/// Frozen at the committed figure when paused, since `timerInterval` has no notion of "stopped".
+/// ## The "PowerPoint fade" on pause
+///
+/// This used to branch: `Text(timerInterval:)` while running, a plain `Text(Format.duration(…))` when
+/// paused. Two DIFFERENT views for the same clock, so pausing didn't update a view — it replaced one
+/// subtree with another, and ActivityKit cross-faded the swap. That's the transition; it wasn't the
+/// button or the layout.
+///
+/// `pauseTime` is the API for exactly this: one `Text(timerInterval:)` in both states, frozen at an
+/// instant when paused. Same view, so the system has something to morph instead of something to
+/// dissolve — which is what the Stopwatch does.
+///
+/// The freeze instant is `liveOrigin + committedTodaySeconds`, which by construction renders precisely
+/// today's committed figure, whatever `liveOrigin` happens to be.
 private struct ClockText: View {
     let state: TimerActivityAttributes.ContentState
 
     var body: some View {
-        if state.isRunning {
-            // `showsHours` matched to the magnitude: `44:45` under an hour, `1:04:45` above it, rather
-            // than a permanent `0:` prefix eating the island's scarcest resource. It's the only
-            // precision knob the API has — see `TimerDisplay.showsHours`.
-            Text(timerInterval: state.liveOrigin...Date.distantFuture,
-                 pauseTime: nil, countsDown: false, showsHours: state.showsHours)
-        } else {
-            Text(Format.duration(state.committedTodaySeconds))
-        }
+        let origin = state.liveOrigin
+        // `showsHours` matched to the magnitude: `44:45` under an hour, `1:04:45` above it, rather than a
+        // permanent `0:` prefix eating the island's scarcest resource. It's the only precision knob the
+        // API has — see `TimerDisplay.showsHours`.
+        Text(timerInterval: origin...Date.distantFuture,
+             pauseTime: state.isRunning
+                 ? nil
+                 : origin.addingTimeInterval(state.committedTodaySeconds),
+             countsDown: false,
+             showsHours: state.showsHours)
+            // Digits roll rather than cross-fade when the value jumps (a task switch, or the hour
+            // boundary re-render).
+            .contentTransition(.numericText())
     }
 }
 
@@ -208,24 +224,19 @@ private struct LockScreenView: View {
                 .fill(Color(hex: state.colorHex))
                 .frame(width: 5, height: 42)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(state.taskName)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                // STATUS ONLY — no second time.
-                //
-                // This used to read "session 0:02" while the big clock read today's total: two different
-                // quantities in one card with nothing saying which was which. The session figure is now
-                // gone from every presentation, not just this one — today's total is the number worth
-                // glancing at, and adding a second one only creates the question of which is which.
-                Text(state.isRunning ? "tracking" : "paused")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            // Takes the slack, so the name always starts at the same x and the clock always ends at the
-            // same one.
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // NAME ONLY — no status line.
+            //
+            // "tracking"/"paused" was a third element changing on every pause, which is a third thing for
+            // the system to animate. It was also redundant: the button already shows pause-vs-play and the
+            // digits already stop. Removing it leaves exactly what you asked for — name, colour, clock,
+            // one button.
+            Text(state.taskName)
+                .font(.headline)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                // Takes the slack, so the name always starts at the same x and the clock always ends at
+                // the same one, whatever the state.
+                .frame(maxWidth: .infinity, alignment: .leading)
 
             ClockText(state: state)
                 .font(.system(.title2, design: .monospaced))
@@ -237,10 +248,15 @@ private struct LockScreenView: View {
             // ONE control: pause/resume. The "previous task" button next to it was a second, unlabelled
             // circle doing something you can't verify from a locked screen — and switching tasks isn't a
             // lock-screen job. That lives in the expanded island, which you open on purpose.
+            //
+            // The Circle and its frame are IDENTICAL in both states — only the glyph and the fill colour
+            // differ — so the system animates a symbol and a tint rather than re-laying out a button.
             Button(intent: ToggleFromActivityIntent()) {
                 Image(systemName: state.isRunning ? "pause.fill" : "play.fill")
                     .font(.system(size: 16, weight: .bold))
                     .frame(width: 40, height: 40)
+                    // Morphs pause↔play instead of dissolving one into the other.
+                    .contentTransition(.symbolEffect(.replace))
             }
             .buttonStyle(.plain)
             .background(Circle().fill(state.isRunning ? Color.orange : Color.green))
