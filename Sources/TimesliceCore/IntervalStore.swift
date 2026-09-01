@@ -192,6 +192,11 @@ public final class IntervalStore {
                 updated_at   REAL
             )
             """, nil, nil, nil)
+        // Manual ordering for the allocations list. Backfilled from rowid so existing rows keep the
+        // order they already appeared in rather than jumping around on first launch.
+        _ = sqlite3_exec(db, "ALTER TABLE targets ADD COLUMN sort_order INTEGER", nil, nil, nil)
+        _ = sqlite3_exec(db, "UPDATE targets SET sort_order = id WHERE sort_order IS NULL", nil, nil, nil)
+
         // When an allocation started and, once retired, when it finished. Needed for the historical
         // "allocated vs spent" view: without a start there's no span to measure over.
         //
@@ -309,13 +314,18 @@ public final class IntervalStore {
             if existing.finished { try setProjectFinished(id: existing.id, finished: false) }
             return existing.id
         }
-        let sql = "INSERT INTO projects (name, color_hex, sort_order, uid, updated_at) VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects), ?, ?)"
+        // `inGroup` also ASSIGNS the group, not just scopes the duplicate lookup. Doing only the
+        // lookup meant a caller that forgot the follow-up `setTaskProject` created the task in Inbox
+        // while believing it was filed — and the next create with the same name then didn't match it.
+        let sql = "INSERT INTO projects (name, color_hex, sort_order, task_project_id, uid, updated_at) VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects), ?, ?, ?)"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, name)
         bindText(stmt, 2, colorHex)
-        bindText(stmt, 3, UUID().uuidString)
-        sqlite3_bind_double(stmt, 4, Date().timeIntervalSince1970)
+        if let taskProjectID { sqlite3_bind_int64(stmt, 3, taskProjectID) }
+        else { sqlite3_bind_null(stmt, 3) }
+        bindText(stmt, 4, UUID().uuidString)
+        sqlite3_bind_double(stmt, 5, Date().timeIntervalSince1970)
         try step(stmt)
         return sqlite3_last_insert_rowid(db)
     }
@@ -1243,8 +1253,9 @@ public final class IntervalStore {
     /// that asks "am I on track", only in history.
     public func listTargets(includeCompleted: Bool = false) throws -> [Target] {
         let sql = "SELECT id, subject_kind, subject_id, seconds, direction, period, "
-            + "COALESCE(created_at, 0), completed_at FROM targets"
+            + "COALESCE(created_at, 0), completed_at, COALESCE(sort_order, id) FROM targets"
             + (includeCompleted ? "" : " WHERE completed_at IS NULL")
+            + " ORDER BY COALESCE(sort_order, id)"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         var out: [Target] = []
@@ -1257,9 +1268,31 @@ public final class IntervalStore {
                               direction: direction, period: period,
                               createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6)),
                               completedAt: sqlite3_column_type(stmt, 7) == SQLITE_NULL
-                                  ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7))))
+                                  ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7)),
+                              sortOrder: Int(sqlite3_column_int(stmt, 8))))
         }
         return out
+    }
+
+    /// Move an allocation up or down among the LIVE ones by swapping with its neighbour.
+    ///
+    /// A swap rather than renumbering the whole list: one UPDATE pair per move, and it can't drift
+    /// out of step with what's on screen.
+    public func moveTarget(id: Int64, up: Bool) throws {
+        let live = try listTargets()
+        guard let i = live.firstIndex(where: { $0.id == id }) else { return }
+        let j = up ? i - 1 : i + 1
+        guard live.indices.contains(j) else { return }
+        try transaction {
+            for (target, order) in [(live[i], live[j].sortOrder), (live[j], live[i].sortOrder)] {
+                let stmt = try prepare("UPDATE targets SET sort_order = ?, updated_at = ? WHERE id = ?")
+                sqlite3_bind_int(stmt, 1, Int32(order))
+                sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+                sqlite3_bind_int64(stmt, 3, target.id)
+                try step(stmt)
+                sqlite3_finalize(stmt)
+            }
+        }
     }
 
     /// Retire an allocation, or bring it back. Never deletes: the point is to keep it for history.
@@ -1280,8 +1313,8 @@ public final class IntervalStore {
                           direction: Target.Direction, period: Target.Period) throws -> Int64 {
         // The conflict target names the partial index's predicate too, so this upserts against the
         // LIVE allocation and a retired one for the same subject is left alone.
-        let sql = "INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at, created_at) "
-            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        let sql = "INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at, created_at, sort_order) "
+            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM targets)) "
             + "ON CONFLICT(subject_kind, subject_id) WHERE completed_at IS NULL DO UPDATE SET "
             + "seconds = excluded.seconds, direction = excluded.direction, "
             + "period = excluded.period, updated_at = excluded.updated_at"

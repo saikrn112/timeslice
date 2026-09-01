@@ -866,13 +866,13 @@ struct ProjectListView: View {
     // MARK: - Actions
 
     private func addTask() {
-        let name = newTaskName.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { return }
-        let index = appState.projects.count
-        _ = try? store.createProject(name: name, colorHex: Palette.color(forIndex: index))
+        // Parsed like the palette, so `/project` files the task here too. This field used to call the
+        // store directly and drop the token silently, so the two entry points disagreed.
+        let parsed = TaskSearch.parse(newTaskName)
+        guard !parsed.name.isEmpty else { return }
+        appState.addTask(name: parsed.name, groupName: parsed.groupToken)
         newTaskName = ""
         focus = .newTask
-        appState.reload()
     }
 
     private func beginRename(_ project: Project) {

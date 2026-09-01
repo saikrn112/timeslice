@@ -255,6 +255,28 @@ struct TargetsSheet: View {
                 .labelsHidden()
                 .frame(width: 90)
 
+                // Manual order — the Allocations list follows it, so the ones you care about can sit
+                // at the top instead of being sorted for you.
+                Button {
+                    try? store.moveTarget(id: existing.id, up: true)
+                    reload()
+                } label: {
+                    Image(systemName: "chevron.up").font(.system(size: 8, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .disabled(targets.first?.id == existing.id)
+                .help("Move up")
+
+                Button {
+                    try? store.moveTarget(id: existing.id, up: false)
+                    reload()
+                } label: {
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .disabled(targets.last?.id == existing.id)
+                .help("Move down")
+
                 // Retire rather than delete: the allocation leaves the live list but keeps its
                 // history, which is the whole reason for the state.
                 Button {

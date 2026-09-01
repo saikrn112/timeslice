@@ -159,7 +159,26 @@ private struct PaletteView: View {
     private var showsCreateRow: Bool {
         let q = parsed.name
         guard !q.isEmpty else { return false }
-        return !matches.contains { $0.project.name.caseInsensitiveCompare(q) == .orderedSame }
+        // A duplicate only blocks Create if it's in the SAME project you're filing into. Comparing
+        // names alone meant "meetings /profiling" was refused because a `meetings` existed under
+        // `job chores` — two different tasks, and the store already allows them.
+        if let token = parsed.groupToken, !token.isEmpty {
+            guard let target = groups().first(where: {
+                $0.name.caseInsensitiveCompare(token) == .orderedSame
+            }) else {
+                // Naming a project that doesn't exist yet: it has no tasks, so nothing can clash.
+                return true
+            }
+            return !matches.contains {
+                $0.project.name.caseInsensitiveCompare(q) == .orderedSame
+                    && $0.project.taskProjectID == target.id
+            }
+        }
+        // No token → filing into Inbox, so only an Inbox task of that name is a duplicate.
+        return !matches.contains {
+            $0.project.name.caseInsensitiveCompare(q) == .orderedSame
+                && $0.project.taskProjectID == nil
+        }
     }
     private var rowCount: Int { matches.count + (showsCreateRow ? 1 : 0) }
 

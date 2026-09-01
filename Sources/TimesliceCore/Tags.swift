@@ -105,12 +105,14 @@ public struct Target: Identifiable, Hashable, Sendable {
     /// When this allocation started, and when it was retired (nil while live).
     public let createdAt: Date
     public let completedAt: Date?
+    /// Manual position in the allocations list.
+    public let sortOrder: Int
 
     public var isLive: Bool { completedAt == nil }
 
     public init(id: Int64, subject: TargetSubject, seconds: TimeInterval,
                 direction: Direction, period: Period,
-                createdAt: Date = Date(), completedAt: Date? = nil) {
+                createdAt: Date = Date(), completedAt: Date? = nil, sortOrder: Int = 0) {
         self.id = id
         self.subject = subject
         self.seconds = seconds
@@ -118,6 +120,7 @@ public struct Target: Identifiable, Hashable, Sendable {
         self.period = period
         self.createdAt = createdAt
         self.completedAt = completedAt
+        self.sortOrder = sortOrder
     }
 }
 

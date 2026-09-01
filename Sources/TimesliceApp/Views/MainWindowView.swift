@@ -120,8 +120,9 @@ struct MainWindowView: View {
             return "Privacy off — the menu bar shows your task name and these windows appear "
                  + "in a screen share. Click to hide everything (Fn + ⌘ + ⇧ + P)."
         case .iconOnly:
-            return "Privacy on — task name hidden, windows blank out in a screen share, and the "
-                 + "switcher is disabled. Click to reveal again (Fn + ⌘ + ⇧ + P)."
+            return "Privacy on — task name hidden and windows blank out in a screen share. The "
+                 + "switcher and palette still work; they're excluded from capture too. "
+                 + "Click to reveal again (Fn + ⌘ + ⇧ + P)."
         }
     }
 }

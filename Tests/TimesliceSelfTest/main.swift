@@ -2608,6 +2608,47 @@ func testFeedback() throws {
     }
 }
 
+// MARK: - macOS feedback fixes
+
+func testAllocationOrdering() throws {
+    print("Allocation ordering:")
+    let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+    let a = try store.upsertTaskProject(name: "aaa", colorHex: "#fff")
+    let b = try store.upsertTaskProject(name: "bbb", colorHex: "#fff")
+    let c = try store.upsertTaskProject(name: "ccc", colorHex: "#fff")
+    for g in [a, b, c] {
+        try store.setTarget(subject: .project(g), seconds: 3600, direction: .atLeast, period: .week)
+    }
+    func order() throws -> [Int64] { try store.listTargets().map { $0.subject.id } }
+    check(try order() == [a, b, c], "new allocations land at the end, in creation order")
+
+    try store.moveTarget(id: try store.listTargets()[2].id, up: true)
+    check(try order() == [a, c, b], "moving one up swaps it with its neighbour")
+    try store.moveTarget(id: try store.listTargets()[0].id, up: true)
+    check(try order() == [a, c, b], "moving the first one up is a no-op, not a crash")
+    try store.moveTarget(id: try store.listTargets()[2].id, up: false)
+    check(try order() == [a, c, b], "and so is moving the last one down")
+}
+
+func testDuplicateNameIsProjectScoped() throws {
+    print("Project-scoped names:")
+    let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+    let jobs = try store.upsertTaskProject(name: "job chores", colorHex: "#fff")
+    let prof = try store.upsertTaskProject(name: "profiling", colorHex: "#fff")
+
+    let first = try store.createProject(name: "meetings", colorHex: "#fff", inGroup: jobs)
+    // The reported bug: a `meetings` under one project must not block one under another.
+    let second = try store.createProject(name: "meetings", colorHex: "#fff", inGroup: prof)
+    check(first != second, "the same name under a different project is a different task")
+    let both = try store.listProjects(includeArchived: true).filter { $0.name == "meetings" }
+    check(both.count == 2, "both exist")
+    check(both.compactMap(\.taskProjectID).sorted() == [jobs, prof].sorted(),
+          "and each is filed in the project it was created for")
+    // And within one project it still reuses rather than forking.
+    let again = try store.createProject(name: "meetings", colorHex: "#fff", inGroup: prof)
+    check(again == second, "but the same name in the SAME project still reuses")
+}
+
 // MARK: - Run
 
 do {
@@ -2638,6 +2679,8 @@ do {
     try testTagSync()
     try testAllocationLifecycle()
     try testFeedback()
+    try testAllocationOrdering()
+    try testDuplicateNameIsProjectScoped()
     testTagTotals()
     testTargetMath()
 } catch {

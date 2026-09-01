@@ -126,15 +126,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// actually cycled to a different task before releasing.
     private var switcherStartID: Int64?
 
-    /// When privacy hides the task name (icon-only), suppress the switcher HUD + its shortcuts
-    /// entirely, so nothing task-revealing pops up while you're sharing your screen.
-    private var switcherSuppressed: Bool { privacy.level == .iconOnly }
+    /// Privacy mode no longer blocks the switcher or the palette.
+    ///
+    /// It used to, so nothing task-revealing could appear while sharing a screen. That was redundant:
+    /// both panels set `sharingType = .none`, so they are already blank in any capture, including
+    /// full-screen. The guard bought no privacy and cost the ability to switch or add a task at all
+    /// while privacy was on — which is exactly when you're in a meeting and most likely to switch.
+    ///
+    /// What privacy still does: redact the menu-bar label and blank the windows in a capture.
 
     private func setupHotkeys() {
         hotkeys = GlobalHotkeyManager()
 
         hotkeys.onActivate = { [weak self] in
-            guard let self, !self.switcherSuppressed else { return }
+            guard let self else { return }
             // Recency order, frozen for this hold: the task you were previously on is one press
             // away instead of wherever it sits in the list.
             let selectable = self.appState.beginSwitcherSession()
@@ -152,7 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         hotkeys.onCycle = { [weak self] delta in
-            guard let self, !self.switcherSuppressed else { return }
+            guard let self else { return }
             self.appState.moveSelection(by: delta)   // \ forward (+1), ] reverse (-1)
             self.hud.showSwitcher(tasks: self.appState.switcherProjects, selectedID: self.appState.selectedProjectID, todaySeconds: self.appState.todaySecondsByID, runningID: self.engine.runningProjectID, clock: self.engine.clock,
                                  displayColor: { [weak self] id in self?.appState.displayColorHex(forTaskID: id) ?? "#8E8E93" },
@@ -160,7 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         hotkeys.onCommit = { [weak self] in
-            guard let self, !self.switcherSuppressed else { return }
+            guard let self else { return }
             guard let selected = self.appState.selectedProjectID else { return }
             // Quick press+release on the already-running task → pause it (stays the current
             // task, so the menu bar keeps showing it). Otherwise switch to the selected task.
@@ -177,7 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeys.onPrivacy = { [weak self] in self?.privacy.cycleLevel() }
 
         hotkeys.onQuickAdd = { [weak self] in
-            guard let self, !self.switcherSuppressed else { return }   // don't reveal input while sharing
+            guard let self else { return }
             // The palette stands alone — it shows matches, statuses and today's times, so
             // there's no reason to drag the whole window forward just to add or resume a task.
             self.quickAdd.show(

@@ -64,7 +64,7 @@ below follows it. Hover any bar for the numbers; the solid inner bar is focused 
   your *own* Drive — no account with us, no server we run. Off by default; see
   [docs/google-setup.md](docs/google-setup.md).
 - **Screen-share safe**: one toggle (**Fn + ⌘ + ⇧ + P**) hides everything at once — the menu-bar
-  task name, the switcher, and the windows themselves (they stay visible to you but come out
+  task name and the windows themselves (they stay visible to you but come out
   blank in any capture, including full-screen). The timer keeps running the whole time.
 
 ## Global hotkeys
@@ -76,7 +76,7 @@ together, then press the last key. These work from any app:
 |---|---|---|
 | Fn + ⌘ + ⇧ | `\` (next) or `]` (prev) | Cycle the task switcher; **release the three keys** to switch to the highlighted task. A quick press-and-release (without cycling) just pauses the current task. |
 | Fn + ⌘ + ⇧ | `A` | Open the task palette: fuzzy-search your tasks, including finished ones and by project name (archived tasks stay out of the way). Enter resumes the highlighted one — un-finishing it as needed — or creates a new task from the last row. Append `/project` to file a new task as you create it. |
-| Fn + ⌘ + ⇧ | `P` | Toggle privacy: hides the menu-bar task name, blanks the windows in any screen capture, and disables the switcher. Press again to reveal. |
+| Fn + ⌘ + ⇧ | `P` | Toggle privacy: hides the menu-bar task name and blanks the windows in any screen capture. The switcher and palette keep working — they're excluded from capture too. Press again to reveal. |
 
 Inside the app window/popover (no modifiers): **↑ / ↓** to select a task, **Space** to start/stop.
 

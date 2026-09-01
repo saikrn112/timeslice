@@ -1469,18 +1469,11 @@ struct MetricsView: View {
                                        todaySeconds: today, rangeSeconds: inRange,
                                        viewedRangeDays: viewedRangeDays)
         }
-        // Trouble first: breached ceilings, then things falling behind.
-        .sorted { rank($0.verdict) < rank($1.verdict) }
+        // The order you chose, not one I chose for you. `listTargets` returns them by `sort_order`,
+        // so this deliberately doesn't re-sort — an automatic trouble-first sort and a manual order
+        // can't both hold, and you asked for the manual one.
     }
 
-    private func rank(_ v: TargetProgress.Verdict) -> Int {
-        switch v {
-        case .over: return 0
-        case .behind: return 1
-        case .onPace: return 2
-        case .met: return 3
-        }
-    }
 
     /// nil when the subject has been deleted — a stale target shouldn't render as a blank row.
     private func targetName(_ subject: TargetSubject, tasks: [Project]) -> String? {
