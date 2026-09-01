@@ -94,12 +94,6 @@ struct MetricsView: View {
     @State private var showTargetsSheet = false
     /// Budget row under the pointer, purely so the row shows it can be clicked.
     @State private var hoveredTargetID: Int64?
-    /// Allocation being dragged by its grip on THIS page, and the row it's over.
-    @State private var draggingTargetID: Int64?
-    @State private var dropTargetID: Int64?
-    /// Grip under the pointer. Its own state, because the grip is an overlay OUTSIDE the row's
-    /// bounds, so the row's `onHover` never fires while you're on it.
-    @State private var hoveredGripID: Int64?
 
 
     /// Bucket under the cursor on the hours / focus charts.
@@ -1578,51 +1572,24 @@ struct MetricsView: View {
             let me = focusFor(row.target.subject)
             pinnedFocus = (pinnedFocus == me) ? nil : me
         }
-        // The grip sits in the section's left margin as an overlay, NOT in the HStack: in the flow it
-        // pushed every column right and left the captions above pointing at the wrong things.
-        .overlay(alignment: .leading) {
-            GripDots()
-                .foregroundStyle(.tertiary)
-                // Always faintly there, brighter under the pointer. Tying visibility to the ROW's
-                // hover was circular: the grip is outside the row's bounds, so pointing at it never
-                // marked the row hovered and the grip never appeared to be grabbed.
-                .opacity(hoveredGripID == row.target.id || draggingTargetID == row.target.id
-                         ? 1 : 0.3)
-                // A hit area larger than the 2pt dots, or a drag almost never starts.
-                .frame(width: 16, height: 20)
-                .contentShape(Rectangle())
-                .onHover { inside in hoveredGripID = inside ? row.target.id : nil }
-                .onDrag {
-                    draggingTargetID = row.target.id
-                    return NSItemProvider(object: String(row.target.id) as NSString)
-                }
-                .help("Drag to reorder")
-                .offset(x: -16)
-        }
-        .onDrop(of: [.text], isTargeted: Binding(
-            get: { dropTargetID == row.target.id },
-            set: { over in dropTargetID = over ? row.target.id : nil }
-        )) { _ in dropAllocation(onto: row.target.id) }
-        .overlay(alignment: .top) {
-            if dropTargetID == row.target.id, draggingTargetID != nil {
-                Rectangle().fill(Color.accentColor).frame(height: 2)
+        // Reordering by right-click, not by dragging.
+        //
+        // Three attempts at a drag grip here didn't work: `.onDrag` from an overlay offset outside its
+        // parent's bounds, inside a ScrollView, competing with the row's own tap gesture, never
+        // started reliably — and every failure looked identical from the outside. A menu item cannot
+        // half-work, and reordering four rows is not a gesture worth debugging further.
+        .contextMenu {
+            Button("Move up") {
+                try? appState.storeForEditing.moveTarget(id: row.target.id, up: true)
+                recompute()
             }
+            .disabled(targets.first?.id == row.target.id)
+            Button("Move down") {
+                try? appState.storeForEditing.moveTarget(id: row.target.id, up: false)
+                recompute()
+            }
+            .disabled(targets.last?.id == row.target.id)
         }
-    }
-
-    /// Move the dragged allocation to `onto`'s position and persist the whole order.
-    private func dropAllocation(onto: Int64) -> Bool {
-        defer { draggingTargetID = nil; dropTargetID = nil }
-        guard let dragged = draggingTargetID, dragged != onto else { return false }
-        var ids = targets.map(\.id)
-        guard let from = ids.firstIndex(of: dragged), let to = ids.firstIndex(of: onto) else {
-            return false
-        }
-        ids.remove(at: from)
-        ids.insert(dragged, at: to)
-        try? appState.storeForEditing.reorderTargets(ids)
-        recompute()
-        return true
     }
 
     /// The one thing the row can't show: how far off target it is.
