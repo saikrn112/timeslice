@@ -248,19 +248,21 @@ struct TasksView: View {
                 }
             }
             Spacer()
-            // Includes the RUNNING task's live time when its row does.
+            // Includes the RUNNING task's live time, and TICKS while it does.
             //
-            // `seconds(for:)` is committed-only, so a project header read 17s while the row directly
-            // under it read 9:31 — the same project, two answers, six pixels apart. The live portion is
-            // added from the same `liveOrigin` the row ticks from, so the two agree by construction
-            // rather than by coincidence.
+            // `seconds(for:)` is committed-only, so a project header read 17s while the row under it read
+            // 9:31 — same project, two answers, six pixels apart. Adding the live portion fixed the
+            // arithmetic but I first left the header static, reasoning a second's staleness was invisible.
+            // That was wrong: nothing recomputes it until the next reload, so the gap grows without bound
+            // — a screenshot caught it reading 28m beside a row showing 29:03.
             //
-            // Static text, not a `LiveClockText`: a header that ticked would drag every group's total
-            // into the 10fps redraw for a figure you don't watch. It refreshes on the next reload, and
-            // being a second stale is invisible at this size.
-            Text(Format.compact(section.tasks.reduce(0) { total, task in
-                total + seconds(for: task) + liveSeconds(for: task)
-            }))
+            // So it observes the same clock the rows do. Only the section CONTAINING the running task
+            // does; every other header stays static, so the 10fps redraw covers one small label rather
+            // than all of them.
+            LiveGroupTotal(
+                committed: section.tasks.reduce(0) { $0 + seconds(for: $1) },
+                runningOrigin: section.tasks.contains { $0.id == model.running?.projectID }
+                    ? model.running?.start : nil)
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.secondary)
         }
@@ -302,6 +304,30 @@ struct TasksView: View {
                     }
                 }
             }
+        }
+    }
+}
+
+/// A project header's total, ticking only when that project owns the running task.
+///
+/// Split out so the 10fps clock re-renders THIS label and nothing else — the whole point of the Mac's
+/// `TickClock` split, applied here. Shown to the minute, like the Mac's header, so the digits don't
+/// flicker at ten frames a second for a figure you glance at.
+private struct LiveGroupTotal: View {
+    let committed: TimeInterval
+    /// The running interval's start, or nil when this project isn't the one running.
+    let runningOrigin: Date?
+
+    @ObservedObject private var clock = TickClock.shared
+
+    var body: some View {
+        if let runningOrigin {
+            let live = max(0, clock.now.timeIntervalSince(runningOrigin))
+            Text(Format.compact(committed + live))
+                .onAppear { clock.subscribe() }
+                .onDisappear { clock.unsubscribe() }
+        } else {
+            Text(Format.compact(committed))
         }
     }
 }
