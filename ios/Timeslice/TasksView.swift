@@ -160,6 +160,15 @@ struct TasksView: View {
         scope == .today ? model.liveOrigin(for: task.id) : nil
     }
 
+    /// The running task's uncommitted seconds — what the row's ticking clock shows beyond `seconds(for:)`.
+    ///
+    /// Zero for every task but the running one, and zero on All Time, matching `liveOrigin`. Derived from
+    /// the run's own start rather than accumulated, so it can't drift.
+    private func liveSeconds(for task: Project) -> TimeInterval {
+        guard scope == .today, let running = model.running, running.projectID == task.id else { return 0 }
+        return max(0, Date().timeIntervalSince(running.start))
+    }
+
     private func groupHeader(_ section: TimerModel.Section) -> some View {
         HStack(spacing: 6) {
             Circle().fill(Color(hex: section.colorHex)).frame(width: 6, height: 6)
@@ -173,7 +182,19 @@ struct TasksView: View {
                 }
             }
             Spacer()
-            Text(Format.compact(section.tasks.reduce(0) { $0 + seconds(for: $1) }))
+            // Includes the RUNNING task's live time when its row does.
+            //
+            // `seconds(for:)` is committed-only, so a project header read 17s while the row directly
+            // under it read 9:31 — the same project, two answers, six pixels apart. The live portion is
+            // added from the same `liveOrigin` the row ticks from, so the two agree by construction
+            // rather than by coincidence.
+            //
+            // Static text, not a `LiveClockText`: a header that ticked would drag every group's total
+            // into the 10fps redraw for a figure you don't watch. It refreshes on the next reload, and
+            // being a second stale is invisible at this size.
+            Text(Format.compact(section.tasks.reduce(0) { total, task in
+                total + seconds(for: task) + liveSeconds(for: task)
+            }))
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.secondary)
         }
