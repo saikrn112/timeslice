@@ -62,27 +62,51 @@ struct TasksView: View {
             .background(Theme.page)
             .navigationTitle("Timeslice")
             .searchable(text: $query, prompt: "Search tasks or /project")
-            .toolbar {
-                ToolbarItemGroup(placement: .primaryAction) {
-                    // The switcher had NO in-app entry point before — it was reachable only by an
-                    // Action Button press or a Shortcut, so on a phone with neither it may as well
-                    // not have existed.
-                    Button { model.requestSwitcher() } label: {
-                        Image(systemName: "arrow.triangle.swap")
-                    }
-                    Button { model.showingAddTask = true } label: { Image(systemName: "plus") }
-                }
-                // No "Stop" here. On the Mac, stop and pause are meaningfully different — stop clears
-                // the current task so the menu bar goes idle. On the phone the hero card's pause button
-                // is right there and does the thing you actually want, so a second verb in the corner
-                // was a choice you had to think about for no benefit. Stopping is still available from
-                // the switcher and a Shortcut.
-            }
+            // Add and switch live at the BOTTOM, not in the top-right corner.
+            //
+            // Those are the two most-used actions in the app and they were in the hardest place on the
+            // screen for a thumb. `safeAreaInset` puts the bar above the tab bar and shortens the scroll
+            // view to match, so it never covers the last row — which a `ZStack` overlay would.
+            //
+            // No "Stop": on the Mac stop and pause differ (stop clears the current task so the menu bar
+            // goes idle), but here the hero card's pause is right above and does what you want, so a
+            // second verb would be a decision for no benefit. Stop stays in the switcher and Shortcuts.
+            .safeAreaInset(edge: .bottom) { bottomBar }
             .sheet(item: $editing) { TaskDetailSheet(task: $0) }
         }
     }
 
     // MARK: - Controls
+
+    /// Thumb-reachable Add and Switch, sitting above the tab bar.
+    ///
+    /// Full-width tappable halves rather than two small glyphs: at the bottom of the screen there's room,
+    /// and a 44pt-tall target you can hit without looking is the whole point of moving them here.
+    private var bottomBar: some View {
+        HStack(spacing: 10) {
+            Button { model.showingAddTask = true } label: {
+                Label("Add task", systemImage: "plus")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.18)))
+            }
+            Button { model.requestSwitcher() } label: {
+                Label("Switch", systemImage: "arrow.triangle.swap")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(Capsule().fill(Color.secondary.opacity(0.18)))
+            }
+            // Disabled with nothing to switch to: one task means the switcher would open on a list of
+            // itself.
+            .disabled(model.tasks.count < 2)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 14)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
+        // Lets the list scroll visibly under it rather than ending at a hard edge.
+        .background(.bar)
+    }
 
     /// One low-chrome row: scope on the left, grouping on the right — the Mac's arrangement, where
     /// these are plain text buttons rather than control blocks.
@@ -132,18 +156,60 @@ struct TasksView: View {
             .padding(.bottom, 10)
     }
 
+    /// Row height, fixed because the `List` below is measured rather than scrolled.
+    private static let taskRowHeight: CGFloat = 46
+
+    /// Task rows in a `List`, so **done** and **archive** are system swipes.
+    ///
+    /// A `List` specifically because `.swipeActions` exists nowhere else — and you asked for archive to
+    /// work "like sessions", which is that gesture. It's still wrapped in the existing card and its own
+    /// scrolling is disabled with the height computed, so the page keeps one scroller and the card look
+    /// is unchanged; two nested scrollers fight each other.
+    ///
+    /// Actions were previously invisible: the row had no controls at all, done/archive existed only in the
+    /// long-press detail sheet, and nothing advertised either. Now:
+    ///
+    /// - tapping the row starts/pauses it (unchanged — the fastest thing should stay the cheapest)
+    /// - an explicit play/pause button on the right, because a whole row that silently toggles a timer
+    ///   gives no hint it's a control
+    /// - swipe left: archive, then done — destructive-ish on the outside, matching Mail's ordering
+    /// - long press still opens the detail sheet
     private func rows(_ tasks: [Project]) -> some View {
-        ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
-            TaskRow(task: task,
-                    colorHex: model.colorHex(for: task),
-                    seconds: seconds(for: task),
-                    liveOrigin: liveOrigin(for: task),
-                    isCurrent: model.currentTaskID == task.id)
-                .contentShape(Rectangle())
-                .onTapGesture { model.toggle(taskID: task.id) }
-                .onLongPressGesture { editing = task }
-            if index < tasks.count - 1 { Divider() }
+        List {
+            ForEach(tasks, id: \.id) { task in
+                TaskRow(task: task,
+                        colorHex: model.colorHex(for: task),
+                        seconds: seconds(for: task),
+                        liveOrigin: liveOrigin(for: task),
+                        isCurrent: model.currentTaskID == task.id,
+                        onToggle: { model.toggle(taskID: task.id) })
+                    .frame(height: Self.taskRowHeight)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    .listRowBackground(Color.clear)
+                    .contentShape(Rectangle())
+                    .onTapGesture { model.toggle(taskID: task.id) }
+                    .onLongPressGesture { editing = task }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button {
+                            model.setArchived(taskID: task.id, true)
+                        } label: {
+                            Image(systemName: "archivebox")
+                        }
+                        .tint(.orange)
+                        Button {
+                            model.setFinished(taskID: task.id, !task.finished)
+                        } label: {
+                            Image(systemName: task.finished ? "arrow.uturn.backward" : "checkmark")
+                        }
+                        .tint(.green)
+                    }
+            }
         }
+        .listStyle(.plain)
+        .scrollDisabled(true)
+        .scrollContentBackground(.hidden)
+        .environment(\.defaultMinListRowHeight, Self.taskRowHeight)
+        .frame(height: Self.taskRowHeight * CGFloat(tasks.count))
     }
 
     /// Today or All Time, matching the Mac's scope toggle.
@@ -249,6 +315,9 @@ struct TaskRow: View {
     /// Non-nil only for the running task: the backdated instant to tick today's total from.
     let liveOrigin: Date?
     let isCurrent: Bool
+    /// Start/pause this task. The row is tappable too, but a row that silently toggles a timer gives no
+    /// hint it's a control — hence the explicit button as well.
+    let onToggle: () -> Void
 
     private var isRunning: Bool { liveOrigin != nil }
 
@@ -286,6 +355,18 @@ struct TaskRow: View {
                 Text(Format.compact(seconds))
                     .font(Theme.rowTime)
                     .foregroundStyle(seconds > 0 ? .primary : .tertiary)
+            }
+
+            // The visible control. Until now the row's only affordance was tapping it, which nothing
+            // advertised, so start/pause was invisible unless you already knew. Finished tasks don't get
+            // one: resuming one is a deliberate act through the detail sheet, not a stray tap.
+            if !task.finished {
+                Button(action: onToggle) {
+                    Image(systemName: isRunning ? "pause.circle.fill" : "play.circle")
+                        .font(.system(size: 22))
+                        .foregroundStyle(isRunning ? Color.orange : Color.secondary)
+                }
+                .buttonStyle(.plain)
             }
         }
         .padding(.vertical, Theme.rowVPadding)
