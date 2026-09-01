@@ -94,6 +94,9 @@ struct MetricsView: View {
     @State private var showTargetsSheet = false
     /// Budget row under the pointer, purely so the row shows it can be clicked.
     @State private var hoveredTargetID: Int64?
+    /// Allocation being dragged by its grip on THIS page, and the row it's over.
+    @State private var draggingTargetID: Int64?
+    @State private var dropTargetID: Int64?
 
 
     /// Bucket under the cursor on the hours / focus charts.
@@ -1513,6 +1516,16 @@ struct MetricsView: View {
         // Bar clamps at full; the label carries the real number (or "over" for a blown ceiling).
         let goalFraction = min(max(row.percent / 100, 0), 1)
         return HStack(spacing: 5) {
+            // Reordering belongs here, on the list you actually read, not in the edit sheet.
+            // Grip-only drag: on the whole row it would swallow the click that pins a highlight.
+            GripDots()
+                .foregroundStyle(.tertiary)
+                .opacity(hoveredTargetID == row.target.id || draggingTargetID == row.target.id ? 1 : 0)
+                .onDrag {
+                    draggingTargetID = row.target.id
+                    return NSItemProvider(object: String(row.target.id) as NSString)
+                }
+
             Circle().fill(color).frame(width: 9, height: 9)
             Text(row.name).font(.callout).lineLimit(1).truncationMode(.tail)
                 .frame(width: 96, alignment: .leading)
@@ -1572,6 +1585,30 @@ struct MetricsView: View {
             let me = focusFor(row.target.subject)
             pinnedFocus = (pinnedFocus == me) ? nil : me
         }
+        .onDrop(of: [.text], isTargeted: Binding(
+            get: { dropTargetID == row.target.id },
+            set: { over in dropTargetID = over ? row.target.id : nil }
+        )) { _ in dropAllocation(onto: row.target.id) }
+        .overlay(alignment: .top) {
+            if dropTargetID == row.target.id, draggingTargetID != nil {
+                Rectangle().fill(Color.accentColor).frame(height: 2)
+            }
+        }
+    }
+
+    /// Move the dragged allocation to `onto`'s position and persist the whole order.
+    private func dropAllocation(onto: Int64) -> Bool {
+        defer { draggingTargetID = nil; dropTargetID = nil }
+        guard let dragged = draggingTargetID, dragged != onto else { return false }
+        var ids = targets.map(\.id)
+        guard let from = ids.firstIndex(of: dragged), let to = ids.firstIndex(of: onto) else {
+            return false
+        }
+        ids.remove(at: from)
+        ids.insert(dragged, at: to)
+        try? appState.storeForEditing.reorderTargets(ids)
+        recompute()
+        return true
     }
 
     /// The one thing the row can't show: how far off target it is.

@@ -16,9 +16,6 @@ struct TargetsSheet: View {
     /// Retired allocations with their allocated-vs-spent figures, for the history list.
     @State private var history: [AllocationHistory] = []
     @State private var newTagName = ""
-    /// Allocation being dragged by its grip, and the row it's currently over.
-    @State private var draggingTargetID: Int64?
-    @State private var dropTargetID: Int64?
     /// Re-read after every edit. Cheap (a handful of rows) and avoids the whole class of bugs where
     /// the sheet shows something the store no longer agrees with.
     private func reload() {
@@ -77,7 +74,7 @@ struct TargetsSheet: View {
                 .padding(16)
             }
         }
-        .frame(width: 560, height: 520)
+        .frame(width: 680, height: 560)
         .onAppear { reload() }
     }
 
@@ -213,25 +210,9 @@ struct TargetsSheet: View {
                             onDelete: (() -> Void)?) -> some View {
         let existing = targets.first { $0.subject == subject }
         return HStack(spacing: 8) {
-            // Grip dots, the same affordance the task cards use — drag to reorder. Only shown for
-            // rows that HAVE an allocation, since order is a property of the allocation, not the
-            // subject; a project with none has nothing to move.
-            if let existing {
-                GripDots()
-                    .foregroundStyle(.tertiary)
-                    .opacity(draggingTargetID == existing.id ? 1 : 0.4)
-                    // Drag ONLY from the grip: attached to the row it swallows vertical drags and
-                    // the sheet can't be scrolled.
-                    .onDrag {
-                        draggingTargetID = existing.id
-                        return NSItemProvider(object: String(existing.id) as NSString)
-                    }
-            } else {
-                Color.clear.frame(width: 10, height: 1)
-            }
-
             Circle().fill(Color(hex: colorHex)).frame(width: 9, height: 9)
-            Text(name).font(.callout).lineLimit(1).frame(width: 130, alignment: .leading)
+            Text(name).font(.callout).lineLimit(1).truncationMode(.tail)
+                .frame(width: 150, alignment: .leading)
 
             // Budget controls sit at the RIGHT, just before delete — for both tags and projects — so
             // the "Set budget" link and the populated controls occupy the same place.
@@ -273,7 +254,7 @@ struct TargetsSheet: View {
                     }
                 }
                 .labelsHidden()
-                .frame(width: 90)
+                .frame(width: 84)
 
                 // Retire rather than delete: the allocation leaves the live list but keeps its
                 // history, which is the whole reason for the state.
@@ -310,41 +291,6 @@ struct TargetsSheet: View {
                 .help("Delete this tag")
             }
         }
-        // A drop anywhere on the row moves the dragged allocation to this row's position.
-        .onDrop(of: [.text], isTargeted: Binding(
-            get: { dropTargetID == targets.first { $0.subject == subject }?.id },
-            set: { over in
-                dropTargetID = over ? targets.first { $0.subject == subject }?.id : nil
-            }
-        )) { providers in
-            guard let onto = targets.first(where: { $0.subject == subject })?.id else { return false }
-            return handleDrop(providers, onto: onto)
-        }
-        .overlay(alignment: .top) {
-            if dropTargetID == targets.first(where: { $0.subject == subject })?.id,
-               draggingTargetID != nil {
-                Rectangle().fill(Color.accentColor).frame(height: 2)
-            }
-        }
-    }
-
-    /// Move the dragged allocation to `onto`'s position, keeping everything else in order.
-    private func handleDrop(_ providers: [NSItemProvider], onto: Int64) -> Bool {
-        guard let dragged = draggingTargetID, dragged != onto else {
-            draggingTargetID = nil; dropTargetID = nil
-            return false
-        }
-        var ids = targets.map(\.id)
-        guard let from = ids.firstIndex(of: dragged), let to = ids.firstIndex(of: onto) else {
-            return false
-        }
-        ids.remove(at: from)
-        ids.insert(dragged, at: to)
-        try? store.reorderTargets(ids)
-        draggingTargetID = nil
-        dropTargetID = nil
-        reload()
-        return true
     }
 
     private func save(subject: TargetSubject, seconds: TimeInterval,

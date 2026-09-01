@@ -707,7 +707,11 @@ struct ProjectListView: View {
                     .help("New project")
                 }
             }
-            .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 0)
+            // Taller with a faint tint so it reads as a row of its own rather than controls floating
+            // above the list. Kept very light — the project headers below are deliberately quiet, and
+            // a strong fill here would compete with them.
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(Color.secondary.opacity(0.07))
         }
     }
 

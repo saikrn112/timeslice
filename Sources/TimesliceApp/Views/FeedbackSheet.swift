@@ -13,6 +13,10 @@ struct FeedbackSheet: View {
     @State private var draft = ""
     @State private var showResolved = false
     @State private var deviceLabels: [String: String] = [:]
+    /// Note being reworded, and the draft text. Double-click to enter.
+    @State private var editingID: Int64?
+    @State private var editDraft = ""
+    @FocusState private var editFocused: Bool
 
     private func reload() {
         notes = (try? store.listFeedback()) ?? []
@@ -69,6 +73,24 @@ struct FeedbackSheet: View {
         .onAppear { reload() }
     }
 
+    private func beginEdit(_ note: Feedback) {
+        editDraft = note.text
+        editingID = note.id
+        editFocused = true
+    }
+
+    private func commitEdit(_ note: Feedback) {
+        // An empty draft is treated as "no change", not as deleting the note — the ✕ is for that.
+        try? store.updateFeedback(id: note.id, text: editDraft)
+        editingID = nil
+        reload()
+    }
+
+    private func cancelEdit() {
+        editingID = nil
+        editDraft = ""
+    }
+
     private func add() {
         _ = try? store.addFeedback(draft)
         draft = ""
@@ -96,12 +118,30 @@ struct FeedbackSheet: View {
                 .textSelection(.enabled)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(note.text)
-                    .font(.callout)
-                    .strikethrough(!note.isOpen, color: .secondary)
-                    .foregroundStyle(note.isOpen ? Color.primary : Color.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
+                if editingID == note.id {
+                    TextField("", text: $editDraft, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.callout)
+                        .lineLimit(1...6)
+                        .focused($editFocused)
+                        .onSubmit { commitEdit(note) }
+                        // A TextField swallows onExitCommand, so Esc needs catching explicitly or
+                        // there's no way out of the editor.
+                        .onKeyPress(.escape) { cancelEdit(); return .handled }
+                        // Clicking away saves rather than silently discarding what was typed.
+                        .onChange(of: editFocused) { _, focused in
+                            if !focused && editingID == note.id { commitEdit(note) }
+                        }
+                } else {
+                    Text(note.text)
+                        .font(.callout)
+                        .strikethrough(!note.isOpen, color: .secondary)
+                        .foregroundStyle(note.isOpen ? Color.primary : Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        // Double-click to reword, the same gesture task and project rows use.
+                        .onTapGesture(count: 2) { beginEdit(note) }
+                }
                 // When and where it was written — usually the context that makes a terse note
                 // make sense again a week later.
                 Text(context(note))

@@ -1592,6 +1592,18 @@ public final class IntervalStore {
         return sqlite3_last_insert_rowid(db)
     }
 
+    /// Reword a note. Bumps `updated_at`, so the edit wins over a peer's older copy.
+    public func updateFeedback(id: Int64, text body: String) throws {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }   // clearing it would silently destroy the note
+        let stmt = try prepare("UPDATE feedback SET text = ?, updated_at = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, trimmed)
+        sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(stmt, 3, id)
+        try step(stmt)
+    }
+
     public func setFeedbackResolved(id: Int64, resolved: Bool, at when: Date = Date()) throws {
         let stmt = try prepare("UPDATE feedback SET resolved_at = ?, updated_at = ? WHERE id = ?")
         defer { sqlite3_finalize(stmt) }
