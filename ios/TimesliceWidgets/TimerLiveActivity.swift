@@ -35,36 +35,26 @@ struct TimerLiveActivity: Widget {
                     .padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    // Labelled "today", because the bottom row also shows the session. Two unlabelled
-                    // times is what made this ambiguous; naming the big one resolves it without
-                    // dropping either.
-                    VStack(alignment: .trailing, spacing: 0) {
-                        ClockText(state: context.state)
-                            .font(.system(.title3, design: .monospaced))
-                            .foregroundStyle(clockColor(context.state))
-                        Text("today")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
-                    }
-                    // Monospaced digits still reflow as the hour rolls over; a fixed width stops the
-                    // whole region shifting once a session passes an hour.
-                    .frame(minWidth: 82, alignment: .trailing)
-                    .padding(.trailing, 4)
+                    ClockText(state: context.state)
+                        .font(.system(.title3, design: .monospaced))
+                        .foregroundStyle(clockColor(context.state))
+                        // Monospaced digits still reflow as the hour rolls over; a fixed width stops the
+                        // whole region shifting once a session passes an hour.
+                        .frame(minWidth: 82, alignment: .trailing)
+                        .padding(.trailing, 4)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(spacing: 6) {
-                        // Two times here, both LABELLED. The expanded island is opened deliberately and
-                        // has the width for it, so "session" and "today" can coexist — unlike the Lock
-                        // Screen, where an unlabelled second number just raised "why are there two?".
+                        // Status only. ONE time in this whole file — today's total for the task, in the
+                        // trailing region. The session figure that used to sit here is gone: two
+                        // quantities on a glanceable surface meant reading a label to know which was
+                        // which, and today's total is the one that answers "how am I doing".
                         HStack {
                             Label(context.state.isRunning ? "Tracking" : "Paused",
                                   systemImage: context.state.isRunning ? "record.circle" : "pause.circle")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            SessionText(state: context.state)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
                         }
                         // Buttons, not gestures: a Live Activity hosts App Intents only, so this is
                         // the entire available vocabulary. The types come from `TimesliceIntents`,
@@ -196,28 +186,6 @@ private func clockColor(_ state: TimerActivityAttributes.ContentState) -> Color 
     state.isRunning ? .green : .secondary
 }
 
-/// The CURRENT SESSION, as the secondary figure — the main clock is already today's total, so
-/// repeating it here would waste the island's most limited resource. Together they answer both
-/// "how long have I been on this?" and "how much today?", which is the pair the Mac shows too.
-private struct SessionText: View {
-    let state: TimerActivityAttributes.ContentState
-
-    var body: some View {
-        if state.isRunning {
-            HStack(spacing: 3) {
-                Text("session")
-                Text(timerInterval: state.startedAt...Date.distantFuture,
-                     pauseTime: nil, countsDown: false)
-                    .monospacedDigit()
-            }
-        } else {
-            // Just "session —". It used to read "paused · today 17s", which repeated the Paused label
-            // beside it AND restated the today figure already shown above it — three copies of two
-            // facts, in the smallest text on the card.
-            Text("session —")
-        }
-    }
-}
 
 /// Lock Screen / banner presentation, with controls.
 ///
@@ -247,10 +215,10 @@ private struct LockScreenView: View {
                     .minimumScaleFactor(0.85)
                 // STATUS ONLY — no second time.
                 //
-                // This used to read "session 0:02" while the big clock read today's total, which is two
-                // different quantities in one card with nothing saying which was which. On a surface you
-                // glance at while locked, one number is the entire budget. The session figure still
-                // exists in the expanded island, where there's room to label both.
+                // This used to read "session 0:02" while the big clock read today's total: two different
+                // quantities in one card with nothing saying which was which. The session figure is now
+                // gone from every presentation, not just this one — today's total is the number worth
+                // glancing at, and adding a second one only creates the question of which is which.
                 Text(state.isRunning ? "tracking" : "paused")
                     .font(.caption)
                     .foregroundStyle(.secondary)
