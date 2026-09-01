@@ -47,6 +47,9 @@ final class TimerModel: ObservableObject {
     /// The task palette. On the model rather than in `TasksView` so it can be opened from
     /// the root — which is what lets the headless `start-tab` hint screenshot it.
     @Published var showingAddTask = false
+    /// Unresolved notes, for the Feedback tab's badge. Published (not computed per render) because a
+    /// tab badge is evaluated on every layout pass and this is a sqlite query.
+    @Published private(set) var openFeedbackCount = 0
 
     /// Shared with the Mac via Core, so the deep-block and nudge thresholds mean the same thing on
     /// both. The phone used to hardcode its own copies.
@@ -163,6 +166,11 @@ final class TimerModel: ObservableObject {
         }
     }
 
+    /// Recount open notes. Cheap, and called from `reload()` so the badge can't drift from the tab.
+    func refreshFeedbackCount() {
+        openFeedbackCount = ((try? store?.listFeedback(includeResolved: false)) ?? []).count
+    }
+
     func reload() {
         guard let store else { return }
         do {
@@ -192,9 +200,14 @@ final class TimerModel: ObservableObject {
 
             // Device attribution: who recorded what. Needed by the timeline lanes and Settings.
             deviceLabels = (try? store.deviceLabels()) ?? [:]
+            // Sorted by device ID, not label. The timeline's band and legend index off
+            // `Aggregations.orderedDevices`, which is id-ordered — sorting this list by label meant the
+            // Settings list and the timeline disagreed about which device came first, so "device 1" was
+            // a different machine depending on which screen you were looking at.
             knownDevices = deviceLabels
                 .map { DeviceInfo(id: $0.key, label: $0.value.isEmpty ? $0.key : $0.value) }
-                .sorted { $0.label < $1.label }
+                .sorted { $0.id < $1.id }
+            refreshFeedbackCount()
         } catch {
             loadError = "\(error)"
         }
@@ -285,6 +298,21 @@ final class TimerModel: ObservableObject {
     /// Re-arm the nudges from current state. Public because the notification's "Still on it" action
     /// re-arms without changing the timer — a long session should keep checking in rather than going
     /// quiet after one dismissal.
+    /// Split a long run into focus-length blocks, keeping the timer going.
+    ///
+    /// Replaces the phone's "still working?" auto-pause. You can't answer a prompt while driving, and an
+    /// unanswered one threw away real time; chunking never interrupts and never loses any. Correcting an
+    /// over-record is then two swipes in the sessions list.
+    ///
+    /// Called on foreground and after each sync rather than on a timer: elapsed time is derived from the
+    /// persisted start, and `rollOpenInterval` loops, so however long the phone was suspended one call
+    /// catches all of it up.
+    func rollChunks() {
+        guard let store else { return }
+        let rolled = (try? store.rollOpenInterval(chunkSeconds: settings.deepBlockSeconds)) ?? 0
+        if rolled > 0 { reload() }
+    }
+
     func rearmNudges() {
         NudgeScheduler.shared.rearm(runningSince: running?.start,
                                     pausedSince: pausedSince,

@@ -95,13 +95,20 @@ final class NudgeScheduler: NSObject {
         // exclusive because one needs a running timer and the other a paused one.
         let isPaused = !isRunning && pausedSince != nil
 
-        if NudgePolicy.armsSessionNudge(config, isRunning: isRunning), let since = runningSince {
-            requestAuthorizationIfNeeded()
-            schedule(id: ID.session,
-                     title: "Still working on \(taskName ?? "this")?",
-                     body: "The timer has been running a while. Pause it if you've moved on.",
-                     after: NudgePolicy.delay(since: since, threshold: config.sessionSeconds))
-        }
+        // NO session nudge on the phone, deliberately.
+        //
+        // It asked "still working?" and paused if unanswered, which is exactly wrong in the case that
+        // matters most: you can't answer a prompt while driving, and an unanswered one discarded real
+        // time. `IntervalStore.rollOpenInterval` splits the run into focus-length blocks instead —
+        // nothing is interrupted, nothing is lost, and an over-record is two swipes to trim in the
+        // sessions list. Over-recording you can correct beats under-recording you can't.
+        //
+        // The PAUSED nudge below stays: forgetting to un-pause is still worth a poke, and unlike the
+        // other one it's answerable whenever you next look at the phone.
+        //
+        // `runningSince` therefore goes unused here; it stays in the signature because the Mac's
+        // `NudgePolicy` is shared and still arms both.
+        _ = runningSince
 
         if NudgePolicy.armsPausedNudge(config, isPaused: isPaused, awaitingAnswer: false),
            let since = pausedSince {

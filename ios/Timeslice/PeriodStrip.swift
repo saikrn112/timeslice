@@ -74,7 +74,15 @@ struct PeriodStrip: View {
                     }
                     .padding(.horizontal, sideInset)
                     .padding(.vertical, 2)
+                    // SNAP to a card instead of coasting to a stop between two.
+                    //
+                    // Reported as "snappy and not sliding like cards": a plain scroll view decelerates
+                    // wherever momentum runs out, so the strip settled half-way between periods and
+                    // never felt like discrete cards. `viewAligned` makes each card a scroll target, so
+                    // a flick lands on one.
+                    .scrollTargetLayout()
                 }
+                .scrollTargetBehavior(.viewAligned)
                 .onAppear { scroll(proxy, animated: false) }
                 // Follow an external change of range — a swipe on the cards below, or switching the
                 // unit, which rebuilds the strip entirely.

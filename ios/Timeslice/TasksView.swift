@@ -258,8 +258,7 @@ struct TaskRow: View {
                 // Painting a ticking clock in the task's own hex is what made it a barely-visible pale
                 // blue: most of the palette fails text contrast, and this is the one number in the row
                 // you actually watch.
-                Text(timerInterval: liveOrigin...Date.distantFuture,
-                     pauseTime: nil, countsDown: false)
+                LiveClockText(origin: liveOrigin)
                     .font(Theme.rowTime)
                     .foregroundStyle(.green)
             } else {
@@ -314,9 +313,10 @@ struct NowCard: View {
                 // Today's total for the current task, ticking while running — the same number the
                 // row and the Dynamic Island show, from the same `liveOrigin`.
                 if let id = model.currentTaskID, let origin = model.liveOrigin(for: id) {
-                    Text(timerInterval: origin...Date.distantFuture, pauseTime: nil, countsDown: false)
+                    // Own clock, not `Text(timerInterval:)`: that API has no subsecond option, and the
+                    // Mac shows milliseconds on the live figure.
+                    LiveClockText(origin: origin)
                         .font(.system(size: 34, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
                         .foregroundStyle(.green)
                 } else if let id = model.currentTaskID {
                     Text(Format.compact(model.committedTodaySeconds[id] ?? 0))

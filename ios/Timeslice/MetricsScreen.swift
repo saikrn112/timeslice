@@ -75,8 +75,15 @@ struct MetricsScreen: View {
 
             }
             .background(Theme.page)
+            // Pull to refresh: sync, then rebuild. A phone's background refresh is opportunistic and
+            // may not have run for hours, so the gesture everyone already tries should be the one that
+            // forces a poll rather than leaving you to guess whether the numbers are current.
+            .refreshable {
+                await SyncController.shared.syncOnce()
+                model.load()
+                rebuild()
+            }
             .navigationTitle("Metrics")
-            .toolbar { gearButton }
             .onAppear {
                 // `load()` FIRST, and again here rather than relying on RootView: tab children get
                 // `onAppear` in an unspecified order relative to their parent, so `rebuild()` could
@@ -92,12 +99,6 @@ struct MetricsScreen: View {
             // on the other tab. Without this, metrics silently kept showing the previous dataset.
             .onChange(of: model.tasks) { _, _ in rebuild() }
             .onChange(of: model.groups) { _, _ in rebuild() }
-        }
-    }
-
-    private var gearButton: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
-            Button { model.showingSettings = true } label: { Image(systemName: "gearshape") }
         }
     }
 
@@ -829,9 +830,12 @@ struct MetricsScreen: View {
                         sessionRow(s)
                             .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                             .listRowBackground(Color.clear)
+                            // Bin GLYPH only, no "Delete" word: the row is already narrow and the icon
+                            // is unambiguous. `allowsFullSwipe` means a long swipe deletes outright
+                            // without a second tap, and a short one parks the bin so you can decide.
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                 Button(role: .destructive) { delete(s) } label: {
-                                    Label("Delete", systemImage: "trash")
+                                    Image(systemName: "trash")
                                 }
                             }
                     }

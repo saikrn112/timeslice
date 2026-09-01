@@ -41,6 +41,8 @@ struct TimesliceiOSApp: App {
             // suspended, one reload recovers the correct state.
             if phase == .active {
                 TimerModel.shared.load()
+                // Catch up any focus-length boundaries crossed while suspended.
+                TimerModel.shared.rollChunks()
                 // Foreground is the one moment a phone can sync promptly, so take it — the
                 // background task is opportunistic and may not have run for hours.
                 Task { await SyncController.shared.syncOnce() }

@@ -26,7 +26,7 @@ struct FeedbackSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Notes").font(.headline)
+                Text("Feedback").font(.headline)
                 Text("\(notes.filter(\.isOpen).count) open")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()

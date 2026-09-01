@@ -2,17 +2,22 @@ import SwiftUI
 import TimesliceCore
 import TimesliceUI
 
-/// **Two** tabs — Tasks and Metrics — exactly as the Mac's main window has.
+/// **Four** tabs — Tasks, Metrics, Feedback, Settings.
 ///
-/// Budgets is a *section inside Metrics*, not a third tab. Splitting it out was wrong: on the Mac a
-/// budget is one block of the metrics page, read alongside the tiles and the breakdown it derives
-/// from, and promoting it to a peer of Metrics implied it was a separate subject. Settings is a sheet
-/// behind a gear, mirroring the Mac's gear popover.
+/// Settings and Feedback used to be sheets behind a gear, mirroring the Mac's gear popover. That
+/// mirroring was the mistake: a Mac popover sits under a pointer that's already at the top of the
+/// screen, whereas on a phone the top-right corner is the hardest place to reach one-handed. Both were
+/// reported as too hard to get to, and Feedback especially — the whole point of a note is catching a
+/// thought before it evaporates, which a two-tap detour through Settings defeats.
+///
+/// Budgets is still a *section inside Metrics*, not a tab. On the Mac a budget is one block of the
+/// metrics page, read alongside the tiles and the breakdown it derives from; promoting it to a peer of
+/// Metrics would imply it were a separate subject.
 struct RootView: View {
     @ObservedObject private var model = TimerModel.shared
     @State private var tab: Tab
 
-    enum Tab: String { case tasks, metrics }
+    enum Tab: String { case tasks, metrics, feedback, settings }
 
     init() {
         _tab = State(initialValue: Self.launchTab ?? .tasks)
@@ -48,6 +53,15 @@ struct RootView: View {
             MetricsScreen()
                 .tabItem { Label("Metrics", systemImage: "chart.bar.xaxis") }
                 .tag(Tab.metrics)
+            FeedbackScreen()
+                .tabItem { Label("Feedback", systemImage: "note.text") }
+                .tag(Tab.feedback)
+                // Open notes as a tab badge: a note you haven't dealt with should be visible without
+                // opening the tab, which is the only thing that makes jotting one feel worthwhile.
+                .badge(model.openFeedbackCount)
+            SettingsScreen()
+                .tabItem { Label("Settings", systemImage: "gearshape") }
+                .tag(Tab.settings)
         }
         .onAppear {
             model.load()
@@ -57,7 +71,6 @@ struct RootView: View {
             if let hinted = Self.launchTab { tab = hinted }
             switch Self.launchHint {
             case "switcher": model.requestSwitcher()
-            case "settings": model.showingSettings = true
             case "add": model.showingAddTask = true
             default: break
             }
@@ -65,7 +78,7 @@ struct RootView: View {
         // Both presented from the root so the Action Button's switcher binding works whichever tab
         // was last open, and so Settings is reachable from either.
         .sheet(isPresented: $model.showingSwitcher) { SwitchWheelSheet() }
-        .sheet(isPresented: $model.showingSettings) { SettingsSheet() }
+        .sheet(isPresented: $model.showingSettings) { SettingsScreen(showsDone: true) }
         .sheet(isPresented: $model.showingAddTask) { AddTaskSheet() }
     }
 }

@@ -80,7 +80,7 @@ struct SettingsPanel: View {
 
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Notes")
+                    Text("Feedback")
                     Text("jotted on any device, synced here")
                         .font(.caption2).foregroundStyle(.secondary)
                 }

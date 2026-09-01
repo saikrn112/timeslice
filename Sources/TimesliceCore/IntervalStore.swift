@@ -959,6 +959,65 @@ public final class IntervalStore {
         }
     }
 
+    /// Break a long run into consecutive `chunkSeconds` blocks, keeping the timer going.
+    ///
+    /// Returns how many boundaries were crossed, so a caller can tell whether anything changed.
+    ///
+    /// ## Why this exists
+    ///
+    /// The alternative was a prompt: after N minutes, ask "still working?" and pause if unanswered. That
+    /// is unusable in the situation it most needs to handle — you can't answer a prompt while driving,
+    /// and an unanswered prompt silently discards real time. Rolling the interval instead never loses
+    /// time and never interrupts: a forgotten timer leaves a row of equal blocks, and deleting the two
+    /// or three that shouldn't be there is a 5-second correction with the sessions list already built
+    /// for it. Over-recording that's easy to trim beats under-recording you can't recover.
+    ///
+    /// The timer is NOT stopped and nothing is lost: the closing block ends exactly where the next one
+    /// begins, so the union is identical to one long interval — every aggregation reads the same total.
+    ///
+    /// Takeover is unaffected and still pauses this device: `TakeoverPolicy` is about two devices
+    /// claiming one timer, which is a correctness rule, not a guess about attention.
+    ///
+    /// Loops rather than closing one chunk, so a device that was asleep or suspended for hours catches
+    /// up in a single call instead of leaving one oversized block behind.
+    @discardableResult
+    public func rollOpenInterval(chunkSeconds: TimeInterval, now: Date = Date()) throws -> Int {
+        guard chunkSeconds >= 60 else { return 0 }
+        var rolled = 0
+        try transaction {
+            while let open = try openIntervalLocked() {
+                let boundary = open.start.addingTimeInterval(chunkSeconds)
+                // Strictly in the past: a boundary exactly at `now` would produce a zero-length
+                // successor and roll again on the next call forever.
+                guard boundary < now else { break }
+                try closeOpenIntervalLocked(at: boundary)
+                let stmt = try prepare("INSERT INTO intervals (project_id, start_utc, end_utc, running, uid, device_id) VALUES (?, ?, NULL, 1, ?, ?)")
+                defer { sqlite3_finalize(stmt) }
+                sqlite3_bind_int64(stmt, 1, open.projectID)
+                sqlite3_bind_double(stmt, 2, boundary.timeIntervalSince1970)
+                bindText(stmt, 3, UUID().uuidString)
+                if let localDeviceID { bindText(stmt, 4, localDeviceID) } else { sqlite3_bind_null(stmt, 4) }
+                try step(stmt)
+                rolled += 1
+                // Bound the work: a database untouched for a year shouldn't spend a startup writing
+                // thousands of rows. Whatever remains is picked up by the next call.
+                if rolled >= 500 { break }
+            }
+        }
+        return rolled
+    }
+
+    /// `openInterval` without taking a transaction, for use inside one.
+    private func openIntervalLocked() throws -> RunningInterval? {
+        let stmt = try prepare("SELECT id, project_id, start_utc FROM intervals WHERE running = 1 LIMIT 1")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return RunningInterval(
+            id: sqlite3_column_int64(stmt, 0),
+            projectID: sqlite3_column_int64(stmt, 1),
+            start: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 2)))
+    }
+
     /// Most recent activity time per task id — powers "recently used" ordering in the palette.
     public func lastActivityByProject() throws -> [Int64: Date] {
         let stmt = try prepare("SELECT project_id, MAX(COALESCE(end_utc, start_utc)) FROM intervals GROUP BY project_id")

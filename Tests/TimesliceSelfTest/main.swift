@@ -3169,6 +3169,80 @@ func testAllocationLifecycle() throws {
     }
 }
 
+// MARK: - Chunked running intervals
+
+/// `rollOpenInterval` replaces prompt-based auto-pause: a long run becomes consecutive blocks instead of
+/// being paused when a "still working?" prompt goes unanswered.
+///
+/// The invariant that matters most is that this changes NOTHING about totals — it's a storage shape, not
+/// a measurement. If rolling could lose or duplicate a second, it would silently corrupt every
+/// aggregation, which is far worse than the prompt it replaces.
+func testRollOpenInterval() throws {
+    print("\nChunked intervals:")
+    let (store, url) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let a = try store.createProject(name: "alpha", colorHex: "#4E79A7")
+
+    let start = date(2026, 4, 1, 9, 0)
+    let chunk: TimeInterval = 30 * 60
+
+    do { // nothing to do before the first boundary
+        try store.switchTo(projectID: a, at: start)
+        check(try store.rollOpenInterval(chunkSeconds: chunk,
+                                         now: start.addingTimeInterval(20 * 60)) == 0,
+              "a run shorter than one chunk is left alone")
+        check(try store.openInterval()?.start == start, "and keeps its original start")
+    }
+
+    do { // 100 minutes at 30 = three boundaries crossed, four rows, one still running
+        let now = start.addingTimeInterval(100 * 60)
+        check(try store.rollOpenInterval(chunkSeconds: chunk, now: now) == 3,
+              "three boundaries crossed in 100 minutes")
+        let all = try store.intervals().filter { $0.projectID == a }
+        check(all.count == 4, "three closed chunks plus the live one")
+        check(try store.openInterval() != nil, "the timer is STILL RUNNING — this isn't a pause")
+        check(try store.openInterval()?.start == start.addingTimeInterval(90 * 60),
+              "the live row starts at the last boundary")
+
+        // The whole point: identical measured time.
+        let closed = all.filter { $0.end != nil }
+        let total = closed.reduce(0.0) { $0 + $1.seconds() }
+        check(approx(total, 90 * 60, 1), "the closed chunks total exactly the 90 elapsed minutes")
+
+        // Abutting, not overlapping — otherwise the day timeline would show fake lane contention and
+        // `SpanUnion` would have to paper over it.
+        let sorted = closed.sorted { $0.start < $1.start }
+        var abut = true
+        for (prev, next) in zip(sorted, sorted.dropFirst()) {
+            if let end = prev.end, abs(end.timeIntervalSince(next.start)) > 0.001 { abut = false }
+        }
+        check(abut, "each chunk ends exactly where the next begins")
+    }
+
+    do { // idempotent: calling again at the same instant must not roll a zero-length block
+        let now = start.addingTimeInterval(100 * 60)
+        check(try store.rollOpenInterval(chunkSeconds: chunk, now: now) == 0,
+              "a second call at the same time is a no-op")
+    }
+
+    do { // a boundary landing exactly on `now` must not roll, or it would loop forever
+        try store.stopOpenInterval(at: start.addingTimeInterval(100 * 60))
+        let s2 = date(2026, 4, 2, 9, 0)
+        try store.switchTo(projectID: a, at: s2)
+        check(try store.rollOpenInterval(chunkSeconds: chunk,
+                                         now: s2.addingTimeInterval(chunk)) == 0,
+              "a boundary exactly at now is not yet past")
+    }
+
+    do { // guards
+        check(try store.rollOpenInterval(chunkSeconds: 30, now: Date()) == 0,
+              "an implausibly small chunk is refused rather than shredding the row")
+        try store.stopOpenInterval(at: date(2026, 4, 2, 12, 0))
+        check(try store.rollOpenInterval(chunkSeconds: chunk, now: Date()) == 0,
+              "nothing running is a no-op")
+    }
+}
+
 // MARK: - Notes (feedback)
 
 func testFeedback() throws {
@@ -3294,6 +3368,7 @@ do {
     testReversedClientID()
     try testDemoSeedInvariants()
     try testAllocationLifecycle()
+    try testRollOpenInterval()
     try testFeedback()
     testTagTotals()
     testTargetMath()

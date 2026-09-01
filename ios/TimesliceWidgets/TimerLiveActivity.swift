@@ -218,11 +218,10 @@ private struct LockScreenView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            // Same switcher as the expanded island. The Lock Screen has the most room of any
-            // presentation, so if it fits anywhere it fits here.
-            if !state.recents.isEmpty {
-                SwitcherRow(recents: state.recents)
-            }
+            // NO switcher here, deliberately. The Lock Screen is a status surface — it should answer
+            // "what am I on and for how long", and a row of OTHER tasks turned it into a menu of things
+            // you aren't doing. Pause/resume and previous stay, because those act on the current task.
+            // The switcher lives in the expanded island, which you open on purpose.
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)

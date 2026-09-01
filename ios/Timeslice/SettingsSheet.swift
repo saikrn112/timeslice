@@ -11,19 +11,17 @@ import TimesliceUI
 /// Two of the Mac's rows are deliberately absent, for the same reason the plan drops privacy mode:
 /// **"Dim others"** governs hover-highlighting on a pointer-driven timeline, and there is no hover on
 /// a phone. Everything else is here.
-struct SettingsSheet: View {
+struct SettingsScreen: View {
+    /// True when presented modally. As a TAB there is nothing to dismiss to, so a "Done" button would
+    /// be a dead control; as a sheet it's the only way out.
+    var showsDone: Bool = false
+
     @ObservedObject private var model = TimerModel.shared
     @ObservedObject private var settings = TimerModel.shared.settings
     @ObservedObject private var auth = GoogleAuthiOS.shared
     @Environment(\.dismiss) private var dismiss
     @State private var editingBudgets = false
     @State private var editingTags = false
-    @State private var showingNotes = false
-
-    /// Open notes only, so the badge counts what still needs doing rather than everything ever written.
-    private var openNoteCount: Int {
-        ((try? model.storeIfLoaded?.listFeedback(includeResolved: false)) ?? []).count
-    }
 
     var body: some View {
         NavigationStack {
@@ -79,15 +77,6 @@ struct SettingsSheet: View {
                         .font(Theme.captionSmall)
                 }
 
-                Section {
-                    Button { showingNotes = true } label: {
-                        Label(openNoteCount > 0 ? "Notes (\(openNoteCount) open)" : "Notes",
-                              systemImage: "note.text")
-                    }
-                } header: { header("Notes") } footer: {
-                    Text("Jotted on any device, synced everywhere.")
-                        .font(Theme.captionSmall)
-                }
 
                 syncSection
                 actionButtonSection
@@ -95,13 +84,14 @@ struct SettingsSheet: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                if showsDone {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                    }
                 }
             }
             .sheet(isPresented: $editingBudgets) { BudgetEditorSheet() }
             .sheet(isPresented: $editingTags) { TagEditorSheet() }
-            .sheet(isPresented: $showingNotes) { NotesSheet() }
             .onDisappear {
                 // Thresholds changed, so anything armed against the old ones is wrong.
                 model.rearmNudges()
