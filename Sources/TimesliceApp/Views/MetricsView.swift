@@ -97,6 +97,9 @@ struct MetricsView: View {
     /// Allocation being dragged by its grip on THIS page, and the row it's over.
     @State private var draggingTargetID: Int64?
     @State private var dropTargetID: Int64?
+    /// Grip under the pointer. Its own state, because the grip is an overlay OUTSIDE the row's
+    /// bounds, so the row's `onHover` never fires while you're on it.
+    @State private var hoveredGripID: Int64?
 
 
     /// Bucket under the cursor on the hours / focus charts.
@@ -1580,15 +1583,21 @@ struct MetricsView: View {
         .overlay(alignment: .leading) {
             GripDots()
                 .foregroundStyle(.tertiary)
-                .opacity(hoveredTargetID == row.target.id || draggingTargetID == row.target.id ? 1 : 0)
-                // Without this only the 2pt dots themselves are hit-testable, so a drag almost never
-                // starts — which is why the grip appeared to do nothing.
+                // Always faintly there, brighter under the pointer. Tying visibility to the ROW's
+                // hover was circular: the grip is outside the row's bounds, so pointing at it never
+                // marked the row hovered and the grip never appeared to be grabbed.
+                .opacity(hoveredGripID == row.target.id || draggingTargetID == row.target.id
+                         ? 1 : 0.3)
+                // A hit area larger than the 2pt dots, or a drag almost never starts.
+                .frame(width: 16, height: 20)
                 .contentShape(Rectangle())
+                .onHover { inside in hoveredGripID = inside ? row.target.id : nil }
                 .onDrag {
                     draggingTargetID = row.target.id
                     return NSItemProvider(object: String(row.target.id) as NSString)
                 }
-                .offset(x: -14)
+                .help("Drag to reorder")
+                .offset(x: -16)
         }
         .onDrop(of: [.text], isTargeted: Binding(
             get: { dropTargetID == row.target.id },
