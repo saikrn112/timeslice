@@ -92,8 +92,12 @@ struct MainWindowView: View {
     @State private var showSettings = false
     @State private var showNotes = false
     @State private var openNoteCount = 0
+    /// Held out here so a click that dismisses the notes popover doesn't take a half-written note
+    /// with it.
+    @State private var noteDraft = ""
+    @State private var noteDraftPlatform: FeedbackPlatform? = .macOS
 
-    /// Notes live up here rather than inside Settings: they're written whenever something is
+    /// Feedback lives up here rather than inside Settings: it's written whenever something is
     /// noticed, which is while using the app, and a thing you reach for often shouldn't be two
     /// clicks deep in a panel of preferences.
     private var notesButton: some View {
@@ -108,11 +112,15 @@ struct MainWindowView: View {
         .buttonStyle(.borderless)
         .help(openNoteCount > 0 ? "Feedback — \(openNoteCount) open" : "Feedback")
         .onAppear { refreshNoteCount() }
-        .sheet(isPresented: $showNotes) {
-            FeedbackSheet(store: appState.storeForEditing) {
+        // A popover, not a sheet: a sheet is modal and can only be dismissed by its own button,
+        // and every other thing on this row opens a popover you can click away from.
+        .popover(isPresented: $showNotes, arrowEdge: .bottom) {
+            FeedbackSheet(store: appState.storeForEditing,
+                          draft: $noteDraft, draftPlatform: $noteDraftPlatform) {
                 showNotes = false
                 refreshNoteCount()
             }
+            .onDisappear { refreshNoteCount() }
         }
     }
 

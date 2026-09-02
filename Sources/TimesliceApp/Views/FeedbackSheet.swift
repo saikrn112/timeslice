@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TimesliceCore
 
@@ -7,13 +8,22 @@ import TimesliceCore
 /// that's when you notice things. This is where you sit down and go through them.
 struct FeedbackSheet: View {
     let store: IntervalStore
+    /// Half-written note, owned by the parent. This is presented as a popover so that clicking
+    /// away closes it, and a popover's dismissal destroys the view's own `@State` — typing two
+    /// sentences and losing them to a stray click would be a worse bug than the one that fixed.
+    @Binding var draft: String
+    /// Tag for the note being written. Defaults to the app you're in, since that's the likelier
+    /// subject — one click retags it, which is cheaper than making every note start untagged.
+    @Binding var draftPlatform: FeedbackPlatform?
     var onClose: () -> Void
 
     @State private var notes: [Feedback] = []
-    @State private var draft = ""
-    /// Tag for the note being written. Defaults to the app you're in, since that's the likelier
-    /// subject — one click retags it, which is cheaper than making every note start untagged.
-    @State private var draftPlatform: FeedbackPlatform? = .macOS
+    /// Show only notes about one app. nil is everything.
+    @State private var filter: FeedbackPlatform?
+    /// Images pasted before the note itself has been saved. They can't be attached to a row that
+    /// doesn't exist yet, so they wait here and are written when Add is pressed.
+    @State private var pendingImages: [Data] = []
+    @State private var attachments: [String: [FeedbackAttachment]] = [:]
     @State private var showResolved = false
     @State private var deviceLabels: [String: String] = [:]
     /// Note being reworded, and the draft text. Double-click to enter.
@@ -25,10 +35,29 @@ struct FeedbackSheet: View {
     private func reload() {
         notes = (try? store.listFeedback()) ?? []
         deviceLabels = (try? store.deviceLabels()) ?? [:]
+        attachments = (try? store.attachmentsByFeedbackUID()) ?? [:]
+    }
+
+    /// Notes are listed by row id but attachments hang off the uid, since that's what survives the
+    /// trip between devices. One lookup keeps the id→uid mapping in one place.
+    private func images(for note: Feedback) -> [FeedbackAttachment] {
+        guard let uid = (try? store.feedbackUID(id: note.id)) ?? nil else { return [] }
+        return attachments[uid] ?? []
     }
 
     private var visible: [Feedback] {
-        showResolved ? notes : notes.filter(\.isOpen)
+        notes.filter { (showResolved || $0.isOpen) && matchesFilter($0) }
+    }
+
+    /// A note tagged Both belongs to whichever app you're filtering for — that's what the tag
+    /// means — so there's no separate Both filter to pick.
+    private func matchesFilter(_ note: Feedback) -> Bool {
+        guard let filter else { return true }
+        return note.platform == filter || note.platform == .both
+    }
+
+    private func openCount(_ platform: FeedbackPlatform) -> Int {
+        notes.filter { $0.isOpen && ($0.platform == platform || $0.platform == .both) }.count
     }
 
     var body: some View {
@@ -50,23 +79,68 @@ struct FeedbackSheet: View {
             // of things you noticed is common enough that sending you elsewhere would be silly.
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
-                    TextField("Note something…", text: $draft, axis: .vertical)
+                    TextField("What's wrong?", text: $draft, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                         .lineLimit(1...4)
                         .onSubmit { add() }
                     Button("Add") { add() }
                         .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                // Who has to act on this. Set while writing, when you know — asking later means
-                // going back through a list of notes whose context you've lost.
-                platformPicker(selection: $draftPlatform)
+                HStack(spacing: 8) {
+                    // Who has to act on this. Set while writing, when you know — asking later means
+                    // going back through a list of notes whose context you've lost.
+                    platformPicker(selection: $draftPlatform)
+
+                    Spacer()
+
+                    // ⌘V goes to the text field, so pasting a picture needs its own button. ⌘⇧V is
+                    // the shortcut, and dropping an image file on this panel works too.
+                    Button {
+                        if let png = ClipboardImage.png() { pendingImages.append(png) }
+                    } label: {
+                        Label("Paste image", systemImage: "photo.on.rectangle")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.link)
+                    .keyboardShortcut("v", modifiers: [.command, .shift])
+                    .help("Paste a screenshot from the clipboard (⌘⇧V), or drop an image here")
+                }
+
+                if !pendingImages.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(Array(pendingImages.enumerated()), id: \.offset) { idx, data in
+                            thumbnail(data) { pendingImages.remove(at: idx) }
+                        }
+                        Text("attached on Add").font(.system(size: 9)).foregroundStyle(.tertiary)
+                    }
+                }
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
 
             Divider()
 
+            HStack(spacing: 5) {
+                ForEach([FeedbackPlatform.macOS, .iOS]) { platform in
+                    let on = filter == platform
+                    pill(platform.label, symbol: platform.symbol,
+                         trailing: "\(openCount(platform))", on: on) {
+                        filter = on ? nil : platform
+                    }
+                }
+                if filter != nil {
+                    Button("Clear") { filter = nil }
+                        .buttonStyle(.link).font(.system(size: 10))
+                }
+                Spacer()
+                Text("\(visible.count) shown").font(.system(size: 10)).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 7)
+
+            Divider()
+
             if visible.isEmpty {
-                Text(showResolved ? "Nothing yet" : "Nothing open")
+                Text(filter != nil ? "Nothing here for \(filter!.label)"
+                                   : (showResolved ? "Nothing yet" : "Nothing open"))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -80,6 +154,20 @@ struct FeedbackSheet: View {
         }
         .frame(width: 560, height: 520)
         .onAppear { reload() }
+        // Dropping a screenshot from the desktop is the other half of pasting one.
+        .onDrop(of: [.fileURL, .png, .tiff], isTargeted: nil) { providers in
+            ClipboardImage.png(from: providers) { png in
+                if let png { pendingImages.append(png) }
+            }
+            return true
+        }
+        // Clicking away closes the popover without the text field ever losing focus, so the
+        // usual commit-on-blur doesn't fire. Commit here too or the edit is thrown away.
+        .onDisappear {
+            if let id = editingID, let note = notes.first(where: { $0.id == id }) {
+                commitEdit(note)
+            }
+        }
     }
 
     private func beginEdit(_ note: Feedback) {
@@ -102,9 +190,45 @@ struct FeedbackSheet: View {
     }
 
     private func add() {
-        _ = try? store.addFeedback(draft, platform: draftPlatform)
+        guard let id = (try? store.addFeedback(draft, platform: draftPlatform)) ?? nil else { return }
+        for png in pendingImages {
+            try? store.addAttachment(toFeedback: id, png: png)
+        }
         draft = ""
+        pendingImages = []
         reload()
+    }
+
+    /// A pasted image, small. Clicking the ✕ drops it; clicking the image opens it full size in
+    /// whatever normally opens PNGs.
+    private func thumbnail(_ data: Data, onRemove: (() -> Void)? = nil,
+                           open: (() -> Void)? = nil) -> some View {
+        let image = NSImage(data: data)
+        return ZStack(alignment: .topTrailing) {
+            Group {
+                if let image {
+                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    // A row can arrive before its bytes do; that's expected, not a failure.
+                    Image(systemName: "photo").font(.system(size: 14)).foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.secondary.opacity(0.10))
+                }
+            }
+            .frame(width: 56, height: 40)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color.secondary.opacity(0.3)))
+            .onTapGesture { open?() }
+
+            if let onRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 11))
+                        .foregroundStyle(.white, .black.opacity(0.6))
+                }
+                .buttonStyle(.plain)
+                .offset(x: 4, y: -4)
+            }
+        }
     }
 
     /// Three pills. Clicking the selected one clears it, so "no opinion" stays reachable without a
@@ -113,22 +237,33 @@ struct FeedbackSheet: View {
         HStack(spacing: 4) {
             ForEach(FeedbackPlatform.allCases) { platform in
                 let on = selection.wrappedValue == platform
-                Button {
+                pill(platform.label, symbol: platform.symbol, on: on) {
                     selection.wrappedValue = on ? nil : platform
-                } label: {
-                    HStack(spacing: 3) {
-                        Image(systemName: platform.symbol).font(.system(size: 9))
-                        Text(platform.label).font(.system(size: 10, weight: on ? .semibold : .regular))
-                    }
-                    .padding(.horizontal, 7).padding(.vertical, 2)
-                    .background(Capsule().fill(on ? Color.accentColor.opacity(0.22)
-                                                  : Color.secondary.opacity(0.10)))
-                    .foregroundStyle(on ? Color.accentColor : Color.secondary)
-                    .contentShape(Capsule())
                 }
-                .buttonStyle(.plain)
             }
         }
+    }
+
+    /// Shared by the tag picker and the filter bar: picking a tag and filtering by one are the
+    /// same gesture on the same vocabulary, so they should be the same control.
+    private func pill(_ title: String, symbol: String, trailing: String? = nil,
+                      on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: symbol).font(.system(size: 9))
+                Text(title).font(.system(size: 10, weight: on ? .semibold : .regular))
+                if let trailing {
+                    Text(trailing).font(.system(size: 9, design: .monospaced)).monospacedDigit()
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .background(Capsule().fill(on ? Color.accentColor.opacity(0.22)
+                                          : Color.secondary.opacity(0.10)))
+            .foregroundStyle(on ? Color.accentColor : Color.secondary)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     private func row(_ note: Feedback) -> some View {
@@ -200,6 +335,36 @@ struct FeedbackSheet: View {
                     }
                     Text(context(note))
                         .font(.system(size: 10)).foregroundStyle(.tertiary)
+                }
+
+                let shots = images(for: note)
+                if !shots.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(shots) { shot in
+                            let url = store.fileURL(forAttachment: shot.uid)
+                            thumbnail(shot.hasLocalFile ? (try? Data(contentsOf: url)) ?? Data()
+                                                        : Data(),
+                                      onRemove: editingID == note.id ? {
+                                          try? store.deleteAttachment(id: shot.id)
+                                          reload()
+                                      } : nil,
+                                      open: { if shot.hasLocalFile { NSWorkspace.shared.open(url) } })
+                        }
+                        // While editing, more can be added — the picture is part of the note.
+                        if editingID == note.id {
+                            Button {
+                                if let png = ClipboardImage.png() {
+                                    try? store.addAttachment(toFeedback: note.id, png: png)
+                                    reload()
+                                }
+                            } label: {
+                                Image(systemName: "plus").font(.system(size: 10))
+                                    .frame(width: 26, height: 40)
+                            }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                            .help("Paste another screenshot")
+                        }
+                    }
                 }
             }
 

@@ -23,6 +23,24 @@ public protocol SyncTransport {
     /// Delete payload files whose contents don't decode. They can't be addressed by device id
     /// (that lives inside the payload), so the transport removes them by name. Returns the count.
     func deleteUnreadablePayloads(excluding deviceID: String) -> Int
+
+    /// Store an opaque blob under `name`. Used for feedback images, which are far too big to embed
+    /// in a payload that's rewritten on every publish. Write-once: the name is derived from a uid,
+    /// so the same name always means the same bytes.
+    func putBlob(name: String, data: Data) throws
+    /// Fetch a blob, or nil if the transport hasn't got it. Nil is expected, not an error: the
+    /// manifest row syncs before the bytes do.
+    func fetchBlob(name: String) throws -> Data?
+    /// Forget a blob whose row has been deleted.
+    func deleteBlob(name: String) throws
+}
+
+public extension SyncTransport {
+    // Defaults so a transport that has no blob store (or a test double that doesn't care) still
+    // conforms. Feedback text and tags sync as usual; only the images stay local.
+    func putBlob(name: String, data: Data) throws {}
+    func fetchBlob(name: String) throws -> Data? { nil }
+    func deleteBlob(name: String) throws {}
 }
 
 /// A directory both devices can see — a folder inside Dropbox/iCloud Drive, or just a shared

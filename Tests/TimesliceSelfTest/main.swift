@@ -1659,6 +1659,95 @@ func testFeedbackPlatform() {
     }
 }
 
+// MARK: - Feedback attachments
+
+func testFeedbackAttachments() {
+    print("Feedback attachments:")
+    let png = Data([0x89, 0x50, 0x4E, 0x47, 1, 2, 3, 4])   // not a real PNG; only the bytes matter
+    do {
+        let (store, url) = try! makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let note = try! store.addFeedback("this bit is wrong", platform: .macOS)!
+        let shot = try! store.addAttachment(toFeedback: note, png: png)!
+
+        check(shot.hasLocalFile, "the bytes are written before the row that names them")
+        check(FileManager.default.contents(atPath: store.fileURL(forAttachment: shot.uid).path) == png,
+              "and they're the bytes that were handed in")
+        check(store.attachmentsDirectory.deletingLastPathComponent().path
+                == url.deletingLastPathComponent().path,
+              "images sit beside their own database, so a test store can't write to the real folder")
+        check(store.attachmentsDirectory.lastPathComponent
+                .hasPrefix(url.deletingPathExtension().lastPathComponent),
+              "and the folder is named after the database, so two in one directory can't collide")
+
+        let uid = try! store.feedbackUID(id: note)!
+        check(try! store.attachmentsByFeedbackUID()[uid]?.count == 1,
+              "an image is found by the note's uid, which is what survives a trip between devices")
+
+        // The manifest travels; the bytes don't.
+        let manifest = try! store.attachmentsForExport()
+        check(manifest.count == 1 && manifest[0].feedbackUID == uid,
+              "the manifest row references the note by uid, not by row id")
+        check(try! store.attachmentsNeedingUpload().map(\.uid) == [shot.uid],
+              "a freshly pasted image is queued for upload")
+        try! store.markAttachmentUploaded(uid: shot.uid)
+        check(try! store.attachmentsNeedingUpload().isEmpty,
+              "and isn't uploaded twice — a screenshot is immutable, so once is enough")
+
+        do {   // a peer gets the row first and the bytes later
+            let (peer, purl) = try! makeStore()
+            defer { try? FileManager.default.removeItem(at: purl) }
+            let noteRows = try! store.feedbackForExport()
+            for row in noteRows {
+                _ = try! peer.applyRemoteFeedback(uid: row.uid, text: row.text,
+                                                  deviceID: row.deviceID, createdAt: row.createdAt,
+                                                  resolvedAt: row.resolvedAt,
+                                                  remoteUpdatedAt: row.updatedAt,
+                                                  platform: row.platform)
+            }
+            for m in manifest {
+                check(try! peer.applyRemoteAttachment(uid: m.uid, feedbackUID: m.feedbackUID,
+                                                      filename: m.filename, byteSize: m.byteSize,
+                                                      createdAt: m.createdAt,
+                                                      remoteUpdatedAt: m.updatedAt),
+                      "the manifest row applies on the peer")
+                check(!(try! peer.applyRemoteAttachment(uid: m.uid, feedbackUID: m.feedbackUID,
+                                                        filename: m.filename, byteSize: m.byteSize,
+                                                        createdAt: m.createdAt,
+                                                        remoteUpdatedAt: m.updatedAt)),
+                      "and applying it twice is a no-op — there's no field to overwrite")
+            }
+            let waiting = try! peer.attachmentsMissingBytes()
+            check(waiting.map(\.uid) == [shot.uid],
+                  "the peer knows an image exists before it has the bytes")
+            check(try! peer.attachmentsNeedingUpload().isEmpty,
+                  "and doesn't offer to upload an image it hasn't got")
+
+            try! peer.storeAttachmentBytes(uid: shot.uid, png: png)
+            check(try! peer.attachmentsMissingBytes().isEmpty,
+                  "once the blob arrives the peer stops asking for it")
+
+            // Deleting the note over there takes the picture with it, file included.
+            let noteUID = manifest[0].feedbackUID
+            try! peer.applyRemoteTombstone(uid: noteUID, kind: "feedback",
+                                           deletedAt: Date().timeIntervalSince1970)
+            check(try! peer.attachmentsForExport().isEmpty,
+                  "a remote note delete cascades to its images rather than orphaning the manifest")
+            check(!FileManager.default.fileExists(
+                    atPath: peer.fileURL(forAttachment: shot.uid).path),
+                  "and removes the file too, which no foreign key could have done for us")
+        }
+
+        // Locally, deleting the note does the same and tombstones each image.
+        try! store.deleteFeedback(id: note)
+        check(try! store.attachmentsForExport().isEmpty, "a local note delete clears its images")
+        check(!FileManager.default.fileExists(atPath: store.fileURL(forAttachment: shot.uid).path),
+              "including the file on disk")
+        check(try! store.tombstoneRecords().contains { $0.uid == shot.uid
+                                                    && $0.kind == "feedback_attachment" },
+              "each image is tombstoned, or a peer would sync it straight back")
+    }
+}
+
 // MARK: - Paused presence
 
 func testPausedPresence() {
@@ -3615,6 +3704,7 @@ do {
     try testDeviceAttribution()
     testDeviceLanes()
     testFeedbackPlatform()
+    testFeedbackAttachments()
     testPausedPresence()
     try testTaskNameReuse()
     try testDeleteInterval()

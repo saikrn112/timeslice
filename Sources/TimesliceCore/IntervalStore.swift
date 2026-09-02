@@ -9,6 +9,17 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 /// its lifetime so transactions and WAL work cleanly (single-user, single-process app).
 public final class IntervalStore {
     private let databaseURL: URL
+
+    /// Beside the database and named AFTER it, so two databases sharing a folder don't share
+    /// images — which they did when this was a plain "attachments" sibling, and a second store
+    /// then saw the first one's files as its own.
+    public var attachmentsDirectory: URL {
+        let stem = databaseURL.deletingPathExtension().lastPathComponent
+        let dir = databaseURL.deletingLastPathComponent()
+            .appendingPathComponent("\(stem)-attachments", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
     private var db: OpaquePointer?
 
     public init(databaseURL: URL = TimeslicePaths.defaultDatabaseURL()) throws {
@@ -229,6 +240,22 @@ public final class IntervalStore {
         // row: a note has no duration and is never aggregated, so keeping it out of the
         // interval tables means it cannot accidentally land in a time total.
         _ = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, device_id TEXT, created_at REAL NOT NULL, resolved_at REAL, uid TEXT, updated_at REAL)", nil, nil, nil)
+        // Images pasted onto a note. Bytes live next to the database, keyed by uid; this table is
+        // only the manifest, small enough to ride the sync payload.
+        _ = sqlite3_exec(db, """
+            CREATE TABLE IF NOT EXISTS feedback_attachments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                feedback_uid TEXT NOT NULL,
+                uid TEXT,
+                filename TEXT NOT NULL,
+                byte_size INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL,
+                uploaded_at REAL)
+            """, nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_attachments_uid ON feedback_attachments(uid)", nil, nil, nil)
+        _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_feedback_attachments_note ON feedback_attachments(feedback_uid)", nil, nil, nil)
+
         // Which app the note is about — added later, so it's a migration for existing notes and
         // stays NULL on them rather than being guessed from the device that wrote them.
         _ = sqlite3_exec(db, "ALTER TABLE feedback ADD COLUMN platform TEXT", nil, nil, nil)
@@ -623,9 +650,26 @@ public final class IntervalStore {
             case "tag_link": table = "tag_links"
             case "target": table = "targets"
             case "feedback": table = "feedback"
+            case "feedback_attachment": table = "feedback_attachments"
             default: return          // an unknown kind from a newer build: record it, touch nothing
             }
             if let id = try localID(table: table, uid: uid) {
+                if table == "feedback_attachments" {
+                    // The bytes are a file, not a row, so the cascade has to be done by hand.
+                    try? FileManager.default.removeItem(at: fileURL(forAttachment: uid))
+                }
+                if table == "feedback" {
+                    // Same reasoning as a local delete: drop the note's images rather than leaving
+                    // them in the manifest as permanent orphans.
+                    let images = (try attachmentsByFeedbackUID()[uid]) ?? []
+                    for a in images {
+                        try? FileManager.default.removeItem(at: fileURL(forAttachment: a.uid))
+                        let d = try prepare("DELETE FROM feedback_attachments WHERE id = ?")
+                        sqlite3_bind_int64(d, 1, a.id)
+                        try step(d)
+                        sqlite3_finalize(d)
+                    }
+                }
                 if table == "projects" {
                     // Deleting a task takes its intervals with it, same as a local delete.
                     let d = try prepare("DELETE FROM intervals WHERE project_id = ?")
@@ -1704,8 +1748,15 @@ public final class IntervalStore {
 
     /// Really delete one — for a note written by mistake. Tombstoned, or the peer re-adds it.
     public func deleteFeedback(id: Int64) throws {
+        // Its images go too, tombstoned individually — otherwise they'd sit in the manifest
+        // pointing at a note that no longer exists, and a peer would keep re-fetching their bytes.
+        let noteUID = try uidLocked(table: "feedback", id: id)
+        let orphans = try noteUID.map { uid in
+            try attachmentsByFeedbackUID()[uid] ?? []
+        } ?? []
+        for a in orphans { try deleteAttachment(id: a.id) }
         try transaction {
-            try recordTombstoneLocked(uid: try uidLocked(table: "feedback", id: id), kind: "feedback")
+            try recordTombstoneLocked(uid: noteUID, kind: "feedback")
             let stmt = try prepare("DELETE FROM feedback WHERE id = ?")
             defer { sqlite3_finalize(stmt) }
             sqlite3_bind_int64(stmt, 1, id)
@@ -1760,6 +1811,178 @@ public final class IntervalStore {
         bindText(stmt, 5, uid)
         sqlite3_bind_double(stmt, 6, remoteUpdatedAt)
         if let platform { bindText(stmt, 7, platform) } else { sqlite3_bind_null(stmt, 7) }
+        try step(stmt)
+        return true
+    }
+
+    // MARK: - Feedback attachments
+
+    /// A note's sync uid. Attachments hang off the uid, not the row id, so the UI needs to ask.
+    public func feedbackUID(id: Int64) throws -> String? {
+        try uidLocked(table: "feedback", id: id)
+    }
+
+    public func fileURL(forAttachment uid: String) -> URL {
+        attachmentsDirectory.appendingPathComponent("\(uid).png")
+    }
+
+    /// Store `png` against a note and return the row. The caller has already converted whatever was
+    /// on the clipboard to PNG bytes; Core doesn't touch image formats so it stays UI-free.
+    @discardableResult
+    public func addAttachment(toFeedback id: Int64, png: Data,
+                              filename: String = "screenshot.png",
+                              at when: Date = Date()) throws -> FeedbackAttachment? {
+        guard let noteUID = try uidLocked(table: "feedback", id: id) else { return nil }
+        let uid = UUID().uuidString
+        // File first: a row pointing at bytes that were never written is a broken thumbnail, while
+        // bytes with no row are invisible and get swept up later.
+        try png.write(to: fileURL(forAttachment: uid), options: .atomic)
+        let stmt = try prepare("""
+            INSERT INTO feedback_attachments
+                (feedback_uid, uid, filename, byte_size, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, noteUID)
+        bindText(stmt, 2, uid)
+        bindText(stmt, 3, filename)
+        sqlite3_bind_int64(stmt, 4, Int64(png.count))
+        sqlite3_bind_double(stmt, 5, when.timeIntervalSince1970)
+        sqlite3_bind_double(stmt, 6, Date().timeIntervalSince1970)
+        try step(stmt)
+        // Touch the note so peers re-read it and notice the new manifest entry.
+        try touchFeedback(id: id)
+        return FeedbackAttachment(id: sqlite3_last_insert_rowid(db), feedbackUID: noteUID, uid: uid,
+                                  filename: filename, byteSize: png.count, createdAt: when,
+                                  hasLocalFile: true)
+    }
+
+    /// Every attachment, grouped by the uid of the note it belongs to — one query for a whole list
+    /// rather than one per row.
+    public func attachmentsByFeedbackUID() throws -> [String: [FeedbackAttachment]] {
+        let stmt = try prepare("""
+            SELECT id, feedback_uid, uid, filename, byte_size, created_at
+            FROM feedback_attachments WHERE uid IS NOT NULL ORDER BY created_at ASC
+            """)
+        defer { sqlite3_finalize(stmt) }
+        var out: [String: [FeedbackAttachment]] = [:]
+        let fm = FileManager.default
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let uid = text(stmt, 2)
+            let noteUID = text(stmt, 1)
+            out[noteUID, default: []].append(FeedbackAttachment(
+                id: sqlite3_column_int64(stmt, 0),
+                feedbackUID: noteUID,
+                uid: uid,
+                filename: text(stmt, 3),
+                byteSize: Int(sqlite3_column_int64(stmt, 4)),
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5)),
+                hasLocalFile: fm.fileExists(atPath: fileURL(forAttachment: uid).path)))
+        }
+        return out
+    }
+
+    public func deleteAttachment(id: Int64) throws {
+        let uid = try uidLocked(table: "feedback_attachments", id: id)
+        try transaction {
+            if let uid {
+                try recordTombstoneLocked(uid: uid, kind: "feedback_attachment")
+            }
+            let stmt = try prepare("DELETE FROM feedback_attachments WHERE id = ?")
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int64(stmt, 1, id)
+            try step(stmt)
+        }
+        if let uid { try? FileManager.default.removeItem(at: fileURL(forAttachment: uid)) }
+    }
+
+    /// Bump a note's `updated_at` without changing it — used when something attached to it changed.
+    private func touchFeedback(id: Int64) throws {
+        let stmt = try prepare("UPDATE feedback SET updated_at = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(stmt, 2, id)
+        try step(stmt)
+    }
+
+    /// Attachments whose bytes this device hasn't got yet — what the transport should go and fetch.
+    public func attachmentsMissingBytes() throws -> [FeedbackAttachment] {
+        try attachmentsByFeedbackUID().values.flatMap { $0 }.filter { !$0.hasLocalFile }
+    }
+
+    /// Attachments whose bytes haven't been handed to the transport yet.
+    public func attachmentsNeedingUpload() throws -> [FeedbackAttachment] {
+        let stmt = try prepare("""
+            SELECT id, feedback_uid, uid, filename, byte_size, created_at
+            FROM feedback_attachments WHERE uid IS NOT NULL AND uploaded_at IS NULL
+            """)
+        defer { sqlite3_finalize(stmt) }
+        var out: [FeedbackAttachment] = []
+        let fm = FileManager.default
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let uid = text(stmt, 2)
+            // Only what this device actually holds: a row that arrived from a peer has nothing to
+            // upload, and marking it done would strand the image if that peer disappeared.
+            guard fm.fileExists(atPath: fileURL(forAttachment: uid).path) else { continue }
+            out.append(FeedbackAttachment(
+                id: sqlite3_column_int64(stmt, 0), feedbackUID: text(stmt, 1), uid: uid,
+                filename: text(stmt, 3), byteSize: Int(sqlite3_column_int64(stmt, 4)),
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5)),
+                hasLocalFile: true))
+        }
+        return out
+    }
+
+    public func markAttachmentUploaded(uid: String, at when: Date = Date()) throws {
+        let stmt = try prepare("UPDATE feedback_attachments SET uploaded_at = ? WHERE uid = ?")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, when.timeIntervalSince1970)
+        bindText(stmt, 2, uid)
+        try step(stmt)
+    }
+
+    /// Write bytes that arrived from a peer.
+    public func storeAttachmentBytes(uid: String, png: Data) throws {
+        try png.write(to: fileURL(forAttachment: uid), options: .atomic)
+    }
+
+    public func attachmentsForExport() throws -> [(uid: String, feedbackUID: String,
+                                                   filename: String, byteSize: Int,
+                                                   createdAt: TimeInterval,
+                                                   updatedAt: TimeInterval)] {
+        let stmt = try prepare("""
+            SELECT uid, feedback_uid, filename, byte_size, created_at, COALESCE(updated_at, 0)
+            FROM feedback_attachments WHERE uid IS NOT NULL
+            """)
+        defer { sqlite3_finalize(stmt) }
+        var out: [(String, String, String, Int, TimeInterval, TimeInterval)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append((text(stmt, 0), text(stmt, 1), text(stmt, 2),
+                        Int(sqlite3_column_int64(stmt, 3)),
+                        sqlite3_column_double(stmt, 4), sqlite3_column_double(stmt, 5)))
+        }
+        return out
+    }
+
+    /// An attachment is immutable once written, so a peer's copy is either new or already known —
+    /// there's no field to overwrite and no LWW to run.
+    @discardableResult
+    public func applyRemoteAttachment(uid: String, feedbackUID: String, filename: String,
+                                      byteSize: Int, createdAt: TimeInterval,
+                                      remoteUpdatedAt: TimeInterval) throws -> Bool {
+        if try localID(table: "feedback_attachments", uid: uid) != nil { return false }
+        let stmt = try prepare("""
+            INSERT INTO feedback_attachments
+                (feedback_uid, uid, filename, byte_size, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, feedbackUID)
+        bindText(stmt, 2, uid)
+        bindText(stmt, 3, filename)
+        sqlite3_bind_int64(stmt, 4, Int64(byteSize))
+        sqlite3_bind_double(stmt, 5, createdAt)
+        sqlite3_bind_double(stmt, 6, remoteUpdatedAt)
         try step(stmt)
         return true
     }
