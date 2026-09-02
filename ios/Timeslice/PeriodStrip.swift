@@ -94,6 +94,16 @@ struct PeriodStrip: View {
                 // Follow an external change of range — a swipe on the cards below, or switching the
                 // unit, which rebuilds the strip entirely.
                 .onChange(of: selected) { _, _ in scroll(proxy, animated: true) }
+                // AND follow the cards arriving.
+                //
+                // This is the fix for "it comes back to the beginning like a circular buffer". The strip's
+                // window is built to include the selection, but SwiftUI gives no ordering guarantee
+                // between the parent recomputing `cards` and this child seeing `selected` change. Swiping
+                // past the oldest card fired the scroll while `cards` was still the PREVIOUS window — so
+                // the selection wasn't in it, and the fallback jumped to the newest card. Re-scrolling
+                // once the rebuilt window lands settles it on the right card.
+                .onChange(of: cards.first?.id) { _, _ in scroll(proxy, animated: false) }
+                .onChange(of: cards.count) { _, _ in scroll(proxy, animated: false) }
             }
         }
         .frame(height: Self.stripHeight)
@@ -105,9 +115,11 @@ struct PeriodStrip: View {
     /// with its whole future off screen — selecting yesterday hid today. Centring shows neighbours on
     /// both sides, so the strip reads as a position in time rather than as the end of a list.
     private func scroll(_ proxy: ScrollViewProxy, animated: Bool) {
-        guard let target = cards.first(where: { $0.range == selected })?.id ?? cards.last?.id else {
-            return
-        }
+        // NO fallback to `cards.last`. That fallback was the "circular buffer": when the selection wasn't
+        // in the current window — which happens for one frame every time the window grows — it scrolled to
+        // the NEWEST card, so swiping into the past kept flinging the strip back to Today. Staying put is
+        // correct; the `cards` observers above re-run this once the right window arrives.
+        guard let target = cards.first(where: { $0.range == selected })?.id else { return }
         if animated {
             withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(target, anchor: .center) }
         } else {

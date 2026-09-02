@@ -38,6 +38,12 @@ struct TimerActivityAttributes: ActivityAttributes {
         /// app is suspended holding a lock, so every name and colour the island draws has to arrive
         /// here. Kept short deliberately: three buttons is what fits beside pause and previous.
         var recents: [RecentTask] = []
+        /// Set only when ANOTHER DEVICE took the timer over, naming that device.
+        ///
+        /// Carried in the payload because the widget can't read the database, and shown because a timer
+        /// that stops on its own is alarming without a reason — the Mac says who took over, and the phone
+        /// had no equivalent.
+        var pausedByDevice: String? = nil
     }
 
     /// One button in the island's switcher.
@@ -68,21 +74,9 @@ extension TimerActivityAttributes.ContentState {
         isRunning ? max(0, now.timeIntervalSince(startedAt)) : 0
     }
 
-    /// Whether the ticking clock should carry an hours field.
-    var showsHours: Bool {
-        TimerDisplay.showsHours(displayedSeconds: committedTodaySeconds + sessionSeconds())
-    }
-
-    /// When the displayed clock next crosses into a new hour, or nil if it already shows hours.
-    ///
-    /// The app uses this to push one update at the boundary. Without it the label is stuck with
-    /// whatever `showsHours` was true when the snapshot was taken, and a minutes-only clock that runs
-    /// past an hour has nowhere to put the overflow.
-    func hourBoundary(now: Date = Date()) -> Date? {
-        guard isRunning, !showsHours else { return nil }
-        let displayed = committedTodaySeconds + sessionSeconds(now: now)
-        return now.addingTimeInterval(3600 - displayed)
-    }
+    /// Whether the ticking clock carries an hours field. **Always false** — see
+    /// `TimerDisplay.showsHours`.
+    var showsHours: Bool { TimerDisplay.showsHours }
 }
 
 /// Display maths shared by the app and the widget extension.
@@ -102,15 +96,21 @@ enum TimerDisplay {
         return effectiveStart.addingTimeInterval(-committedToday)
     }
 
-    /// Drop the hours field below an hour, so a short session reads `44:45` instead of `0:44:45`.
+    /// Never show an hours field: the clock counts in FLATTENED MINUTES, so an hour and a bit reads
+    /// `61:04` rather than `1:01:04`.
     ///
-    /// This is the ONLY precision control `Text(timerInterval:)` offers — its full signature is
-    /// `(timerInterval:pauseTime:countsDown:showsHours:)`, with no subsecond option. So the system
-    /// Stopwatch's hundredths (`0:03³²`) are not reachable from a Live Activity: the view is a snapshot
-    /// the system advances, and nothing in a widget extension redraws at 100Hz. Matching the *unit* to
-    /// the magnitude is the part that is achievable, and it's most of what makes the system clock read
-    /// cleanly — no leading `0:` for the common case of a session under an hour.
-    static func showsHours(displayedSeconds: Double) -> Bool {
-        displayedSeconds >= 3600
-    }
+    /// This was adaptive — minutes under an hour, hours above — and that turned out to be unfixable in
+    /// the right way. `showsHours` is baked into the SNAPSHOT the widget renders: the system advances the
+    /// digits but never re-evaluates the layout, so crossing an hour needs the APP to push a new state.
+    /// From your pocket it can't. The observed result was a clock sitting at `61:04` until the app was
+    /// opened, then jumping to `1:01:04` and staying there — the same session displayed two ways
+    /// depending on whether you'd looked at the app.
+    ///
+    /// Flattened minutes have no boundary to cross, so there is nothing to update and nothing to get
+    /// stuck: the same session always reads the same way. It's also the NARROWEST form, which is what the
+    /// compact island needs — `1:01:04` truncates there where `61:04` doesn't.
+    ///
+    /// The cost is honest: a three-hour session reads `185:12`. Unusual, but unambiguous, never truncated,
+    /// and never inconsistent — and the in-app clock shows real hours with milliseconds anyway.
+    static let showsHours = false
 }

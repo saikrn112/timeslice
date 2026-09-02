@@ -50,10 +50,12 @@ struct TimerLiveActivity: Widget {
                         // quantities on a glanceable surface meant reading a label to know which was
                         // which, and today's total is the one that answers "how am I doing".
                         HStack {
-                            Label(context.state.isRunning ? "Tracking" : "Paused",
+                            // Names the device when a takeover caused the pause. A timer that stops on
+                            // its own is alarming without a reason.
+                            Label(statusText(context.state),
                                   systemImage: context.state.isRunning ? "record.circle" : "pause.circle")
                                 .font(.caption2)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(context.state.isRunning ? Color.secondary : Color.orange)
                             Spacer()
                         }
                         // Buttons, not gestures: a Live Activity hosts App Intents only, so this is
@@ -105,7 +107,12 @@ struct TimerLiveActivity: Widget {
                     .stroke(color, lineWidth: 2.5)
                     .frame(width: 14, height: 14)
             }
-            .keylineTint(color)
+            // ORANGE keyline while paused, the task's colour while running.
+            //
+            // The keyline is the one part of the island visible without expanding it, and a paused timer
+            // looked identical to a running one there — which matters most in the case that prompted this:
+            // another device took over and the phone gave no sign. Matches the Mac's orange paused pill.
+            .keylineTint(context.state.isRunning ? color : .orange)
         }
     }
 }
@@ -175,9 +182,9 @@ private struct ClockText: View {
 
     var body: some View {
         let origin = state.liveOrigin
-        // `showsHours` matched to the magnitude: `44:45` under an hour, `1:04:45` above it, rather than a
-        // permanent `0:` prefix eating the island's scarcest resource. It's the only precision knob the
-        // API has — see `TimerDisplay.showsHours`.
+        // `showsHours: false` always — FLATTENED MINUTES, so an hour and a bit is `61:04`. It's the only
+        // precision knob the API has, and the adaptive version got stuck mid-session; see
+        // `TimerDisplay.showsHours` for why.
         Text(timerInterval: origin...Date.distantFuture,
              pauseTime: state.isRunning
                  ? nil
@@ -190,6 +197,13 @@ private struct ClockText: View {
     }
 }
 
+/// "Tracking", "Paused", or "Paused · MacBook Air" when another device took over.
+private func statusText(_ state: TimerActivityAttributes.ContentState) -> String {
+    if state.isRunning { return "Tracking" }
+    if let by = state.pausedByDevice { return "Paused · \(by)" }
+    return "Paused"
+}
+
 /// Colour for the clock digits.
 ///
 /// **Green while running**, not the task's colour. A pale task colour — a light blue, a pale yellow —
@@ -200,6 +214,14 @@ private struct ClockText: View {
 /// Paused digits go secondary, so a frozen number doesn't read as live.
 private func clockColor(_ state: TimerActivityAttributes.ContentState) -> Color {
     state.isRunning ? .green : .secondary
+}
+
+/// The card's accent: the task's colour while running, ORANGE while paused.
+///
+/// Your suggestion, and it's the right split — the digits go grey because a frozen number shouldn't read
+/// as live, while the surrounding accent goes orange because that's what carries "stopped" at a glance.
+private func cardAccent(_ state: TimerActivityAttributes.ContentState) -> Color {
+    state.isRunning ? Color(hex: state.colorHex) : .orange
 }
 
 
@@ -221,7 +243,7 @@ private struct LockScreenView: View {
     var body: some View {
         HStack(spacing: 12) {
             RoundedRectangle(cornerRadius: 3)
-                .fill(Color(hex: state.colorHex))
+                .fill(cardAccent(state))
                 .frame(width: 5, height: 42)
 
             // NAME ONLY — no status line.
@@ -230,13 +252,24 @@ private struct LockScreenView: View {
             // the system to animate. It was also redundant: the button already shows pause-vs-play and the
             // digits already stop. Removing it leaves exactly what you asked for — name, colour, clock,
             // one button.
-            Text(state.taskName)
-                .font(.headline)
-                .lineLimit(1)
-                .minimumScaleFactor(0.85)
-                // Takes the slack, so the name always starts at the same x and the clock always ends at
-                // the same one, whatever the state.
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(state.taskName)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                // ONLY when another device took over. The status line was removed from this card on
+                // purpose — "tracking"/"paused" duplicated the button — but "why did it stop" is
+                // information the button can't convey, and it's the one case worth a second line.
+                if let by = state.pausedByDevice, !state.isRunning {
+                    Text("paused · \(by)")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                }
+            }
+            // Takes the slack, so the name always starts at the same x and the clock always ends at
+            // the same one, whatever the state.
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             ClockText(state: state)
                 .font(.system(.title2, design: .monospaced))

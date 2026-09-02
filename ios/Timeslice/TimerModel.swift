@@ -40,6 +40,9 @@ final class TimerModel: ObservableObject {
     /// mirror of the long-session checkpoint. Same role as the Mac's `TimerEngine.pausedSince`.
     @Published private(set) var pausedSince: Date?
     @Published private(set) var loadError: String?
+    /// The device that most recently took the timer over, for the "paused by …" line. Cleared as soon as
+    /// this device is running again.
+    @Published private(set) var takenOverBy: String?
     /// Set by `OpenSwitcherIntent` so the root view can present the wheel. A published flag rather
     /// than the intent presenting anything itself: an AppIntent has no view hierarchy to present in.
     @Published var showingSwitcher = false
@@ -275,6 +278,8 @@ final class TimerModel: ObservableObject {
                 try store.switchTo(projectID: taskID)
                 currentTaskID = taskID
                 pausedSince = nil
+                // Running here again, so the takeover note is stale.
+                takenOverBy = nil
                 // `running` isn't refreshed yet, so read the open interval directly — one indexed row.
                 if let open = try? store.openInterval(), let task = task(id: taskID) {
                     running = open
@@ -307,6 +312,27 @@ final class TimerModel: ObservableObject {
         NudgeScheduler.shared.cancelAll()
         // Clears our running marker on the other devices, so nothing keeps thinking we hold the timer.
         SyncController.shared.publishSoon()
+    }
+
+    /// Reflect a takeover by ANOTHER DEVICE that has already been written to the store.
+    ///
+    /// `SyncController` closes the interval itself (`TakeoverPolicy` back-dates the cutoff, so the write
+    /// has to happen there). The bug was that it stopped at the write: the island was never told, so a
+    /// phone whose timer had been taken over kept counting on the Lock Screen and in the Dynamic Island.
+    /// Two displays of one fact, disagreeing — which is exactly the "one source of truth" worry, and it
+    /// was justified.
+    ///
+    /// So every path that stops the clock now ends here or in `toggle`, and both push the activity.
+    func applyRemoteTakeover(byDeviceID id: String, at when: Date) {
+        // Prefer the peer's friendly label; fall back to its id rather than showing nothing.
+        takenOverBy = deviceLabels[id] ?? id
+        pausedSince = when
+        reload()
+        if let taskID = currentTaskID, let task = task(id: taskID) {
+            syncActivity(startedAt: when, isRunning: false, task: task,
+                         committedOverride: committedTodayNow(for: taskID))
+        }
+        rearmNudges()
     }
 
     /// Pause the running task, or resume the current one. What the Action Button and the Live Activity's
@@ -496,7 +522,9 @@ final class TimerModel: ObservableObject {
                          startedAt: startedAt,
                          committedTodaySeconds: committedOverride ?? committedTodaySeconds[id] ?? 0,
                          isRunning: isRunning,
-                         recents: switcherRecents(excluding: id)))
+                         recents: switcherRecents(excluding: id),
+                         // Only meaningful while paused — a running timer wasn't taken over.
+                         pausedByDevice: isRunning ? nil : takenOverBy))
     }
 
     /// The tasks offered as one-press buttons in the island's switcher.

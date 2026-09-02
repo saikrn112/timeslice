@@ -63,6 +63,12 @@ struct TasksView: View {
 
             }
             .background(Theme.page)
+            // Pull to refresh here too, not only on Metrics. Same reasoning: background refresh is
+            // opportunistic, so the gesture everyone already tries should force a poll.
+            .refreshable {
+                await SyncController.shared.syncOnce()
+                model.load()
+            }
             .navigationTitle("Timeslice")
             .toolbar { viewMenu }
             // Add and switch live at the BOTTOM, not in the top-right corner.
@@ -568,11 +574,45 @@ struct NowCard: View {
                         .font(.system(size: 34, weight: .semibold, design: .rounded))
                         .foregroundStyle(.tertiary)
                 }
-                Text(isRunning ? "tracking · today" : (task == nil ? "tap Start" : "paused · today"))
-                    .font(Theme.captionSmall).foregroundStyle(.tertiary)
+                // Names the device when a takeover stopped it. The Mac says who took over; the phone
+                // just went quiet, which reads as the app losing the timer rather than another device
+                // claiming it.
+                if !isRunning, let by = model.takenOverBy, task != nil {
+                    Text("paused · \(by) took over")
+                        .font(Theme.captionSmall).foregroundStyle(.orange)
+                } else {
+                    Text(isRunning ? "tracking · today" : (task == nil ? "tap Start" : "paused · today"))
+                        .font(Theme.captionSmall).foregroundStyle(.tertiary)
+                }
             }
 
             Spacer(minLength: 4)
+
+            // STOP — the answer to "how will the app stop?".
+            //
+            // I removed the toolbar's Stop because a second verb in the corner was a decision for no
+            // benefit, and that left no way to stop at all: pause keeps the task current, so the island
+            // stays up and the task stays selected forever. Here it's contextual — only present when
+            // something IS current, right next to the thing it contrasts with — which is what the toolbar
+            // version wasn't.
+            //
+            // Deliberately smaller and unfilled: pause is what you press constantly, stop is what you
+            // press when you're finished, and the sizes should say so.
+            if model.currentTaskID != nil {
+                Button {
+                    model.stop()
+                } label: {
+                    ZStack {
+                        Circle().stroke(Color.secondary.opacity(0.45), lineWidth: 1.5)
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Stop tracking")
+            }
 
             Button {
                 model.toggleCurrent()

@@ -287,7 +287,12 @@ final class SyncController {
                                                    observedAt: observedAt) else { return }
         // Back-dated to when the other device started, so the two devices' intervals abut instead of
         // overlapping — this is what makes the delayed wake-up harmless.
-        try await MainActor.run { try Self.requireStore().stopOpenInterval(at: decision.pauseAt) }
+        try await MainActor.run {
+            try Self.requireStore().stopOpenInterval(at: decision.pauseAt)
+            // Tell the model, don't just write the row. Stopping at the write left the Live Activity
+            // ticking on a timer that no longer existed.
+            TimerModel.shared.applyRemoteTakeover(byDeviceID: decision.byDeviceID, at: decision.pauseAt)
+        }
         NSLog("[timeslice] paused by \(decision.byDeviceID) at \(decision.pauseAt)")
     }
 
