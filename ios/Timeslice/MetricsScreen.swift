@@ -20,6 +20,9 @@ struct MetricsScreen: View {
     @State private var data = MetricsData()
     @State private var scope: BreakdownScope = .tasks
     @State private var inspected: DaySegment?
+    /// The unit the current strip was built for. The strip depends on the UNIT and the data — never on
+    /// which period is selected — so this is what decides whether it needs rebuilding.
+    @State private var stripUnit: RangeUnit?
 
     /// Same three-way breakdown the Mac has.
     private enum BreakdownScope: String, CaseIterable, Identifiable {
@@ -97,8 +100,10 @@ struct MetricsScreen: View {
             .onChange(of: model.running?.projectID) { _, _ in rebuild() }
             // Rebuild when the underlying data changes at all — a reseed, a sync merge, or an edit
             // on the other tab. Without this, metrics silently kept showing the previous dataset.
-            .onChange(of: model.tasks) { _, _ in rebuild() }
-            .onChange(of: model.groups) { _, _ in rebuild() }
+            // A data change invalidates the strip's totals, so drop the cache before rebuilding.
+            .onChange(of: model.tasks) { _, _ in stripUnit = nil; rebuild() }
+            .onChange(of: model.groups) { _, _ in stripUnit = nil; rebuild() }
+            .onChange(of: model.running?.projectID) { _, _ in stripUnit = nil }
         }
     }
 
@@ -923,6 +928,10 @@ struct MetricsScreen: View {
 
     private func rebuild() {
         guard let store = model.storeIfLoaded else { return }
+        Perf.shared.measure(Perf.Path.metricsRebuild) { rebuildBody(store) }
+    }
+
+    private func rebuildBody(_ store: IntervalStore) {
         let now = Date()
         earliest = try? store.earliestIntervalStart()
         let all = (try? store.intervals()) ?? []
@@ -954,7 +963,20 @@ struct MetricsScreen: View {
             targets: (try? store.listTargets()) ?? [], tasks: model.allTasks,
             groups: model.groups, tags: model.allTags, tagIDsByTask: tagIDsByTask,
             intervals: all, viewedRange: range, now: now)
-        d.strip = buildStrip(intervals: all, deep: deep, now: now)
+        // REUSE the existing strip unless the unit changed.
+        //
+        // Measured at 197 ms of a 214 ms rebuild — twelve dropped frames on every single swipe, because
+        // 60 cards means 60 `Aggregations.summary` passes. And it was pure waste: since the window became
+        // fixed-depth it no longer depends on the selection at all, so swiping produced an identical strip
+        // at full price. Rebuild on a unit change or a data change; a selection change just re-highlights.
+        if stripUnit == range.unit, !data.strip.isEmpty {
+            d.strip = data.strip
+        } else {
+            d.strip = Perf.shared.measure(Perf.Path.stripBuild) {
+                buildStrip(intervals: all, deep: deep, now: now)
+            }
+            stripUnit = range.unit
+        }
         data = d
     }
 
@@ -1004,11 +1026,13 @@ struct MetricsScreen: View {
         let inSpan = intervals.filter { ($0.end ?? now) >= spanStart }
 
         // Oldest first: the strip reads left-to-right into the present, and scrolls to the right end.
-        var cards = windows.reversed().map { window in
-            let s = Aggregations.summary(intervals: inSpan, range: window,
-                                         deepThreshold: deep, now: now)
-            return PeriodCard(range: window, totalSeconds: s.totalSeconds,
-                              deepSeconds: s.deepSeconds)
+        // ONE pass for all 60 windows, not one `summary` per card. Same arithmetic, same union semantics,
+        // in `Aggregations.windowTotals` — see there for why the per-card version was untenable.
+        let ordered = Array(windows.reversed())
+        let totals = Aggregations.windowTotals(intervals: inSpan, windows: ordered,
+                                               deepThreshold: deep, now: now)
+        var cards = zip(ordered, totals).map { window, t in
+            PeriodCard(range: window, totalSeconds: t.total, deepSeconds: t.deep)
         }
         // Scale the rings to the busiest period on the strip, so the ring and the number inside it
         // agree. Done after the fact because it's the one figure that depends on the other cards.

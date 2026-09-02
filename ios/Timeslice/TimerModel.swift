@@ -188,6 +188,13 @@ final class TimerModel: ObservableObject {
 
     func reload() {
         guard let store else { return }
+        // Measured because this is the method that was found sitting in front of a Lock Screen button
+        // press: it loads every interval ever recorded and aggregates it twice. Its cost grows with your
+        // history, which is exactly the kind of regression that only shows up months in.
+        Perf.shared.measure(Perf.Path.reload) { reloadBody(store) }
+    }
+
+    private func reloadBody(_ store: IntervalStore) {
         do {
             let now = Date()
             allTasks = try store.listProjects(includeArchived: true)
@@ -260,6 +267,10 @@ final class TimerModel: ObservableObject {
     /// when you press a button on your Lock Screen.
     func toggle(taskID: Int64) {
         guard let store else { return }
+        Perf.shared.measure(Perf.Path.toggle) { toggleBody(taskID, store) }
+    }
+
+    private func toggleBody(_ taskID: Int64, _ store: IntervalStore) {
         let wasRunning = running != nil
         let isPausing = running?.projectID == taskID
         do {
@@ -368,7 +379,9 @@ final class TimerModel: ObservableObject {
     /// catches all of it up.
     func rollChunks() {
         guard let store else { return }
-        let rolled = (try? store.rollOpenInterval(chunkSeconds: settings.deepBlockSeconds)) ?? 0
+        let rolled = Perf.shared.measure(Perf.Path.rollChunks) {
+            (try? store.rollOpenInterval(chunkSeconds: settings.deepBlockSeconds)) ?? 0
+        }
         if rolled > 0 { reload() }
     }
 

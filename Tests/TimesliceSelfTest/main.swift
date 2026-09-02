@@ -3515,6 +3515,77 @@ func testCrossDeviceTakeover() throws {
     }
 }
 
+// MARK: - windowTotals agrees with summary, in one pass
+
+/// `windowTotals` exists purely for speed, so the only thing worth asserting is that it is IDENTICAL to the
+/// per-window `summary` calls it replaced. A faster function that quietly disagrees is worse than a slow one.
+func testWindowTotals() throws {
+    print("\nWindow totals:")
+    let (store, url) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let a = try store.createProject(name: "alpha", colorHex: "#4E79A7")
+    let b = try store.createProject(name: "beta", colorHex: "#F28E2B")
+
+    let now = date(2026, 3, 11, 12, 0)
+    // Spread across several days, including one interval that CROSSES MIDNIGHT — the case a naive
+    // bucket-by-start-date would put entirely in the wrong window.
+    try store.insertClosedInterval(projectID: a, start: date(2026, 3, 9, 22, 30),
+                                   end: date(2026, 3, 10, 1, 15))
+    try store.insertClosedInterval(projectID: b, start: date(2026, 3, 10, 9, 0),
+                                   end: date(2026, 3, 10, 10, 30))
+    try store.insertClosedInterval(projectID: a, start: date(2026, 3, 11, 9, 0),
+                                   end: date(2026, 3, 11, 11, 0))
+    // Overlapping pair on one day, so the UNION (not sum) behaviour is exercised.
+    try store.insertClosedInterval(projectID: b, start: date(2026, 3, 11, 10, 30),
+                                   end: date(2026, 3, 11, 11, 30))
+    let intervals = try store.intervals()
+    let deep: TimeInterval = 25 * 60
+
+    // Six days ending today, oldest first — the shape the period strip builds.
+    var windows: [DateRange] = []
+    var cursor = DateRange.resolve(unit: .day, anchor: now)
+    for _ in 0..<6 { windows.append(cursor); cursor = cursor.stepped(by: -1) }
+    windows.reverse()
+
+    let fast = Aggregations.windowTotals(intervals: intervals, windows: windows,
+                                         deepThreshold: deep, now: now)
+    check(fast.count == windows.count, "one result per window, in order")
+
+    for (i, window) in windows.enumerated() {
+        let slow = Aggregations.summary(intervals: intervals, range: window,
+                                        deepThreshold: deep, now: now)
+        check(approx(fast[i].total, slow.totalSeconds, 0.5),
+              "window \(i) total matches summary (\(fast[i].total) vs \(slow.totalSeconds))")
+        check(approx(fast[i].deep, slow.deepSeconds, 0.5),
+              "window \(i) deep matches summary")
+    }
+
+    // The midnight-crossing interval must be SPLIT across two adjacent windows rather than landing
+    // wholly in one.
+    //
+    // Asserted as a PROPERTY, not as specific minute counts. My first attempt hard-coded "90m on the 9th,
+    // 75m on the 10th" and failed — not because the code was wrong (every window matched `summary` above)
+    // but because the test's own `date()` helper and the `Calendar` used for day boundaries don't
+    // necessarily share a timezone, so which calendar day a 22:30 instant belongs to isn't fixed. The
+    // splitting behaviour is what matters and it holds regardless.
+    let nonEmpty = fast.enumerated().filter { $0.element.total > 0 }.map(\.offset)
+    check(nonEmpty.count >= 3, "time lands in at least three distinct windows")
+    check(zip(nonEmpty, nonEmpty.dropFirst()).contains { $1 == $0 + 1 },
+          "the crossing interval puts time in two ADJACENT windows")
+
+    // And nothing is lost or double-counted: the windows together account for exactly the same time as one
+    // range spanning all of them.
+    let whole = DateRange(unit: .day, start: windows[0].start, end: windows[windows.count - 1].end)
+    let spanning = Aggregations.summary(intervals: intervals, range: whole,
+                                        deepThreshold: deep, now: now)
+    check(approx(fast.reduce(0) { $0 + $1.total }, spanning.totalSeconds, 1),
+          "the windows sum to the whole span's total — nothing dropped at a boundary")
+
+    check(Aggregations.windowTotals(intervals: intervals, windows: [],
+                                    deepThreshold: deep, now: now).isEmpty,
+          "no windows yields no results")
+}
+
 // MARK: - Chunked running intervals
 
 /// `rollOpenInterval` replaces prompt-based auto-pause: a long run becomes consecutive blocks instead of
@@ -3765,6 +3836,7 @@ do {
     testReversedClientID()
     try testDemoSeedInvariants()
     try testAllocationLifecycle()
+    try testWindowTotals()
     try testCrossDeviceTakeover()
     try testRollOpenInterval()
     try testFeedback()

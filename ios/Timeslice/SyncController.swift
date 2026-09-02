@@ -147,7 +147,12 @@ final class SyncController {
         }
         isSyncing = true
         defer { isSyncing = false }
-        return await performSync()
+        // Timed at the CYCLE level, not per Drive call: what matters is how long a poll occupies the app,
+        // and the poll runs every 10-15s while you're looking at the screen.
+        let started = Date()
+        let ok = await performSync()
+        Perf.shared.record(Perf.Path.syncCycle, seconds: Date().timeIntervalSince(started))
+        return ok
     }
 
     /// The cycle itself, deliberately `nonisolated`.

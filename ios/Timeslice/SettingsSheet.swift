@@ -22,6 +22,7 @@ struct SettingsScreen: View {
     @Environment(\.dismiss) private var dismiss
     @State private var editingBudgets = false
     @State private var editingTags = false
+    @State private var showingDiagnostics = false
 
     var body: some View {
         NavigationStack {
@@ -78,6 +79,15 @@ struct SettingsScreen: View {
                 }
 
 
+                Section {
+                    Button { showingDiagnostics = true } label: {
+                        Label("Diagnostics…", systemImage: "gauge.with.needle")
+                    }
+                } header: { header("Performance") } footer: {
+                    Text("Memory, CPU and per-path timings, plus MetricKit's daily report.")
+                        .font(Theme.captionSmall)
+                }
+
                 syncSection
                 actionButtonSection
             }
@@ -92,6 +102,7 @@ struct SettingsScreen: View {
             }
             .sheet(isPresented: $editingBudgets) { BudgetEditorSheet() }
             .sheet(isPresented: $editingTags) { TagEditorSheet() }
+            .sheet(isPresented: $showingDiagnostics) { DiagnosticsSheet() }
             .onDisappear {
                 // Thresholds changed, so anything armed against the old ones is wrong.
                 model.rearmNudges()

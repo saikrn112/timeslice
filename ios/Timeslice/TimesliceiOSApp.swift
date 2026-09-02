@@ -1,5 +1,6 @@
 import AppIntents
 import SwiftUI
+import TimesliceCore
 import TimesliceIntents
 
 @main
@@ -16,6 +17,10 @@ struct TimesliceiOSApp: App {
                     // Registration must happen before the app finishes launching, or the system
                     // refuses the identifier.
                     SyncController.shared.registerBackgroundTask()
+                    // Restore the opt-in BEFORE anything measurable runs, or the first launch's timings
+                    // are missing and the table reads as "nothing costs anything".
+                    Perf.shared.isEnabled = UserDefaults.standard.bool(forKey: "perfEnabled")
+                    DiagnosticsStore.shared.start()
                     SyncController.shared.scheduleNextRefresh()
                     // Re-wires the Drive transport when a refresh token is already in the Keychain,
                     // so sync resumes without another sign-in.
@@ -51,6 +56,9 @@ struct TimesliceiOSApp: App {
                 SyncController.shared.startForegroundPolling()
             } else {
                 SyncController.shared.stopForegroundPolling()
+                // Backgrounding is the one moment a session's numbers are complete and the process is
+                // still alive to write them.
+                DiagnosticsStore.shared.flushSnapshot()
             }
         }
     }
