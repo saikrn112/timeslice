@@ -81,15 +81,18 @@ struct PeriodStrip: View {
                     .padding(.leading, leadInset)
                     .padding(.trailing, Self.spacing)
                     .padding(.vertical, 2)
-                    // SNAP to a card instead of coasting to a stop between two.
-                    //
-                    // Reported as "snappy and not sliding like cards": a plain scroll view decelerates
-                    // wherever momentum runs out, so the strip settled half-way between periods and
-                    // never felt like discrete cards. `viewAligned` makes each card a scroll target, so
-                    // a flick lands on one.
-                    .scrollTargetLayout()
                 }
-                .scrollTargetBehavior(.viewAligned)
+                // NO `.scrollTargetBehavior(.viewAligned)`.
+                //
+                // It was added for snapping, and it fights `scrollTo(anchor: .center)`: `viewAligned`
+                // re-settles the content onto its own alignment AFTER a programmatic scroll, so the
+                // selected card ended up against an edge instead of the middle. That's the "focus snaps
+                // back to left instead of being at the center" — two mechanisms deciding the same scroll
+                // offset, and the last one wins.
+                //
+                // Snapping isn't lost. Every period change re-centres the selection with an animation, and
+                // a period change is what a swipe DOES here, so the strip still lands on a card — it just
+                // lands on the selected one rather than wherever alignment rounds to.
                 .onAppear { scroll(proxy, animated: false) }
                 // Follow an external change of range — a swipe on the cards below, or switching the
                 // unit, which rebuilds the strip entirely.
