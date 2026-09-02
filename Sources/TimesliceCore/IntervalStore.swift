@@ -1025,7 +1025,61 @@ public final class IntervalStore {
     }
 
     /// Insert an already-closed interval at explicit times. For backfilling demo/history data.
+    /// Remove `[from, to)` from one interval, keeping whatever falls outside it.
+    ///
+    /// Deleting a session that the timeline selection has CLIPPED used to be refused outright,
+    /// because `deleteInterval` would take the whole underlying interval and not the visible slice —
+    /// which is a lie about what the ✕ on that row does. Cutting the slice out is what was actually
+    /// meant, and it's the same operation as trimming a mis-recorded block: tombstone the original,
+    /// re-insert the surviving pieces under fresh uids.
+    ///
+    /// Returns the number of pieces left behind (0, 1 or 2). A running interval is refused — its end
+    /// moves with the clock, so the slice being cut wouldn't be the slice that was on screen.
+    @discardableResult
+    public func deleteIntervalSlice(id: Int64, from: Date, to: Date) throws -> Int {
+        guard to > from else { return -1 }
+        let read = try prepare("SELECT project_id, start_utc, end_utc, device_id, running FROM intervals WHERE id = ?")
+        sqlite3_bind_int64(read, 1, id)
+        guard sqlite3_step(read) == SQLITE_ROW else { sqlite3_finalize(read); return -1 }
+        let projectID = sqlite3_column_int64(read, 0)
+        let start = Date(timeIntervalSince1970: sqlite3_column_double(read, 1))
+        let endIsNull = sqlite3_column_type(read, 2) == SQLITE_NULL
+        let end = Date(timeIntervalSince1970: sqlite3_column_double(read, 2))
+        let deviceID = sqlite3_column_type(read, 3) == SQLITE_NULL ? nil : text(read, 3)
+        let running = sqlite3_column_int(read, 4) == 1
+        sqlite3_finalize(read)
+        guard !running, !endIsNull else { return -1 }
+
+        // Pieces that survive. Sub-second slivers are dropped rather than kept as zero-length rows
+        // that show up in Sessions as an empty block.
+        var remaining: [(Date, Date)] = []
+        if from > start, from.timeIntervalSince(start) >= 1 { remaining.append((start, min(from, end))) }
+        if to < end, end.timeIntervalSince(to) >= 1 { remaining.append((max(to, start), end)) }
+
+        try transaction {
+            try recordTombstoneLocked(uid: try uidLocked(table: "intervals", id: id), kind: "interval")
+            let del = try prepare("DELETE FROM intervals WHERE id = ?")
+            defer { sqlite3_finalize(del) }
+            sqlite3_bind_int64(del, 1, id)
+            try step(del)
+            // The device that RECORDED it, carried over — the piece is still that device's work, and
+            // re-stamping it with this one would corrupt the attribution the metrics page shows.
+            for (s, e) in remaining {
+                try insertClosedIntervalLocked(projectID: projectID, start: s, end: e,
+                                               deviceID: deviceID)
+            }
+        }
+        return remaining.count
+    }
+
     public func insertClosedInterval(projectID: Int64, start: Date, end: Date,
+                                     deviceID: String? = nil) throws {
+        try insertClosedIntervalLocked(projectID: projectID, start: start, end: end,
+                                       deviceID: deviceID)
+    }
+
+    /// Same insert, callable from inside an existing transaction.
+    private func insertClosedIntervalLocked(projectID: Int64, start: Date, end: Date,
                                      deviceID: String? = nil) throws {
         let stmt = try prepare("INSERT INTO intervals (project_id, start_utc, end_utc, running, uid, device_id) VALUES (?, ?, ?, 0, ?, ?)")
         defer { sqlite3_finalize(stmt) }

@@ -16,6 +16,10 @@ struct TargetsSheet: View {
     /// Retired allocations with their allocated-vs-spent figures, for the history list.
     @State private var history: [AllocationHistory] = []
     @State private var newTagName = ""
+    /// Every task, for the per-task allocation list. Loaded in `reload` with everything else.
+    @State private var allTasks: [Project] = []
+    @State private var taskQuery = ""
+    @State private var showTasks = false
     /// Re-read after every edit. Cheap (a handful of rows) and avoids the whole class of bugs where
     /// the sheet shows something the store no longer agrees with.
     private func reload() {
@@ -30,6 +34,7 @@ struct TargetsSheet: View {
         let retired = all.filter { !$0.isLive }
         guard !retired.isEmpty else { return [] }
         let tasks = (try? store.listProjects(includeArchived: true)) ?? []
+        allTasks = tasks
         let tagsByID = Dictionary(uniqueKeysWithValues: tags.map { ($0.id, $0) })
         let intervals = (try? store.intervals()) ?? []
         let byTask = (try? store.effectiveTagIDsByTask()) ?? [:]
@@ -69,6 +74,7 @@ struct TargetsSheet: View {
                 VStack(alignment: .leading, spacing: 18) {
                     tagSection
                     projectSection
+                    taskSection
                     historySection
                 }
                 .padding(16)
@@ -143,6 +149,85 @@ struct TargetsSheet: View {
             }
         }
     }
+
+    // MARK: - Tasks
+
+    /// An allocation directly on one task.
+    ///
+    /// Note 51: an ad-hoc goal ("ten hours on the tax return") was only expressible by inventing a
+    /// project to hang it off, which litters the project list with one-task projects that exist for
+    /// no other reason. `TargetSubject` and `Aggregations` already understood `.task`; nothing but
+    /// this list was missing.
+    ///
+    /// Searchable and collapsed by default, because there are two orders of magnitude more tasks than
+    /// projects and an unfiltered list of every task ever tracked would bury the two sections above.
+    private var taskSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("TASKS").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
+                Spacer()
+                if showTasks {
+                    TextField("Find a task", text: $taskQuery)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 160)
+                }
+                Button(showTasks ? "Hide" : "Show") { showTasks.toggle() }
+                    .buttonStyle(.link).font(.system(size: 11))
+            }
+            Text("For a one-off goal that doesn't deserve a project of its own.")
+                .font(.caption2).foregroundStyle(.secondary)
+
+            if showTasks {
+                let rows = matchingTasks
+                if rows.isEmpty {
+                    Text(taskQuery.isEmpty ? "No tasks yet" : "No task matches \"\(taskQuery)\"")
+                        .font(.caption).foregroundStyle(.tertiary)
+                } else {
+                    ForEach(rows) { task in
+                        subjectRow(name: task.name,
+                                   colorHex: appState.displayColorHex(for: task),
+                                   subject: .task(task.id), onDelete: nil)
+                    }
+                    if matchingTaskOverflow > 0 {
+                        Text("+\(matchingTaskOverflow) more — narrow the search")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+            } else if !taskTargets.isEmpty {
+                // Tasks that already HAVE an allocation stay visible while the section is collapsed,
+                // or setting one would feel like it hadn't been saved.
+                ForEach(taskTargets) { task in
+                    subjectRow(name: task.name,
+                               colorHex: appState.displayColorHex(for: task),
+                               subject: .task(task.id), onDelete: nil)
+                }
+            }
+        }
+    }
+
+    /// Tasks matching the search, capped so the sheet can't grow without bound.
+    private var matchingTasks: [Project] {
+        let q = taskQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        let pool = q.isEmpty ? allTasks : allTasks.filter { $0.name.lowercased().contains(q) }
+        return Array(pool.prefix(Self.taskLimit))
+    }
+
+    private var matchingTaskOverflow: Int {
+        let q = taskQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        let pool = q.isEmpty ? allTasks : allTasks.filter { $0.name.lowercased().contains(q) }
+        return max(0, pool.count - Self.taskLimit)
+    }
+
+    /// Tasks that already carry a live allocation.
+    private var taskTargets: [Project] {
+        let ids = Set(targets.compactMap { target -> Int64? in
+            if case .task(let id) = target.subject { return id }
+            return nil
+        })
+        return allTasks.filter { ids.contains($0.id) }
+    }
+
+    private static let taskLimit = 12
 
     // MARK: - History
 

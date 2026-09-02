@@ -27,6 +27,8 @@ struct MetricsView: View {
     // Day-timeline hover: cursor position (hours 0–24) and the block it resolves to.
     @State private var hoverHour: Double?
     @State private var hoveredSegment: DaySegment?
+    /// Measured width of the hover card, so it can be flipped instead of clipped.
+    @State private var tooltipWidth: CGFloat = 0
 
     /// A "Where time went" row being hovered, which lights up every matching block on the day
     /// timeline. Answers "when did that actually happen?" — the breakdown gives a total, but not
@@ -39,12 +41,20 @@ struct MetricsView: View {
     @State private var focus: TimelineFocus?
     /// Clicking a breakdown row PINS its highlight so it survives the mouse leaving. Hover still
     /// takes precedence, so you can peek at another row and fall back to the pinned one.
-    @State private var pinnedFocus: TimelineFocus?
+    ///
+    /// A LIST, not one value: clicking a second allocation adds it rather than replacing the first,
+    /// which is how "how much did I collectively spend on this and this" gets asked. Ordered so the
+    /// selection summary reads in the order things were clicked, and it survives changing the day or
+    /// the range — that's the point of pinning, and what makes the same question askable across
+    /// day / week / month / 6m.
+    @State private var pinnedFocuses: [TimelineFocus] = []
 
-    /// The highlight actually in effect. A PIN wins over hover: once you've clicked something you're
+    /// The highlights actually in effect. PINS win over hover: once you've clicked something you're
     /// reading it, and having the page re-highlight under the pointer as it moves defeats the point
     /// of pinning. Hover only applies when nothing is pinned.
-    private var activeFocus: TimelineFocus? { pinnedFocus ?? focus }
+    private var activeFocuses: [TimelineFocus] {
+        pinnedFocuses.isEmpty ? (focus.map { [$0] } ?? []) : pinnedFocuses
+    }
 
     /// Whether the active highlight actually picks anything out of what's on screen.
     ///
@@ -52,8 +62,15 @@ struct MetricsView: View {
     /// view — at which point dimming "everything that doesn't match" dims EVERYTHING, with no clue
     /// as to why. A highlight that matches nothing is treated as no highlight.
     private var focusMatchesAnything: Bool {
-        guard activeFocus != nil else { return false }
+        guard !activeFocuses.isEmpty else { return false }
         return daySegments.contains { matchesFocus($0) }
+    }
+
+    /// Add or remove a pin. Clicking the same row again drops it, so a selection can be undone with
+    /// the control that made it.
+    private func togglePin(_ me: TimelineFocus) {
+        if let i = pinnedFocuses.firstIndex(of: me) { pinnedFocuses.remove(at: i) }
+        else { pinnedFocuses.append(me) }
     }
 
     // Drag-select on the day timeline: the anchor where the drag began and the live edge.
@@ -136,7 +153,7 @@ struct MetricsView: View {
             .background(
                 Color.clear
                     .contentShape(Rectangle())
-                    .simultaneousGesture(TapGesture().onEnded { clearSelection(); pinnedFocus = nil })
+                    .simultaneousGesture(TapGesture().onEnded { clearSelection(); pinnedFocuses = [] })
             )
         }
         .sheet(isPresented: $showTargetsSheet) {
@@ -153,10 +170,10 @@ struct MetricsView: View {
         .onChange(of: range) { _, _ in
             // The pin points at a task/tag in the range being left; carrying it over is what left
             // every row dimmed with nothing highlighted.
-            pinnedFocus = nil
+            pinnedFocuses = []
             clearSelection(); recompute()
         }
-        .onChange(of: scope) { _, _ in pinnedFocus = nil }
+        .onChange(of: scope) { _, _ in pinnedFocuses = [] }
         .onReceive(NotificationCenter.default.publisher(for: TimesliceNotifications.dataDidChange)) { _ in recompute() }
         .onReceive(settings.objectWillChange) { _ in DispatchQueue.main.async { recompute() } }
         // The app can run for days; re-anchor to the real "today" on wake so the range never
@@ -336,9 +353,19 @@ struct MetricsView: View {
                                 .stroke(Color.white.opacity(0.55),
                                         style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
                                 if let seg = hoveredSegment {
-                                    // Sits just right of the cursor, nudged left near the edge.
+                                    // Right of the cursor, but FLIPPED to its left when it wouldn't
+                                    // fit. This used to clamp against a hardcoded 150pt guess at the
+                                    // card's width; the real card is a task name, a duration, a time
+                                    // span and a device name, so it's often twice that and the right
+                                    // half was simply cut off. The width is measured now.
                                     timelineTooltip(seg)
-                                        .offset(x: min(x + 8, max(0, plot.maxX - 150)),
+                                        .background(
+                                            GeometryReader { g in
+                                                Color.clear.preference(key: TooltipWidth.self,
+                                                                       value: g.size.width)
+                                            }
+                                        )
+                                        .offset(x: tooltipX(cursor: x, plot: plot),
                                                 y: max(0, plot.minY + 4))
                                 }
                             }
@@ -401,6 +428,11 @@ struct MetricsView: View {
                                 // clicking off a text selection clears it.
                                 .onTapGesture { clearSelection() }
                         }
+                        // On the container, not beside the card: a preference travels UP to
+                        // ancestors only, so a sibling would never hear it.
+                        .onPreferenceChange(TooltipWidth.self) { w in
+                            if w > 0 { tooltipWidth = w }
+                        }
                     }
                 }
                 .frame(height: plotHeight(lanes: lanes) + 40)
@@ -419,7 +451,7 @@ struct MetricsView: View {
     /// harder than the plain cursor case (0.12 vs 0.35) because the matches can be thin slivers that
     /// otherwise don't stand out.
     private func segmentOpacity(_ seg: DaySegment) -> Double {
-        if activeFocus != nil, focusMatchesAnything {
+        if !activeFocuses.isEmpty, focusMatchesAnything {
             return matchesFocus(seg) ? 1 : settings.highlightDimOpacity
         }
         return hoveredSegment == nil || hoveredSegment?.id == seg.id ? 1 : 0.35
@@ -431,8 +463,18 @@ struct MetricsView: View {
     /// to light up office's rows in the Tasks breakdown too, not only when the breakdown happens to
     /// be showing Tags. Comparing focus kinds directly could never do that.
     private var focusedTaskIDs: Set<Int64>? {
-        guard let activeFocus else { return nil }
-        switch activeFocus {
+        guard !activeFocuses.isEmpty else { return nil }
+        // A UNION of sets, which is also what makes the selected total honest: two allocations that
+        // overlap (a project and a tag that contains it) contribute the same task once, so summing
+        // per task can't double-count the time. No intersection arithmetic needed — tasks partition
+        // tracked time, so deduplicating tasks IS deduplicating seconds.
+        var out: Set<Int64> = []
+        for focus in activeFocuses { out.formUnion(taskIDs(for: focus)) }
+        return out
+    }
+
+    private func taskIDs(for focus: TimelineFocus) -> Set<Int64> {
+        switch focus {
         case .task(let id):
             return [id]
         case .group(let gid):
@@ -454,19 +496,20 @@ struct MetricsView: View {
     }
 
     private func matchesFocus(_ seg: DaySegment) -> Bool {
-        switch activeFocus {
-        case .task(let id):
-            return seg.projectID == id
-        case .group(let groupID):
-            // Compare the OPTIONALS directly so Inbox (nil) matches only Inbox tasks.
-            return projectLookup[seg.projectID]?.taskProjectID == groupID
-        case .tag(let tagID):
-            let ids = tagIDsByTask[seg.projectID] ?? []
-            // nil focus == untagged, which is "carries no tags at all".
-            guard let tagID else { return ids.isEmpty }
-            return ids.contains(tagID)
-        case nil:
-            return true
+        guard !activeFocuses.isEmpty else { return true }
+        return activeFocuses.contains { focus in
+            switch focus {
+            case .task(let id):
+                return seg.projectID == id
+            case .group(let groupID):
+                // Compare the OPTIONALS directly so Inbox (nil) matches only Inbox tasks.
+                return projectLookup[seg.projectID]?.taskProjectID == groupID
+            case .tag(let tagID):
+                let ids = tagIDsByTask[seg.projectID] ?? []
+                // nil focus == untagged, which is "carries no tags at all".
+                guard let tagID else { return ids.isEmpty }
+                return ids.contains(tagID)
+            }
         }
     }
 
@@ -707,6 +750,17 @@ struct MetricsView: View {
             .min { $0.1 < $1.1 }?.0
     }
 
+    /// Where the hover card sits: right of the cursor by default, flipped to the left when the card
+    /// would run past the plot's edge, and clamped so it can't leave on the other side either.
+    private func tooltipX(cursor: CGFloat, plot: CGRect) -> CGFloat {
+        let gap: CGFloat = 8
+        // Before the first measurement lands, fall back to the old guess rather than 0 — one frame
+        // of a slightly-off card beats one frame of it pinned to the left edge.
+        let width = tooltipWidth > 0 ? tooltipWidth : 150
+        if cursor + gap + width <= plot.maxX { return cursor + gap }
+        return max(plot.minX, min(cursor - gap - width, plot.maxX - width))
+    }
+
     private func timelineTooltip(_ seg: DaySegment) -> some View {
         let name = projectsByID[seg.projectID]?.name ?? "task"
         let mins = (seg.endHour - seg.startHour) * 60
@@ -776,7 +830,7 @@ struct MetricsView: View {
     /// Also tints the row under the cursor itself, so hovering gives feedback in both directions.
     private func breakdownTint(taskID: Int64) -> Color {
         var hit = rowHighlighted(taskIDs: [taskID])
-        if pinnedFocus == nil {
+        if pinnedFocuses.isEmpty {
             hit = hit || hoveredSegment?.projectID == taskID
         }
         return tintFor(hit: hit, taskID: taskID)
@@ -790,13 +844,13 @@ struct MetricsView: View {
         // Stronger tint whenever the highlight came from a PIN, however it matched — an exact-kind
         // check would leave a row that lit up by containment looking merely hovered.
         _ = (taskID, groupID, tagID)
-        return Color.accentColor.opacity(pinnedFocus != nil ? 0.28 : 0.15)
+        return Color.accentColor.opacity(!pinnedFocuses.isEmpty ? 0.28 : 0.15)
     }
 
     private func breakdownTint(groupID: Int64?) -> Color {
         let mine = Set(projectLookup.values.filter { $0.taskProjectID == groupID }.map(\.id))
         var hit = rowHighlighted(taskIDs: mine)
-        if pinnedFocus == nil, let seg = hoveredSegment {
+        if pinnedFocuses.isEmpty, let seg = hoveredSegment {
             // Compare the OPTIONALS directly so Inbox matches only ungrouped tasks.
             hit = hit || projectLookup[seg.projectID]?.taskProjectID == groupID
         }
@@ -808,10 +862,10 @@ struct MetricsView: View {
     /// Falls back to the plain cursor highlight when nothing is focused.
     private func sessionRowTint(_ seg: DaySegment) -> Color {
         let plain = Color(nsColor: .controlBackgroundColor)
-        if activeFocus != nil, focusMatchesAnything {
+        if !activeFocuses.isEmpty, focusMatchesAnything {
             return matchesFocus(seg) ? Color.accentColor.opacity(0.15) : plain
         }
-        if pinnedFocus != nil { return plain }
+        if !pinnedFocuses.isEmpty { return plain }
         return hoveredSegment?.id == seg.id ? Color.accentColor.opacity(0.15) : plain
     }
 
@@ -855,7 +909,7 @@ struct MetricsView: View {
         .onTapGesture {
             // Click to keep the highlight after the pointer leaves; click again to release it.
             let me: TimelineFocus = .tag(row.tag?.id)
-            pinnedFocus = (pinnedFocus == me) ? nil : me
+            togglePin(me)
         }
     }
 
@@ -864,7 +918,7 @@ struct MetricsView: View {
             ? Set(projectLookup.keys.filter { (tagIDsByTask[$0] ?? []).isEmpty })
             : Set(projectLookup.keys.filter { (tagIDsByTask[$0] ?? []).contains(tagID!) })
         var hit = rowHighlighted(taskIDs: mine)
-        if pinnedFocus == nil, let seg = hoveredSegment {
+        if pinnedFocuses.isEmpty, let seg = hoveredSegment {
             let ids = tagIDsByTask[seg.projectID] ?? []
             hit = hit || (tagID == nil ? ids.isEmpty : ids.contains(tagID!))
         }
@@ -906,7 +960,7 @@ struct MetricsView: View {
                         }
                         deleteControl(for: seg)
                     }
-                    .opacity(activeFocus == nil || !focusMatchesAnything || matchesFocus(seg)
+                    .opacity(activeFocuses.isEmpty || !focusMatchesAnything || matchesFocus(seg)
                              ? 1 : settings.highlightDimOpacity)
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(
@@ -932,10 +986,13 @@ struct MetricsView: View {
     @ViewBuilder
     private func deleteControl(for seg: DaySegment) -> some View {
         let armed = pendingDelete?.id == seg.id
-        let clipped = hasSelection
+        // A clipped block is a SLICE of its interval, so deleting it cuts that slice out and keeps
+        // the rest. This used to be refused entirely, on the grounds that ✕ would silently take the
+        // whole interval — right about the danger, wrong about the remedy: the honest fix is to
+        // delete what's actually on screen.
+        let clipped = hasSelection && isClipped(seg)
         if hoveredSegment?.id == seg.id || armed {
             Button {
-                if clipped { return }
                 if armed {
                     deleteSession(seg)
                 } else {
@@ -944,25 +1001,44 @@ struct MetricsView: View {
             } label: {
                 Image(systemName: armed ? "trash.fill" : "xmark")
                     .font(.system(size: armed ? 9 : 8, weight: .semibold))
-                    .foregroundStyle(clipped ? Color.secondary : (armed ? Color.red : Color.secondary))
+                    .foregroundStyle(armed ? Color.red : Color.secondary)
                     .frame(width: 16, height: 16)
                     .background(Circle().fill(Color.secondary.opacity(armed ? 0.28 : 0.16)))
             }
             .buttonStyle(.plain)
-            .disabled(clipped)
-            .help(clipped
-                  ? "Clear the timeline selection to delete a session — a clipped block isn't the whole interval"
-                  : (armed ? "Click again to delete this session permanently" : "Remove this session"))
+            .help(armed
+                  ? (clipped ? "Click again to delete just this \(durationLabel((seg.endHour - seg.startHour) * 60)) slice"
+                             : "Click again to delete this session permanently")
+                  : (clipped ? "Remove this slice — the rest of the session stays"
+                             : "Remove this session"))
         } else {
             // Reserve the width so rows don't shift horizontally as the cursor moves down the list.
             Color.clear.frame(width: 16, height: 16)
         }
     }
 
+    /// True when the selection has trimmed this block, so what's listed is less than the interval.
+    private func isClipped(_ seg: DaySegment) -> Bool {
+        guard let full = daySegments.first(where: { $0.id == seg.id }) else { return false }
+        return seg.startHour > full.startHour + 0.0001 || seg.endHour < full.endHour - 0.0001
+    }
+
     private func deleteSession(_ seg: DaySegment) {
         pendingDelete = nil
-        // seg.id IS the source interval id (daySegments carries it through), so no lookup needed.
-        if (try? appState.storeForEditing.deleteInterval(id: seg.id)) == true {
+        let store = appState.storeForEditing
+        let day = range.start
+        let done: Bool
+        if hasSelection && isClipped(seg) {
+            // Only the visible slice. Hours are offsets into the displayed day, so they map back to
+            // wall-clock through the day's start — the same conversion the lane totals use.
+            let from = day.addingTimeInterval(seg.startHour * 3600)
+            let to = day.addingTimeInterval(seg.endHour * 3600)
+            done = ((try? store.deleteIntervalSlice(id: seg.id, from: from, to: to)) ?? -1) >= 0
+        } else {
+            // seg.id IS the source interval id (daySegments carries it through), so no lookup needed.
+            done = (try? store.deleteInterval(id: seg.id)) == true
+        }
+        if done {
             hoveredSegment = nil
             appState.reload()      // totals, today's tiles and the task list all read this
             recompute()            // charts + this list
@@ -1208,7 +1284,7 @@ struct MetricsView: View {
         .onTapGesture {
             // Click to keep the highlight after the pointer leaves; click again to release it.
             let me: TimelineFocus = .group(row.project?.id)
-            pinnedFocus = (pinnedFocus == me) ? nil : me
+            togglePin(me)
         }
     }
 
@@ -1237,7 +1313,7 @@ struct MetricsView: View {
         .onTapGesture {
             // Click to keep the highlight after the pointer leaves; click again to release it.
             let me: TimelineFocus = .task(total.project.id)
-            pinnedFocus = (pinnedFocus == me) ? nil : me
+            togglePin(me)
         }
     }
 
@@ -1402,6 +1478,7 @@ struct MetricsView: View {
                 VStack(spacing: 2) {
                     budgetHeaderRow
                     ForEach(rows) { row in targetRow(row) }
+                    if pinnedFocuses.count >= 1 { selectionSummary }
                 }
             }
         } else {
@@ -1411,6 +1488,65 @@ struct MetricsView: View {
                 Spacer()
                 editTargetsButton
             }
+        }
+    }
+
+    /// What the pinned allocations add up to, over whatever range is being viewed.
+    ///
+    /// The question multi-select exists to answer: "how much did I collectively spend on this and
+    /// this". Summed per TASK rather than per allocation, so two allocations covering the same work
+    /// — a project and a tag that contains it — count that work once. Follows the range filter, so
+    /// the same selection answers it for a day, a week, a month or six.
+    private var selectionSummary: some View {
+        let ids = focusedTaskIDs ?? []
+        let selected = rankedTotals.filter { ids.contains($0.project.id) }
+            .reduce(0.0) { $0 + $1.seconds }
+        let total = rankedTotals.reduce(0.0) { $0 + $1.seconds }
+        let share = total > 0 ? selected / total * 100 : 0
+        return HStack(spacing: 5) {
+            Image(systemName: "square.stack.3d.up.fill").font(.system(size: 8))
+                .foregroundStyle(Color.accentColor)
+            Text(pinnedFocuses.count == 1 ? "1 selected" : "\(pinnedFocuses.count) selected")
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 96, alignment: .leading)
+            Text(rangeLabelForSelection)
+                .font(.system(size: 10)).foregroundStyle(.tertiary)
+                .frame(width: 42, alignment: .leading)
+
+            Text(budgetDuration(selected))
+                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
+                .foregroundStyle(.primary).lineLimit(1)
+                .frame(width: 56, alignment: .trailing)
+            InlineBar(fraction: min(max(share / 100, 0), 1),
+                      label: String(format: "%.0f%%", share),
+                      fill: Color.accentColor)
+                .help("\(budgetDuration(selected)) of the \(budgetDuration(total)) tracked in this "
+                      + "range, across \(ids.count) task\(ids.count == 1 ? "" : "s")")
+            Text(budgetDuration(total))
+                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
+                .foregroundStyle(.tertiary).lineLimit(1)
+                .frame(width: 36, alignment: .leading)
+
+            Divider().frame(height: 12)
+
+            Button("Clear") { pinnedFocuses = [] }
+                .buttonStyle(.link).font(.system(size: 10))
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 6).padding(.vertical, 2)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.10)))
+    }
+
+    /// Which range the selected total covers — the filter's own word, so the number can't be read as
+    /// belonging to some allocation's period instead.
+    private var rangeLabelForSelection: String {
+        switch range.unit {
+        case .day: return "day"
+        case .week: return "week"
+        case .month: return "month"
+        case .sixMonths: return "6m"
+        case .year: return "year"
+        case .all: return "all"
         }
     }
 
@@ -1598,7 +1734,7 @@ struct MetricsView: View {
         .onHover { inside in hoveredTargetID = inside ? row.target.id : nil }
         .onTapGesture {
             let me = focusFor(row.target.subject)
-            pinnedFocus = (pinnedFocus == me) ? nil : me
+            togglePin(me)
         }
         // Dropping on a row puts the dragged allocation in its place.
         .onDrop(of: [.text], isTargeted: Binding(
@@ -1688,7 +1824,9 @@ struct MetricsView: View {
     }
 
     private func budgetRowTint(_ row: TargetProgress) -> Color {
-        if pinnedFocus == focusFor(row.target.subject) { return Color.accentColor.opacity(0.28) }
+        if pinnedFocuses.contains(focusFor(row.target.subject)) {
+            return Color.accentColor.opacity(0.28)
+        }
         if hoveredTargetID == row.target.id { return Color.secondary.opacity(0.10) }
         return .clear
     }
@@ -2047,5 +2185,14 @@ struct Sparkline: View {
             }
             .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomLeading)
         }
+    }
+}
+
+/// Width of the day-timeline hover card, reported up so the card can be flipped to the cursor's
+/// other side rather than being clipped by the plot's edge.
+struct TooltipWidth: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }

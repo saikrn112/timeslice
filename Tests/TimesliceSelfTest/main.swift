@@ -1721,6 +1721,72 @@ func testFeedbackAttachments() {
     }
 }
 
+// MARK: - Deleting part of a session
+
+func testIntervalSlice() {
+    print("Interval slicing:")
+    let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+    func mins(_ n: Double) -> Date { t0.addingTimeInterval(n * 60) }
+
+    func fresh() -> (IntervalStore, URL, Int64) {
+        let (store, url) = try! makeStore()
+        let p = try! store.createProject(name: "P", colorHex: "#f00")
+        try! store.insertClosedInterval(projectID: p, start: t0, end: mins(60), deviceID: "air")
+        return (store, url, p)
+    }
+
+    do {   // a bite out of the middle leaves two pieces
+        let (store, url, _) = fresh(); defer { try? FileManager.default.removeItem(at: url) }
+        check(try! store.deleteIntervalSlice(id: store.intervals(from: t0).first!.id,
+                                            from: mins(20), to: mins(30)) == 2,
+              "cutting the middle out leaves the head and the tail")
+        let left = try! store.intervals(from: t0).sorted { $0.start < $1.start }
+        check(left.count == 2, "two rows, not one edited row")
+        check(left[0].end == mins(20) && left[1].start == mins(30),
+              "and they stop and start exactly at the cut")
+        check(left.allSatisfy { $0.deviceID == "air" },
+              "the device that RECORDED it is carried over — re-stamping would corrupt attribution")
+    }
+
+    do {   // trimming the tail, which is the commute repair case
+        let (store, url, _) = fresh(); defer { try? FileManager.default.removeItem(at: url) }
+        let id = try! store.intervals(from: t0).first!.id
+        check(try! store.deleteIntervalSlice(id: id, from: mins(17), to: mins(60)) == 1,
+              "cutting to the end leaves just the head")
+        let left = try! store.intervals(from: t0)
+        check(left.count == 1 && left[0].end == mins(17), "which ends where the cut began")
+    }
+
+    do {   // the whole thing
+        let (store, url, _) = fresh(); defer { try? FileManager.default.removeItem(at: url) }
+        let id = try! store.intervals(from: t0).first!.id
+        check(try! store.deleteIntervalSlice(id: id, from: t0, to: mins(60)) == 0,
+              "cutting the whole span leaves nothing")
+        check(try! store.intervals(from: t0).isEmpty, "and the row is gone")
+        check(try! store.tombstoneRecords().contains { $0.kind == "interval" },
+              "tombstoned, or a peer's log re-adds it on the next sync")
+    }
+
+    do {   // a sliver isn't worth a row
+        let (store, url, _) = fresh(); defer { try? FileManager.default.removeItem(at: url) }
+        let id = try! store.intervals(from: t0).first!.id
+        // Cut everything but the last half-second.
+        _ = try! store.deleteIntervalSlice(id: id, from: t0, to: mins(60).addingTimeInterval(-0.5))
+        check(try! store.intervals(from: t0).isEmpty,
+              "a sub-second remainder is dropped rather than kept as an empty-looking session")
+    }
+
+    do {   // a running interval is refused: its end moves, so the slice wouldn't be the visible one
+        let (store, url) = try! makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let p = try! store.createProject(name: "P", colorHex: "#f00")
+        try! store.switchTo(projectID: p, at: t0)
+        let id = try! store.openInterval()!.id
+        check(try! store.deleteIntervalSlice(id: id, from: t0, to: mins(5)) == -1,
+              "slicing a running interval is refused")
+        check(try! store.openInterval() != nil, "and it's still running afterwards")
+    }
+}
+
 // MARK: - Image downscaling
 
 func testImageBytes() {
@@ -2892,6 +2958,7 @@ do {
     testDeviceLanes()
     testFeedbackPlatform()
     testFeedbackAttachments()
+    testIntervalSlice()
     testImageBytes()
     testPausedPresence()
     try testTaskNameReuse()
