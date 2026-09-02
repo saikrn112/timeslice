@@ -196,7 +196,13 @@ final class SyncController {
                 }
             }
 
-            // 3. Resolve the one-timer invariant, then republish presence.
+            // 3. Feedback images, as their own blobs — after the manifest is published, so a peer
+            //    never learns about a picture before the bytes it names are fetchable. Deliberately
+            //    not in the payload: it's rewritten in full on every publish, and a few screenshots
+            //    embedded there would mean re-uploading megabytes on a phone's mobile data.
+            await transferAttachments(transport: transport)
+
+            // 4. Resolve the one-timer invariant, then republish presence.
             try await settleTakeover(transport: transport, deviceID: deviceID)
             try await publishMarker(transport: transport, deviceID: deviceID)
 
@@ -205,6 +211,45 @@ final class SyncController {
         } catch {
             NSLog("[timeslice] sync failed: \(error.localizedDescription)")
             return false
+        }
+    }
+
+    /// Upload images this device holds and fetch ones it only has a manifest row for.
+    ///
+    /// `nonisolated` for the same reason the rest of the sync is: `putBlob`/`fetchBlob` are transport
+    /// I/O and `DriveSyncTransport.blocking()` traps if it's called on the main actor. Only the store
+    /// hops back.
+    ///
+    /// Failures are swallowed on purpose. A screenshot that didn't transfer is worth retrying on the
+    /// next sync; it is not worth failing the sync — and so losing the text of every note — over.
+    nonisolated private func transferAttachments(transport: SyncTransport) async {
+        let pending = (try? await MainActor.run {
+            try Self.requireStore().attachmentsNeedingUpload()
+        }) ?? []
+        for shot in pending {
+            guard let data = try? await MainActor.run(body: {
+                try Data(contentsOf: try Self.requireStore().fileURL(forAttachment: shot.uid))
+            }) else { continue }
+            do {
+                try transport.putBlob(name: shot.blobName, data: data)
+                try? await MainActor.run {
+                    try Self.requireStore().markAttachmentUploaded(uid: shot.uid)
+                }
+            } catch {
+                continue        // left unmarked, so the next sync tries again
+            }
+        }
+
+        let missing = (try? await MainActor.run {
+            try Self.requireStore().attachmentsMissingBytes()
+        }) ?? []
+        for shot in missing {
+            // nil is expected, not an error: the manifest row legitimately outruns the bytes.
+            guard let data = try? transport.fetchBlob(name: shot.blobName), !data.isEmpty
+            else { continue }
+            try? await MainActor.run {
+                try Self.requireStore().storeAttachmentBytes(uid: shot.uid, png: data)
+            }
         }
     }
 
