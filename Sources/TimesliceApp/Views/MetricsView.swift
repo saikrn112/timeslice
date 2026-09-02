@@ -1119,12 +1119,33 @@ struct MetricsView: View {
 
     // MARK: - Hours chart
 
+    /// The pinned selection, bucketed the same way the chart's bars are.
+    ///
+    /// Answers "of this week's Tuesday, how much was the thing I selected" — which is the question
+    /// the summary row answers for the range as a whole. Filtered by TASK, so two allocations
+    /// covering the same work still contribute it once, exactly as the summary total does.
+    private var selectedBucketSeconds: [Date: TimeInterval] {
+        guard let ids = focusedTaskIDs, !ids.isEmpty else { return [:] }
+        let mine = rangeIntervals.filter { ids.contains($0.projectID) }
+        guard !mine.isEmpty else { return [:] }
+        let bucketed = Aggregations.buckets(intervals: mine, range: range,
+                                           deepThreshold: settings.deepBlockSeconds)
+        return Dictionary(bucketed.map { ($0.start, $0.totalSeconds) },
+                          uniquingKeysWith: { a, b in a + b })
+    }
+
+    /// Colour of the selection overlay. Deliberately not a shade of the accent: the overlay answers
+    /// a different question from the bar it sits on, and another blue would read as more of the same
+    /// measure.
+    private static let selectionOverlay = Color(red: 0.90, green: 0.30, blue: 0.32)
+
     private var hoursChart: some View {
         section("Hours \(bucketNoun)",
                 subtitle: "solid = focused (≥\(settings.deepBlockMinutes)m blocks)") {
             if buckets.isEmpty {
                 placeholder("Nothing tracked in this range")
             } else {
+                let selectedByBucket = selectedBucketSeconds
                 Chart {
                     ForEach(buckets) { b in
                         let base = Color.accentColor
@@ -1152,10 +1173,30 @@ struct MetricsView: View {
                         .foregroundStyle(base)
                         .opacity(dim)
                         .cornerRadius(2)
+                        // The pinned selection, laid over the same bar in a colour that isn't a
+                        // shade of the accent — this has to read as "a different question", not as
+                        // "more of the same measure". Narrower so the total behind it stays visible
+                        // rather than being replaced.
+                        let selected = selectedByBucket[b.start] ?? 0
+                        if selected > 0 {
+                            BarMark(
+                                x: .value(bucketUnitWord.capitalized, b.start, unit: bucketComponent),
+                                y: .value("Selected", selected / 3600),
+                                width: overlayBarWidth,
+                                stacking: .unstacked
+                            )
+                            .foregroundStyle(Self.selectionOverlay)
+                            .opacity(dim)
+                            .cornerRadius(2)
+                        }
                     }
                 }
                 .frame(height: 190)
                 .chartYAxisLabel("hours")
+                // Half a bucket of air at each end. A `BarMark(x:unit:)` is centred on its bucket,
+                // so at the domain's edge half of it fell outside the plot and the last bar of a
+                // week or month was sliced down the middle.
+                .chartXScale(domain: paddedBucketDomain)
                 // Gridline on every bucket, but only label every Nth so a month's worth of ticks
                 // stays legible instead of colliding into mush.
                 .chartXAxis {
@@ -1175,7 +1216,15 @@ struct MetricsView: View {
                 .chartOverlay { proxy in
                     GeometryReader { geo in
                         bucketHoverOverlay(proxy: proxy, geo: geo) { b in
-                            "\(hours(b.totalSeconds)) · \(hours(b.deepSeconds)) focused (\(percent(b.focusRatio)))"
+                            var out = "\(hours(b.totalSeconds)) · \(hours(b.deepSeconds)) focused "
+                                    + "(\(percent(b.focusRatio)))"
+                            // Only when something is pinned: otherwise it's a line that says
+                            // nothing on every bar.
+                            let selected = selectedByBucket[b.start] ?? 0
+                        if selected > 0 {
+                                out += " · \(hours(selected)) selected"
+                            }
+                            return out
                         }
                     }
                 }
@@ -1441,6 +1490,31 @@ struct MetricsView: View {
         }
     }
 
+    /// The bucket range with half a bucket of margin at each end, so the first and last bars are
+    /// drawn whole instead of being clipped by the plot's edge.
+    private var paddedBucketDomain: ClosedRange<Date> {
+        guard let first = buckets.first?.start, let last = buckets.last?.start else {
+            return range.start...range.end
+        }
+        let cal = Calendar.current
+        // Half of ONE bucket, measured from the data rather than assumed: a 6M range buckets by
+        // week and a year by month, so a fixed number of seconds would be wrong for most ranges.
+        let step = cal.date(byAdding: bucketComponent, value: 1, to: first)?
+            .timeIntervalSince(first) ?? 86_400
+        return first.addingTimeInterval(-step / 2)...last.addingTimeInterval(step / 2)
+    }
+
+    /// Half the bar, so the total behind the selection overlay stays visible rather than being
+    /// replaced by it. Spelled out per unit because `MarkDimension` isn't arithmetic.
+    private var overlayBarWidth: MarkDimension {
+        switch range.unit {
+        case .day, .week: return .fixed(13)
+        case .month: return .fixed(8)
+        case .sixMonths: return .fixed(7)
+        case .year, .all: return .fixed(11)
+        }
+    }
+
     // MARK: - Building blocks
 
     private func section<Content: View>(_ title: String, subtitle: String?, @ViewBuilder _ content: () -> Content) -> some View {
@@ -1503,14 +1577,17 @@ struct MetricsView: View {
             .reduce(0.0) { $0 + $1.seconds }
         let total = rankedTotals.reduce(0.0) { $0 + $1.seconds }
         let share = total > 0 ? selected / total * 100 : 0
+        // Column widths copied from `targetRow`, not chosen again: this row sits directly under
+        // those, and a bar that starts 40pt further along reads as a different kind of thing. The
+        // right-hand half is deliberately empty — there's no per-period target to show here.
         return HStack(spacing: 5) {
-            Image(systemName: "square.stack.3d.up.fill").font(.system(size: 8))
-                .foregroundStyle(Color.accentColor)
+            Circle().fill(Self.selectionOverlay).frame(width: 9, height: 9)
+                .frame(width: 10, height: 14)
             Text(pinnedFocuses.count == 1 ? "1 selected" : "\(pinnedFocuses.count) selected")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 10, weight: .semibold)).lineLimit(1)
                 .frame(width: 96, alignment: .leading)
             Text(rangeLabelForSelection)
-                .font(.system(size: 10)).foregroundStyle(.tertiary)
+                .font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
                 .frame(width: 42, alignment: .leading)
 
             Text(budgetDuration(selected))
@@ -1519,7 +1596,7 @@ struct MetricsView: View {
                 .frame(width: 56, alignment: .trailing)
             InlineBar(fraction: min(max(share / 100, 0), 1),
                       label: String(format: "%.0f%%", share),
-                      fill: Color.accentColor)
+                      fill: Self.selectionOverlay)
                 .help("\(budgetDuration(selected)) of the \(budgetDuration(total)) tracked in this "
                       + "range, across \(ids.count) task\(ids.count == 1 ? "" : "s")")
             Text(budgetDuration(total))
@@ -1529,6 +1606,9 @@ struct MetricsView: View {
 
             Divider().frame(height: 12)
 
+            Text("of everything tracked")
+                .font(.system(size: 9)).foregroundStyle(.tertiary).lineLimit(1)
+                .frame(width: 148, alignment: .leading)
             Button("Clear") { pinnedFocuses = [] }
                 .buttonStyle(.link).font(.system(size: 10))
             Spacer(minLength: 0)

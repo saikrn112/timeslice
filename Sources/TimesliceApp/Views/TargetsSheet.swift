@@ -20,6 +20,8 @@ struct TargetsSheet: View {
     @State private var allTasks: [Project] = []
     @State private var taskQuery = ""
     @State private var showTasks = false
+    /// Task ids in most-recent-first order, captured on open.
+    @State private var recencyOrder: [Int64] = []
     /// Re-read after every edit. Cheap (a handful of rows) and avoids the whole class of bugs where
     /// the sheet shows something the store no longer agrees with.
     private func reload() {
@@ -35,6 +37,7 @@ struct TargetsSheet: View {
         guard !retired.isEmpty else { return [] }
         let tasks = (try? store.listProjects(includeArchived: true)) ?? []
         allTasks = tasks
+        recencyOrder = appState.recencyOrderedProjects.map(\.id)
         let tagsByID = Dictionary(uniqueKeysWithValues: tags.map { ($0.id, $0) })
         let intervals = (try? store.intervals()) ?? []
         let byTask = (try? store.effectiveTagIDsByTask()) ?? [:]
@@ -178,21 +181,27 @@ struct TargetsSheet: View {
                 .font(.caption2).foregroundStyle(.secondary)
 
             if showTasks {
-                let rows = matchingTasks
-                if rows.isEmpty {
-                    Text(taskQuery.isEmpty ? "No tasks yet" : "No task matches \"\(taskQuery)\"")
-                        .font(.caption).foregroundStyle(.tertiary)
-                } else {
-                    ForEach(rows) { task in
-                        subjectRow(name: task.name,
-                                   colorHex: appState.displayColorHex(for: task),
-                                   subject: .task(task.id), onDelete: nil)
+                // FIXED height, scrolled inside. Letting the list size to its contents made the
+                // whole sheet grow and shrink on every keystroke as the match count changed, which
+                // is unusable for typing into.
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        let rows = matchingTasks
+                        if rows.isEmpty {
+                            Text(taskQuery.isEmpty ? "No tasks yet"
+                                                   : "No task matches \"\(taskQuery)\"")
+                                .font(.caption).foregroundStyle(.tertiary)
+                        } else {
+                            ForEach(rows) { task in
+                                subjectRow(name: task.name,
+                                           colorHex: appState.displayColorHex(for: task),
+                                           subject: .task(task.id), onDelete: nil)
+                            }
+                        }
                     }
-                    if matchingTaskOverflow > 0 {
-                        Text("+\(matchingTaskOverflow) more — narrow the search")
-                            .font(.caption2).foregroundStyle(.tertiary)
-                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(height: 168)
             } else if !taskTargets.isEmpty {
                 // Tasks that already HAVE an allocation stay visible while the section is collapsed,
                 // or setting one would feel like it hadn't been saved.
@@ -205,17 +214,23 @@ struct TargetsSheet: View {
         }
     }
 
-    /// Tasks matching the search, capped so the sheet can't grow without bound.
+    /// Tasks matching the search, most recently worked on first.
+    ///
+    /// Recency order, not alphabetical or creation order: a goal is nearly always about something
+    /// you're in the middle of, so what you touched today should be the first thing offered. The
+    /// same reasoning (and the same source) as the task switcher's LRU cycle. No cap any more —
+    /// the list scrolls at a fixed height instead, so length costs nothing.
     private var matchingTasks: [Project] {
         let q = taskQuery.trimmingCharacters(in: .whitespaces).lowercased()
-        let pool = q.isEmpty ? allTasks : allTasks.filter { $0.name.lowercased().contains(q) }
-        return Array(pool.prefix(Self.taskLimit))
+        let pool = q.isEmpty ? orderedTasks : orderedTasks.filter { $0.name.lowercased().contains(q) }
+        return pool
     }
 
-    private var matchingTaskOverflow: Int {
-        let q = taskQuery.trimmingCharacters(in: .whitespaces).lowercased()
-        let pool = q.isEmpty ? allTasks : allTasks.filter { $0.name.lowercased().contains(q) }
-        return max(0, pool.count - Self.taskLimit)
+    /// LRU order, resolved once per sheet open rather than per keystroke — it queries the store.
+    private var orderedTasks: [Project] {
+        guard !recencyOrder.isEmpty else { return allTasks }
+        let rank = Dictionary(uniqueKeysWithValues: recencyOrder.enumerated().map { ($1, $0) })
+        return allTasks.sorted { (rank[$0.id] ?? .max, $0.id) < (rank[$1.id] ?? .max, $1.id) }
     }
 
     /// Tasks that already carry a live allocation.
@@ -226,8 +241,6 @@ struct TargetsSheet: View {
         })
         return allTasks.filter { ids.contains($0.id) }
     }
-
-    private static let taskLimit = 12
 
     // MARK: - History
 
