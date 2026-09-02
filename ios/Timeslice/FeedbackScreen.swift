@@ -254,6 +254,16 @@ struct FeedbackScreen: View {
                 }
 
                 HStack(spacing: 5) {
+                    // The ISSUE NUMBER, as the Mac shows. It's how a note gets referred to in
+                    // conversation ("re 42 here are the screenshots"), and that's impossible if only one
+                    // of the two devices prints it.
+                    //
+                    // `note.id` is the local row id, and it is NOT guaranteed to agree across devices:
+                    // merged notes are inserted per-device by AUTOINCREMENT, so two devices only match
+                    // while they've merged in the same order. Today they do. See the commit note.
+                    Text("#\(note.id)")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
                     if let platform = note.platform, editingID != note.id {
                         HStack(spacing: 3) {
                             Image(systemName: platform.symbol).font(.system(size: 8))
