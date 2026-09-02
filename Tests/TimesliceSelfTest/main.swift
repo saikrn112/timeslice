@@ -1306,6 +1306,52 @@ func testNudgePolicy() {
 
     let both = NudgePolicy.Config(promptsEnabled: true, sessionMinutes: 60, pausedMinutes: 15)
 
+    do {   // the reported bug: "Leave paused" and it asks again fifteen seconds later, forever
+        let pausedAt = Date(timeIntervalSince1970: 1_000_000)
+        let due = pausedAt.addingTimeInterval(20 * 60)      // 20m paused, threshold is 15m
+
+        check(NudgePolicy.firesPausedNudge(both, isPaused: true, awaitingAnswer: false,
+                                          promptPending: false, pausedSince: pausedAt,
+                                          handledFor: nil, now: due),
+              "a task paused past the threshold gets asked about")
+        check(!NudgePolicy.firesPausedNudge(both, isPaused: true, awaitingAnswer: false,
+                                           promptPending: false, pausedSince: pausedAt,
+                                           handledFor: pausedAt, now: due),
+              "but not twice for the SAME pause — that's what made Leave paused a loop")
+        check(!NudgePolicy.firesPausedNudge(both, isPaused: true, awaitingAnswer: false,
+                                           promptPending: false, pausedSince: pausedAt,
+                                           handledFor: pausedAt,
+                                           now: due.addingTimeInterval(3600)),
+              "and it stays answered an hour later, not just for the next sweep")
+
+        // A genuinely NEW pause is a new question, with nothing needing to be reset.
+        let pausedAgain = pausedAt.addingTimeInterval(7200)
+        check(NudgePolicy.firesPausedNudge(both, isPaused: true, awaitingAnswer: false,
+                                          promptPending: false, pausedSince: pausedAgain,
+                                          handledFor: pausedAt,
+                                          now: pausedAgain.addingTimeInterval(20 * 60)),
+              "a later pause is asked about even though the previous one was answered")
+
+        // The conditions that were already right stay right.
+        check(!NudgePolicy.firesPausedNudge(both, isPaused: true, awaitingAnswer: false,
+                                           promptPending: false, pausedSince: pausedAt,
+                                           handledFor: nil,
+                                           now: pausedAt.addingTimeInterval(60)),
+              "a pause shorter than the threshold isn't due yet")
+        check(!NudgePolicy.firesPausedNudge(both, isPaused: true, awaitingAnswer: false,
+                                           promptPending: true, pausedSince: pausedAt,
+                                           handledFor: nil, now: due),
+              "a prompt already on screen isn't asked a second time")
+        check(!NudgePolicy.firesPausedNudge(both, isPaused: true, awaitingAnswer: true,
+                                           promptPending: false, pausedSince: pausedAt,
+                                           handledFor: nil, now: due),
+              "and it never stacks on the still-working prompt, whose pause isn't yours")
+        check(!NudgePolicy.firesPausedNudge(both, isPaused: false, awaitingAnswer: false,
+                                           promptPending: false, pausedSince: nil,
+                                           handledFor: nil, now: due),
+              "nothing to nudge about when nothing is paused")
+    }
+
     // The two nudges are mutually exclusive: one needs a running timer, the other a paused one.
     check(NudgePolicy.armsSessionNudge(both, isRunning: true), "running arms the session nudge")
     check(!NudgePolicy.armsPausedNudge(both, isPaused: false, awaitingAnswer: false),
