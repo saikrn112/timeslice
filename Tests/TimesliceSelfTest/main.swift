@@ -1678,6 +1678,132 @@ func testFeedbackPlatform() {
     }
 }
 
+// MARK: - Allocation weekdays
+
+func testAllocationWeekdays() {
+    print("Allocation weekdays:")
+
+    // Sunday is bit 0, matching Calendar's 1-based weekday minus one.
+    check(Weekdays.all.selectedCount == 7, "every day by default")
+    check(Weekdays.weekdaysOnly.selectedCount == 5, "Monday to Friday is five days")
+    check(Weekdays.weekdaysOnly.contains(weekday: 2) && Weekdays.weekdaysOnly.contains(weekday: 6),
+          "which are Monday and Friday in Calendar's numbering")
+    check(!Weekdays.weekdaysOnly.contains(weekday: 1) && !Weekdays.weekdaysOnly.contains(weekday: 7),
+          "and not Sunday or Saturday")
+    check(Weekdays.all.toggling(weekday: 1).selectedCount == 6, "toggling a day off leaves six")
+    check(Weekdays.none.effective.isAll,
+          "no days selected means every day — there's no allocation you never work on, and zero "
+              + "days would make the pace infinite")
+    check(Weekdays(rawValue: 0xFF).selectedCount == 7,
+          "a stray high bit is discarded rather than counted as an eighth day")
+
+    // Counting the allocation's own days inside a range.
+    let weekStart = date(2026, 8, 24, 0, 0)          // Monday
+    let weekEnd = date(2026, 8, 31, 0, 0)
+    check(Weekdays.all.daysIn(start: weekStart, end: weekEnd, calendar: cal) == 7,
+          "a full week has seven of everybody's days")
+    check(Weekdays.weekdaysOnly.daysIn(start: weekStart, end: weekEnd, calendar: cal) == 5,
+          "and five weekdays")
+
+    // The bug this walk had: normalising to startOfDay in a DIFFERENT calendar pulled the cursor
+    // into the previous day, so a week counted as eight days and every pace came out low.
+    check(Weekdays.all.daysIn(start: weekStart, end: weekEnd) == 7,
+          "the count doesn't depend on the walker's calendar matching the range's")
+
+    // A weekend-only allocation over a Tuesday-to-Thursday window has none of its days in view.
+    let midweek = date(2026, 8, 25, 0, 0)
+    let thursday = date(2026, 8, 27, 0, 0)
+    let weekends = Weekdays(rawValue: 0b1000001)
+    check(weekends.daysIn(start: midweek, end: thursday, calendar: cal) == 0,
+          "a weekend allocation has no days in a midweek window")
+
+    // And the pace: 10h a week over five days is 2h a day, not 1h26m.
+    let fiveDay = Target(id: 1, subject: .tag(1), seconds: 10 * 3600,
+                         direction: .atLeast, period: .week, weekdays: .weekdaysOnly)
+    let p = TargetMath.progress(target: fiveDay, name: "office", actualSeconds: 6 * 3600,
+                                rangeStart: weekStart, rangeEnd: weekEnd,
+                                now: date(2026, 8, 26, 12, 0), calendar: cal)
+    check(p.workingDays == 5, "the pace divides by the days it's meant to happen on")
+    check(approx(p.targetPerDaySeconds / 3600, 2, 0.01), "10h over five days is 2h a day")
+    check(approx(p.averagePerDaySeconds / 3600, 6.0 / 5, 0.01),
+          "and the actual average uses the same five days")
+    check(approx(p.expectedSeconds / 3600, 10, 0.01),
+          "the WEEK's expectation is unchanged — days change the spread, not the total")
+
+    // Time recorded on an unselected day still counts. Saying "I do this on weekdays" describes how
+    // the hours are meant to be spread, not a refusal to count Sunday's work.
+    let sundayWork = TargetMath.progress(target: fiveDay, name: "office",
+                                         actualSeconds: 10 * 3600,
+                                         rangeStart: weekStart, rangeEnd: weekEnd,
+                                         now: weekEnd, calendar: cal)
+    check(sundayWork.verdict == .met, "hitting the total counts however the hours fell")
+
+    // Pro-rating onto a VIEWED day: a Saturday expects nothing from a weekdays-only allocation.
+    let saturday = date(2026, 8, 29, 0, 0)
+    let onSaturday = TargetMath.progress(target: fiveDay, name: "office", actualSeconds: 0,
+                                         rangeStart: weekStart, rangeEnd: weekEnd,
+                                         now: saturday, viewedRangeDays: 1,
+                                         viewedRangeStart: saturday,
+                                         viewedRangeEnd: date(2026, 8, 30, 0, 0), calendar: cal)
+    check(onSaturday.rangeExpectedSeconds == 0,
+          "a Saturday expects nothing from a Monday-to-Friday allocation")
+    let onWednesday = TargetMath.progress(target: fiveDay, name: "office", actualSeconds: 0,
+                                          rangeStart: weekStart, rangeEnd: weekEnd,
+                                          now: date(2026, 8, 26, 12, 0), viewedRangeDays: 1,
+                                          viewedRangeStart: date(2026, 8, 26, 0, 0),
+                                          viewedRangeEnd: date(2026, 8, 27, 0, 0), calendar: cal)
+    check(approx(onWednesday.rangeExpectedSeconds / 3600, 2, 0.01),
+          "and a Wednesday expects the full 2h, not a seventh of the week")
+}
+
+// MARK: - Allocation weekdays travel
+
+func testWeekdaysSync() {
+    print("Allocation weekdays over sync:")
+    do {
+        let (a, aURL) = try! makeStore(); defer { try? FileManager.default.removeItem(at: aURL) }
+        let (b, bURL) = try! makeStore(); defer { try? FileManager.default.removeItem(at: bURL) }
+        let tagA = try! a.upsertTag(name: "office", colorHex: "#f00")
+        _ = try! a.setTarget(subject: .tag(tagA), seconds: 10 * 3600,
+                            direction: .atLeast, period: .week, weekdays: .weekdaysOnly)
+        check(try! a.listTargets().first?.weekdays.selectedCount == 5, "the days are stored")
+
+        // Both halves have to travel: the tag the allocation points at, then the allocation. Same
+        // route `SyncEngine.merge` takes — resolve the subject's UID to a local row first.
+        // `insertRemoteTag`, not `applyRemoteTagEdit`: the peer has never seen this tag, and the
+        // edit path only updates one that's already there.
+        for row in try! a.tagsWithUIDs() {
+            _ = try! b.insertRemoteTag(uid: row.uid, name: row.tag.name,
+                                       colorHex: row.tag.colorHex,
+                                       sortOrder: row.tag.sortOrder, updatedAt: row.updatedAt)
+        }
+        func pushTargets(weekdaysOverride: Int?? = nil, bumpBy: TimeInterval = 0) {
+            for t in try! a.targetsForExport() {
+                guard let table = IntervalStore.table(forSubjectKind: t.subjectKind),
+                      let subjectID = try! b.localID(table: table, uid: t.subjectUID),
+                      let subject = TargetSubject(kind: t.subjectKind, id: subjectID)
+                else { continue }
+                _ = try! b.applyRemoteTarget(
+                    uid: t.uid, subject: subject, seconds: t.seconds,
+                    direction: Target.Direction(rawValue: t.direction)!,
+                    period: Target.Period(rawValue: t.period)!,
+                    remoteUpdatedAt: t.updatedAt + bumpBy, createdAt: t.createdAt,
+                    completedAt: t.completedAt,
+                    weekdays: weekdaysOverride ?? t.weekdays)
+            }
+        }
+        pushTargets()
+        check(try! b.listTargets().first?.weekdays == Weekdays.weekdaysOnly,
+              "and arrive on the peer — a pace that differs per device is the bug we just fixed")
+
+        // A peer on an older build sends no weekdays at all. That has to read as every day, the
+        // behaviour those builds had, not as no days (which would make the pace infinite).
+        pushTargets(weekdaysOverride: .some(nil), bumpBy: 60)
+        check(try! b.listTargets().first?.weekdays.isAll == true,
+              "an older peer's silence means every day, not no days")
+    }
+}
+
 // MARK: - Feedback numbering
 
 func testFeedbackNumbering() {
@@ -3123,6 +3249,8 @@ do {
     try testDeviceAttribution()
     testDeviceLanes()
     testFeedbackPlatform()
+    testAllocationWeekdays()
+    testWeekdaysSync()
     testFeedbackNumbering()
     testFeedbackAttachments()
     testSharedSettings()

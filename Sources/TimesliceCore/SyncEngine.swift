@@ -74,7 +74,7 @@ public struct SyncEngine {
                                      subjectUID: $0.subjectUID, seconds: $0.seconds,
                                      direction: $0.direction, period: $0.period,
                                      updatedAt: $0.updatedAt, createdAt: $0.createdAt,
-                                     completedAt: $0.completedAt)
+                                     completedAt: $0.completedAt, weekdays: $0.weekdays)
         }
 
         let feedbackRecords = try store.feedbackForExport().map {
@@ -277,7 +277,8 @@ public struct SyncEngine {
             if try store.applyRemoteTarget(uid: t.uid, subject: subject, seconds: t.seconds,
                                            direction: direction, period: period,
                                            remoteUpdatedAt: t.updatedAt,
-                                           createdAt: t.createdAt, completedAt: t.completedAt) {
+                                           createdAt: t.createdAt, completedAt: t.completedAt,
+                                           weekdays: t.weekdays) {
                 report.targetsApplied += 1
             }
         }

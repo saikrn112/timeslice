@@ -127,6 +127,41 @@ struct TargetsSheet: View {
         }
     }
 
+    /// S M T W T F S. Every day is on by default; tapping one narrows the allocation to the days it's
+    /// actually meant to happen on, which is what makes its per-day pace mean anything — a 10h week
+    /// worked Monday to Friday is 2h a day, not 1h26m.
+    ///
+    /// Only the DENOMINATOR changes. An hour recorded on an unselected day still counts towards the
+    /// total, because saying "I do this on weekdays" describes how the hours are meant to be spread,
+    /// not a refusal to count Sunday's work.
+    private func weekdayBubbles(for target: Target) -> some View {
+        HStack(spacing: 2) {
+            ForEach(0..<7, id: \.self) { bit in
+                let on = target.weekdays.effective.contains(weekday: bit + 1)
+                Button {
+                    let next = target.weekdays.effective.toggling(weekday: bit + 1)
+                    // Turning the last one off would divide the target by zero days, so an empty
+                    // selection is stored as "every day" — which is what it means anyway.
+                    try? store.setTargetWeekdays(id: target.id, next.selectedCount == 0 ? .all : next)
+                    reload()
+                } label: {
+                    Text(Weekdays.initials[bit])
+                        .font(.system(size: 9, weight: on ? .semibold : .regular))
+                        .frame(width: 15, height: 15)
+                        .background(Circle().fill(on ? Color.accentColor.opacity(0.28)
+                                                     : Color.secondary.opacity(0.10)))
+                        .foregroundStyle(on ? Color.accentColor : Color.secondary)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .help(target.weekdays.effective.isAll
+              ? "Every day — tap to pick the days this is meant to happen on"
+              : "\(target.weekdays.selectedCount) days a week, so the pace is "
+                + "\(Format.compact(target.seconds / Double(max(1, target.weekdays.selectedCount)))) per day")
+    }
+
     private func addTag() {
         let name = newTagName.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return }
@@ -353,6 +388,12 @@ struct TargetsSheet: View {
                 }
                 .labelsHidden()
                 .frame(width: 84)
+
+                // Which days it's meant to happen on. Only offered for a week or a month — a daily
+                // allocation is already about one day, and picking days for it would be nonsense.
+                if existing.period != .day {
+                    weekdayBubbles(for: existing)
+                }
 
                 // Retire rather than delete: the allocation leaves the live list but keeps its
                 // history, which is the whole reason for the state.

@@ -129,14 +129,19 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         /// Optional so a payload from a build without the done state still decodes; absent means live.
         public var createdAt: TimeInterval?
         public var completedAt: TimeInterval?
+        /// Weekday bitmask (Sunday = bit 0). Absent from an older peer, which means every day — the
+        /// behaviour those builds had.
+        public var weekdays: Int?
 
         public init(uid: String, subjectKind: String, subjectUID: String, seconds: TimeInterval,
                     direction: String, period: String, updatedAt: TimeInterval,
-                    createdAt: TimeInterval? = nil, completedAt: TimeInterval? = nil) {
+                    createdAt: TimeInterval? = nil, completedAt: TimeInterval? = nil,
+                    weekdays: Int? = nil) {
             self.uid = uid; self.subjectKind = subjectKind; self.subjectUID = subjectUID
             self.seconds = seconds; self.direction = direction; self.period = period
             self.updatedAt = updatedAt
             self.createdAt = createdAt; self.completedAt = completedAt
+            self.weekdays = weekdays
         }
     }
 

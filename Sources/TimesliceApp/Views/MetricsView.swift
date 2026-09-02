@@ -1147,7 +1147,7 @@ struct MetricsView: View {
     private var hoursChart: some View {
         section("Hours \(bucketNoun)",
                 subtitle: hasSelectionOverlay
-                    ? "solid = the selected allocations"
+                    ? "solid = focused (≥\(settings.deepBlockMinutes)m blocks) · red = selected"
                     : "solid = focused (≥\(settings.deepBlockMinutes)m blocks)") {
             if buckets.isEmpty {
                 placeholder("Nothing tracked in this range")
@@ -1167,28 +1167,48 @@ struct MetricsView: View {
                         .foregroundStyle(base.opacity(0.32))
                         .opacity(dim)
                         .cornerRadius(2)
-                        // …with the inner portion overlaid solid inside it, FULL width so it reads
-                        // as part of the same bar. Both are subsets of the total by definition, so
-                        // they nest cleanly — but only with `.unstacked`: two BarMarks at the same x
+                        // …with the focused portion overlaid solid inside it, FULL width so it reads
+                        // as part of the same bar. Deep time is a subset of total by definition, so
+                        // it nests cleanly — but only with `.unstacked`: two BarMarks at the same x
                         // stack by default, which drew each bar at total + focused (a 7.1h day at
                         // 100% focus read as 14.2h).
-                        //
-                        // Which inner quantity is shown depends on whether anything is pinned. Three
-                        // nested numbers in one bar would be unreadable, and unlike focus-vs-total
-                        // the selection and the focused time aren't subsets of each other — drawing
-                        // both would invite reading one as part of the other.
+                        BarMark(
+                            x: .value(bucketUnitWord.capitalized, b.start, unit: bucketComponent),
+                            y: .value("Focused", b.deepSeconds / 3600),
+                            width: barWidth,
+                            stacking: .unstacked
+                        )
+                        .foregroundStyle(base)
+                        .opacity(dim)
+                        .cornerRadius(2)
+                        // Three measures, not two: total, focused, and how much of the total was the
+                        // pinned selection. The third can't be another filled bar — it isn't a subset
+                        // of the focused time (or a superset), so nesting one inside the other would
+                        // state a relationship that doesn't hold. It's drawn as a translucent red
+                        // wash up to its height with a solid cap: the wash shows the AMOUNT, the cap
+                        // marks the line, and the blue underneath stays visible through both.
                         let selected = selectedByBucket[b.start] ?? 0
-                        let inner = hasSelectionOverlay ? selected : b.deepSeconds
-                        if inner > 0 {
+                        if selected > 0 {
                             BarMark(
                                 x: .value(bucketUnitWord.capitalized, b.start, unit: bucketComponent),
-                                y: .value(hasSelectionOverlay ? "Selected" : "Focused", inner / 3600),
+                                y: .value("Selected", selected / 3600),
                                 width: barWidth,
                                 stacking: .unstacked
                             )
-                            .foregroundStyle(hasSelectionOverlay ? Self.selectionOverlay : base)
+                            .foregroundStyle(Self.selectionOverlay.opacity(0.42))
                             .opacity(dim)
                             .cornerRadius(2)
+                            // The cap: without it a wash over a dark bar is easy to miss entirely.
+                            // A thin RectangleMark, not a RuleMark — a rule spans the whole plot,
+                            // and this has to sit on one bucket's bar.
+                            RectangleMark(
+                                x: .value(bucketUnitWord.capitalized, b.start, unit: bucketComponent),
+                                y: .value("Selected", selected / 3600),
+                                width: barWidth,
+                                height: .fixed(2)
+                            )
+                            .foregroundStyle(Self.selectionOverlay)
+                            .opacity(dim)
                         }
                     }
                 }
@@ -1538,11 +1558,15 @@ struct MetricsView: View {
     private var targetsSection: some View {
         let rows = targetProgress
         if !rows.isEmpty {
-            section("Allocations", subtitle: nil, accessory: { editTargetsButton }) {
+            // The combined total goes in the SUBTITLE, which is a line the section already draws.
+            // As its own row it appeared and vanished as you clicked, moving the chart and everything
+            // below it up and down — and a page that jumps while you're comparing two numbers is
+            // worse than one that says less.
+            section("Allocations", subtitle: selectionSubtitleText,
+                    accessory: { allocationsAccessory }) {
                 VStack(spacing: 2) {
                     budgetHeaderRow
                     ForEach(rows) { row in targetRow(row) }
-                    if pinnedFocuses.count >= 1 { selectionSummary }
                 }
             }
         } else {
@@ -1555,56 +1579,35 @@ struct MetricsView: View {
         }
     }
 
-    /// What the pinned allocations add up to, over whatever range is being viewed.
+    /// What the pinned allocations add up to, over whatever range is being viewed — one line, in
+    /// space the header already occupies.
     ///
     /// The question multi-select exists to answer: "how much did I collectively spend on this and
     /// this". Summed per TASK rather than per allocation, so two allocations covering the same work
     /// — a project and a tag that contains it — count that work once. Follows the range filter, so
     /// the same selection answers it for a day, a week, a month or six.
-    private var selectionSummary: some View {
+    private var selectionSubtitleText: String? {
+        guard !pinnedFocuses.isEmpty else { return nil }
         let ids = focusedTaskIDs ?? []
         let selected = rankedTotals.filter { ids.contains($0.project.id) }
             .reduce(0.0) { $0 + $1.seconds }
         let total = rankedTotals.reduce(0.0) { $0 + $1.seconds }
         let share = total > 0 ? selected / total * 100 : 0
-        // Column widths copied from `targetRow`, not chosen again: this row sits directly under
-        // those, and a bar that starts 40pt further along reads as a different kind of thing. The
-        // right-hand half is deliberately empty — there's no per-period target to show here.
-        return HStack(spacing: 5) {
-            Circle().fill(Self.selectionOverlay).frame(width: 9, height: 9)
-                .frame(width: 10, height: 14)
-            Text(pinnedFocuses.count == 1 ? "1 selected" : "\(pinnedFocuses.count) selected")
-                .font(.system(size: 10, weight: .semibold)).lineLimit(1)
-                .frame(width: 96, alignment: .leading)
-            Text(rangeLabelForSelection)
-                .font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
-                .frame(width: 42, alignment: .leading)
+        let count = pinnedFocuses.count
+        return "\(count) selected · \(budgetDuration(selected)) of \(budgetDuration(total)) "
+             + "this \(rangeLabelForSelection) (\(String(format: "%.0f%%", share)))"
+    }
 
-            Text(budgetDuration(selected))
-                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
-                .foregroundStyle(.primary).lineLimit(1)
-                .frame(width: 56, alignment: .trailing)
-            InlineBar(fraction: min(max(share / 100, 0), 1),
-                      label: String(format: "%.0f%%", share),
-                      fill: Self.selectionOverlay)
-                .help("\(budgetDuration(selected)) of the \(budgetDuration(total)) tracked in this "
-                      + "range, across \(ids.count) task\(ids.count == 1 ? "" : "s")")
-            Text(budgetDuration(total))
-                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
-                .foregroundStyle(.tertiary).lineLimit(1)
-                .frame(width: 36, alignment: .leading)
-
-            Divider().frame(height: 12)
-
-            Text("of everything tracked")
-                .font(.system(size: 9)).foregroundStyle(.tertiary).lineLimit(1)
-                .frame(width: 148, alignment: .leading)
-            Button("Clear") { pinnedFocuses = [] }
-                .buttonStyle(.link).font(.system(size: 10))
-            Spacer(minLength: 0)
+    /// Edit, plus a way out of a selection. Both live in the accessory slot the section already has.
+    @ViewBuilder
+    private var allocationsAccessory: some View {
+        HStack(spacing: 8) {
+            if !pinnedFocuses.isEmpty {
+                Button("Clear selection") { pinnedFocuses = [] }
+                    .buttonStyle(.link).font(.system(size: 11))
+            }
+            editTargetsButton
         }
-        .padding(.horizontal, 6).padding(.vertical, 2)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.10)))
     }
 
     /// Which range the selected total covers — the filter's own word, so the number can't be read as
@@ -1680,7 +1683,8 @@ struct MetricsView: View {
             return TargetMath.progress(target: target, name: name, actualSeconds: secs,
                                        rangeStart: window.start, rangeEnd: window.end, now: now,
                                        todaySeconds: today, rangeSeconds: inRange,
-                                       viewedRangeDays: viewedRangeDays)
+                                       viewedRangeDays: viewedRangeDays,
+                                       viewedRangeStart: range.start, viewedRangeEnd: range.end)
         }
         // The order you chose, not one I chose for you. `listTargets` returns them by `sort_order`,
         // so this deliberately doesn't re-sort — an automatic trouble-first sort and a manual order
@@ -1842,6 +1846,11 @@ struct MetricsView: View {
             + offBy(row.deltaSeconds, row.verdict, row.target.direction)
         if row.target.period != .day {
             out += " · avg \(tightDuration(row.averagePerDaySeconds))/d"
+            if !row.target.weekdays.effective.isAll {
+                // Otherwise "avg 2h/d" against a 10h week looks like arithmetic gone wrong.
+                out += " over \(row.target.weekdays.selectedCount) day"
+                    + (row.target.weekdays.selectedCount == 1 ? "" : "s")
+            }
         }
         return out
     }

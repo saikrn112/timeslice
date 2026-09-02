@@ -206,6 +206,9 @@ public final class IntervalStore {
         // Manual ordering for the allocations list. Backfilled from rowid so existing rows keep the
         // order they already appeared in rather than jumping around on first launch.
         _ = sqlite3_exec(db, "ALTER TABLE targets ADD COLUMN sort_order INTEGER", nil, nil, nil)
+        // Which weekdays the allocation is meant to be worked on (bitmask, Sunday = bit 0). NULL on
+        // rows that predate it, read as every day — the behaviour they already had.
+        _ = sqlite3_exec(db, "ALTER TABLE targets ADD COLUMN weekdays INTEGER", nil, nil, nil)
         _ = sqlite3_exec(db, "UPDATE targets SET sort_order = id WHERE sort_order IS NULL", nil, nil, nil)
 
         // When an allocation started and, once retired, when it finished. Needed for the historical
@@ -1373,7 +1376,8 @@ public final class IntervalStore {
     /// that asks "am I on track", only in history.
     public func listTargets(includeCompleted: Bool = false) throws -> [Target] {
         let sql = "SELECT id, subject_kind, subject_id, seconds, direction, period, "
-            + "COALESCE(created_at, 0), completed_at, COALESCE(sort_order, id) FROM targets"
+            + "COALESCE(created_at, 0), completed_at, COALESCE(sort_order, id), "
+            + "COALESCE(weekdays, 127) FROM targets"
             + (includeCompleted ? "" : " WHERE completed_at IS NULL")
             + " ORDER BY COALESCE(sort_order, id)"
         let stmt = try prepare(sql)
@@ -1389,7 +1393,8 @@ public final class IntervalStore {
                               createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6)),
                               completedAt: sqlite3_column_type(stmt, 7) == SQLITE_NULL
                                   ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7)),
-                              sortOrder: Int(sqlite3_column_int(stmt, 8))))
+                              sortOrder: Int(sqlite3_column_int(stmt, 8)),
+                              weekdays: Weekdays(rawValue: Int(sqlite3_column_int(stmt, 9)))))
         }
         return out
     }
@@ -1447,14 +1452,16 @@ public final class IntervalStore {
     /// direction OR period edits that single row rather than adding another.
     @discardableResult
     public func setTarget(subject: TargetSubject, seconds: TimeInterval,
-                          direction: Target.Direction, period: Target.Period) throws -> Int64 {
+                          direction: Target.Direction, period: Target.Period,
+                          weekdays: Weekdays = .all) throws -> Int64 {
         // The conflict target names the partial index's predicate too, so this upserts against the
         // LIVE allocation and a retired one for the same subject is left alone.
-        let sql = "INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at, created_at, sort_order) "
-            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM targets)) "
+        let sql = "INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at, created_at, weekdays, sort_order) "
+            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM targets)) "
             + "ON CONFLICT(subject_kind, subject_id) WHERE completed_at IS NULL DO UPDATE SET "
             + "seconds = excluded.seconds, direction = excluded.direction, "
-            + "period = excluded.period, updated_at = excluded.updated_at"
+            + "period = excluded.period, weekdays = excluded.weekdays, "
+            + "updated_at = excluded.updated_at"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, subject.kind)
@@ -1465,8 +1472,19 @@ public final class IntervalStore {
         bindText(stmt, 6, UUID().uuidString)
         sqlite3_bind_double(stmt, 7, Date().timeIntervalSince1970)
         sqlite3_bind_double(stmt, 8, Date().timeIntervalSince1970)
+        sqlite3_bind_int(stmt, 9, Int32(weekdays.rawValue))
         try step(stmt)
         return sqlite3_last_insert_rowid(db)
+    }
+
+    /// Change only the days, leaving the amount and period alone — that's what the bubbles do.
+    public func setTargetWeekdays(id: Int64, _ weekdays: Weekdays) throws {
+        let stmt = try prepare("UPDATE targets SET weekdays = ?, updated_at = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(weekdays.rawValue))
+        sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(stmt, 3, id)
+        try step(stmt)
     }
 
     public func deleteTarget(id: Int64) throws {
@@ -1556,7 +1574,8 @@ public final class IntervalStore {
                                   direction: Target.Direction, period: Target.Period,
                                   remoteUpdatedAt: TimeInterval,
                                   createdAt: TimeInterval? = nil,
-                                  completedAt: TimeInterval? = nil) throws -> Bool {
+                                  completedAt: TimeInterval? = nil,
+                                  weekdays: Int? = nil) throws -> Bool {
         // By UID first — that's the row's identity. Matching on the subject alone broke as soon as
         // the done state existed: a REOPENED allocation has no live row for its subject here, so the
         // subject lookup missed and the insert collided with the uid we already held.
@@ -1586,7 +1605,7 @@ public final class IntervalStore {
 
         if let mineID {
             guard remoteUpdatedAt > mineUpdated else { return false }
-            let stmt = try prepare("UPDATE targets SET seconds = ?, direction = ?, period = ?, uid = ?, updated_at = ?, completed_at = ? WHERE id = ?")
+            let stmt = try prepare("UPDATE targets SET seconds = ?, direction = ?, period = ?, uid = ?, updated_at = ?, completed_at = ?, weekdays = ? WHERE id = ?")
             defer { sqlite3_finalize(stmt) }
             sqlite3_bind_double(stmt, 1, seconds)
             bindText(stmt, 2, direction.rawValue)
@@ -1595,11 +1614,14 @@ public final class IntervalStore {
             sqlite3_bind_double(stmt, 5, remoteUpdatedAt)
             if let completedAt { sqlite3_bind_double(stmt, 6, completedAt) }
             else { sqlite3_bind_null(stmt, 6) }
-            sqlite3_bind_int64(stmt, 7, mineID)
+            // A peer that doesn't send the column means "every day", which is what it had before the
+            // column existed — not "no days", which would make the pace infinite.
+            sqlite3_bind_int(stmt, 7, Int32(weekdays ?? Weekdays.all.rawValue))
+            sqlite3_bind_int64(stmt, 8, mineID)
             try step(stmt)
             return true
         }
-        let stmt = try prepare("INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        let stmt = try prepare("INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at, created_at, completed_at, weekdays) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, subject.kind)
         sqlite3_bind_int64(stmt, 2, subject.id)
@@ -1613,6 +1635,7 @@ public final class IntervalStore {
         sqlite3_bind_double(stmt, 8, createdAt ?? remoteUpdatedAt)
         if let completedAt { sqlite3_bind_double(stmt, 9, completedAt) }
         else { sqlite3_bind_null(stmt, 9) }
+        sqlite3_bind_int(stmt, 10, Int32(weekdays ?? Weekdays.all.rawValue))
         try step(stmt)
         return true
     }
@@ -1641,13 +1664,14 @@ public final class IntervalStore {
     public func targetsForExport() throws -> [(uid: String, subjectKind: String, subjectUID: String,
                                                seconds: TimeInterval, direction: String,
                                                period: String, updatedAt: TimeInterval,
-                                               createdAt: TimeInterval, completedAt: TimeInterval?)] {
+                                               createdAt: TimeInterval, completedAt: TimeInterval?,
+                                               weekdays: Int)] {
         // Completed ones travel too: history is the point of keeping them, so a peer must learn both
         // that an allocation ended and when.
-        let stmt = try prepare("SELECT uid, subject_kind, subject_id, seconds, direction, period, COALESCE(updated_at, 0), COALESCE(created_at, 0), completed_at FROM targets WHERE uid IS NOT NULL")
+        let stmt = try prepare("SELECT uid, subject_kind, subject_id, seconds, direction, period, COALESCE(updated_at, 0), COALESCE(created_at, 0), completed_at, COALESCE(weekdays, 127) FROM targets WHERE uid IS NOT NULL")
         defer { sqlite3_finalize(stmt) }
         var out: [(String, String, String, TimeInterval, String, String, TimeInterval,
-                   TimeInterval, TimeInterval?)] = []
+                   TimeInterval, TimeInterval?, Int)] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let kind = text(stmt, 1)
             guard let table = Self.table(forSubjectKind: kind),
@@ -1656,7 +1680,8 @@ public final class IntervalStore {
             out.append((text(stmt, 0), kind, subjectUID, sqlite3_column_double(stmt, 3),
                         text(stmt, 4), text(stmt, 5), sqlite3_column_double(stmt, 6),
                         sqlite3_column_double(stmt, 7),
-                        sqlite3_column_type(stmt, 8) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 8)))
+                        sqlite3_column_type(stmt, 8) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 8),
+                        Int(sqlite3_column_int(stmt, 9))))
         }
         return out
     }
