@@ -423,11 +423,14 @@ public enum Aggregations {
     /// Task segments for a single local day, each clipped to [00:00, 24:00) and expressed as
     /// hour-of-day offsets (0…24). An interval spanning midnight contributes only its portion
     /// within `day`. Used by the 0–24h day timeline.
+    /// `deviceOrder` is the canonical device order from `DeviceOrder`; lanes follow it so the
+    /// timeline and the device list agree. Omit it and devices fall back to sorting by id.
     public static func daySegments(
         intervals: [Interval],
         day: Date,
         now: Date = Date(),
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        deviceOrder: [String] = []
     ) -> [DaySegment] {
         let dayStart = calendar.startOfDay(for: day)
         guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return [] }
@@ -443,7 +446,8 @@ public enum Aggregations {
                                        startHour: startHour, endHour: endHour,
                                        deviceID: interval.deviceID))
         }
-        return assignLanes(segments.sorted { $0.startHour < $1.startHour })
+        return assignLanes(segments.sorted { $0.startHour < $1.startHour },
+                           deviceOrder: deviceOrder)
     }
 
     /// Lane packing so overlapping segments never hide each other on the timeline.
@@ -455,8 +459,9 @@ public enum Aggregations {
     ///
     /// With a single device (the normal case) everything lands in lane 0 and the timeline looks
     /// exactly as before; within that lane, overlaps still fan out so nothing is hidden.
-    public static func assignLanes(_ sorted: [DaySegment]) -> [DaySegment] {
-        let devices = orderedDevices(sorted)
+    public static func assignLanes(_ sorted: [DaySegment],
+                                   deviceOrder: [String] = []) -> [DaySegment] {
+        let devices = orderedDevices(sorted, deviceOrder: deviceOrder)
         guard devices.count > 1 else { return packByOverlap(sorted, baseLane: 0) }
 
         // Each device gets a contiguous block of lanes, sized to its own internal overlap, so two
@@ -489,16 +494,24 @@ public enum Aggregations {
 
     /// Devices in order of first appearance — a stable, caller-visible row order.
     /// nil (unattributed) sorts last so named devices keep the top rows.
-    public static func orderedDevices(_ segments: [DaySegment]) -> [String?] {
+    public static func orderedDevices(_ segments: [DaySegment],
+                                      deviceOrder: [String] = []) -> [String?] {
         // Sorted by id, NOT by first appearance. First-appearance order changed as soon as an
         // earlier block arrived from a peer, so a device's row moved on its own between syncs —
         // whichever device happened to have the earliest synced block took the top lane. Sorting by
         // a fixed key keeps a device on the same row all day, regardless of what has arrived yet.
         //
         // nil (unattributed, pre-attribution rows) sorts last so named devices keep the top lanes.
+        // A device absent from THIS day simply contributes no lane; the ones present keep their
+        // relative order, so scrubbing back through days doesn't reshuffle the rows either.
         let ids = Set(segments.map(\.deviceID))
-        return ids.compactMap { $0 }.sorted().map { Optional($0) }
-            + (ids.contains(nil) ? [nil] : [])
+        let rank = Dictionary(uniqueKeysWithValues: deviceOrder.enumerated().map { ($1, $0) })
+        let named = ids.compactMap { $0 }.sorted {
+            // Anything the caller didn't rank sorts after everything it did, by id, so an
+            // unlabelled straggler is still placed deterministically.
+            (rank[$0] ?? Int.max, $0) < (rank[$1] ?? Int.max, $1)
+        }
+        return named.map { Optional($0) } + (ids.contains(nil) ? [nil] : [])
     }
 
     /// Greedy first-fit: each segment takes the lowest free lane at or after `baseLane`.

@@ -95,6 +95,9 @@ struct MetricsView: View {
     @State private var showTargetsSheet = false
     /// Budget row under the pointer, purely so the row shows it can be clicked.
     @State private var hoveredTargetID: Int64?
+    /// Allocation being dragged by its handle, and the row it's currently over.
+    @State private var draggingTargetID: Int64?
+    @State private var dropTargetID: Int64?
 
 
     /// Bucket under the cursor on the hours / focus charts.
@@ -479,7 +482,11 @@ struct MetricsView: View {
     }
 
     /// Devices contributing to this day, in the same first-appearance order the lanes use.
-    private var timelineDevices: [String?] { Aggregations.orderedDevices(daySegments) }
+    private var timelineDevices: [String?] {
+        // Same order the lanes were assigned with, or the labels would sit beside the wrong rows.
+        Aggregations.orderedDevices(
+            daySegments, deviceOrder: (try? appState.storeForEditing.deviceOrder()) ?? [])
+    }
 
     /// Short display name for a device: its user-set label, else the raw id, else "unknown" for
     /// rows recorded before device attribution existed.
@@ -1470,18 +1477,11 @@ struct MetricsView: View {
                                        todaySeconds: today, rangeSeconds: inRange,
                                        viewedRangeDays: viewedRangeDays)
         }
-        // Trouble first: breached ceilings, then things falling behind.
-        .sorted { rank($0.verdict) < rank($1.verdict) }
+        // The order you chose, not one I chose for you. `listTargets` returns them by `sort_order`,
+        // so this deliberately doesn't re-sort — an automatic trouble-first sort and a manual order
+        // can't both hold, and you asked for the manual one.
     }
 
-    private func rank(_ v: TargetProgress.Verdict) -> Int {
-        switch v {
-        case .over: return 0
-        case .behind: return 1
-        case .onPace: return 2
-        case .met: return 3
-        }
-    }
 
     /// nil when the subject has been deleted — a stale target shouldn't render as a blank row.
     private func targetName(_ subject: TargetSubject, tasks: [Project]) -> String? {
@@ -1521,7 +1521,28 @@ struct MetricsView: View {
         // Bar clamps at full; the label carries the real number (or "over" for a blown ceiling).
         let goalFraction = min(max(row.percent / 100, 0), 1)
         return HStack(spacing: 5) {
-            Circle().fill(color).frame(width: 9, height: 9)
+            // Drag handle, in the status dot's own cell.
+            //
+            // It has to live INSIDE the row's bounds: SwiftUI doesn't hit-test what a view draws
+            // outside its parent's frame, so the three earlier attempts at an overlay offset into
+            // the left margin rendered dots that could never be hovered or grabbed. Swapping in
+            // place rather than adding a column also keeps every caption over its own bar.
+            Group {
+                if hoveredTargetID == row.target.id || draggingTargetID == row.target.id {
+                    GripDots()
+                        .foregroundStyle(.tertiary)
+                        .contentShape(Rectangle())
+                        // Drag from the handle only — on the whole row it ate vertical drags and
+                        // the page couldn't be scrolled.
+                        .onDrag {
+                            draggingTargetID = row.target.id
+                            return NSItemProvider(object: String(row.target.id) as NSString)
+                        }
+                } else {
+                    Circle().fill(color).frame(width: 9, height: 9)
+                }
+            }
+            .frame(width: 10, height: 14)
             Text(row.name).font(.callout).lineLimit(1).truncationMode(.tail)
                 .frame(width: 96, alignment: .leading)
             Text("\(row.target.direction.symbol) \(row.target.period.rawValue)")
@@ -1580,6 +1601,31 @@ struct MetricsView: View {
             let me = focusFor(row.target.subject)
             pinnedFocus = (pinnedFocus == me) ? nil : me
         }
+        // Dropping on a row puts the dragged allocation in its place.
+        .onDrop(of: [.text], isTargeted: Binding(
+            get: { dropTargetID == row.target.id },
+            set: { over in dropTargetID = over ? row.target.id : nil }
+        )) { _ in dropAllocation(onto: row.target.id) }
+        .overlay(alignment: .top) {
+            // Where it will land, drawn only while a drag is in flight.
+            if dropTargetID == row.target.id, draggingTargetID != row.target.id {
+                Rectangle().fill(Color.accentColor).frame(height: 2)
+            }
+        }
+    }
+
+    /// Move the dragged allocation to `onto`'s position and persist the whole order.
+    private func dropAllocation(onto: Int64) -> Bool {
+        defer { draggingTargetID = nil; dropTargetID = nil }
+        guard let dragged = draggingTargetID, dragged != onto else { return false }
+        var ids = targets.map(\.id)
+        guard let from = ids.firstIndex(of: dragged), let to = ids.firstIndex(of: onto)
+        else { return false }
+        ids.remove(at: from)
+        ids.insert(dragged, at: to)
+        try? appState.storeForEditing.reorderTargets(ids)
+        recompute()
+        return true
     }
 
     /// The one thing the row can't show: how far off target it is.
@@ -1815,7 +1861,9 @@ struct MetricsView: View {
             .filter { $0.seconds > 0 }
             .sorted { $0.seconds > $1.seconds }
         if isDay {
-            daySegments = Aggregations.daySegments(intervals: all, day: range.start)
+            daySegments = Aggregations.daySegments(
+                intervals: all, day: range.start,
+                deviceOrder: (try? appState.storeForEditing.deviceOrder()) ?? [])
             // Stable legend: first appearance order along the day, computed once here.
             // One entry per GROUP (or per Inbox task), in first-appearance order — a day with
             // 30 tasks across 5 groups gets 5 chips, not 30.

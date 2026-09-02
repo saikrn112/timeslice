@@ -192,6 +192,11 @@ public final class IntervalStore {
                 updated_at   REAL
             )
             """, nil, nil, nil)
+        // Manual ordering for the allocations list. Backfilled from rowid so existing rows keep the
+        // order they already appeared in rather than jumping around on first launch.
+        _ = sqlite3_exec(db, "ALTER TABLE targets ADD COLUMN sort_order INTEGER", nil, nil, nil)
+        _ = sqlite3_exec(db, "UPDATE targets SET sort_order = id WHERE sort_order IS NULL", nil, nil, nil)
+
         // When an allocation started and, once retired, when it finished. Needed for the historical
         // "allocated vs spent" view: without a start there's no span to measure over.
         //
@@ -224,6 +229,9 @@ public final class IntervalStore {
         // row: a note has no duration and is never aggregated, so keeping it out of the
         // interval tables means it cannot accidentally land in a time total.
         _ = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, device_id TEXT, created_at REAL NOT NULL, resolved_at REAL, uid TEXT, updated_at REAL)", nil, nil, nil)
+        // Which app the note is about — added later, so it's a migration for existing notes and
+        // stays NULL on them rather than being guessed from the device that wrote them.
+        _ = sqlite3_exec(db, "ALTER TABLE feedback ADD COLUMN platform TEXT", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_uid ON feedback(uid)", nil, nil, nil)
 
         try backfillSyncColumns()
@@ -309,24 +317,16 @@ public final class IntervalStore {
             if existing.finished { try setProjectFinished(id: existing.id, finished: false) }
             return existing.id
         }
-        // `task_project_id` is written HERE. It previously wasn't: `inGroup` was consulted only for
-        // the dedup lookup above and then dropped, so a task created "in a group" silently landed in
-        // Inbox. The Mac happened to work because it calls `setTaskProject` immediately afterwards,
-        // but anything trusting the parameter — like the phone's `/project` filing — quietly did
-        // nothing, which is how this was found.
-        let sql = """
-            INSERT INTO projects (name, color_hex, sort_order, task_project_id, uid, updated_at)
-            VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects), ?, ?, ?)
-            """
+        // `inGroup` also ASSIGNS the group, not just scopes the duplicate lookup. Doing only the
+        // lookup meant a caller that forgot the follow-up `setTaskProject` created the task in Inbox
+        // while believing it was filed — and the next create with the same name then didn't match it.
+        let sql = "INSERT INTO projects (name, color_hex, sort_order, task_project_id, uid, updated_at) VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects), ?, ?, ?)"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, name)
         bindText(stmt, 2, colorHex)
-        if let taskProjectID {
-            sqlite3_bind_int64(stmt, 3, taskProjectID)
-        } else {
-            sqlite3_bind_null(stmt, 3)
-        }
+        if let taskProjectID { sqlite3_bind_int64(stmt, 3, taskProjectID) }
+        else { sqlite3_bind_null(stmt, 3) }
         bindText(stmt, 4, UUID().uuidString)
         sqlite3_bind_double(stmt, 5, Date().timeIntervalSince1970)
         try step(stmt)
@@ -1315,8 +1315,9 @@ public final class IntervalStore {
     /// that asks "am I on track", only in history.
     public func listTargets(includeCompleted: Bool = false) throws -> [Target] {
         let sql = "SELECT id, subject_kind, subject_id, seconds, direction, period, "
-            + "COALESCE(created_at, 0), completed_at FROM targets"
+            + "COALESCE(created_at, 0), completed_at, COALESCE(sort_order, id) FROM targets"
             + (includeCompleted ? "" : " WHERE completed_at IS NULL")
+            + " ORDER BY COALESCE(sort_order, id)"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         var out: [Target] = []
@@ -1329,9 +1330,48 @@ public final class IntervalStore {
                               direction: direction, period: period,
                               createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6)),
                               completedAt: sqlite3_column_type(stmt, 7) == SQLITE_NULL
-                                  ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7))))
+                                  ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7)),
+                              sortOrder: Int(sqlite3_column_int(stmt, 8))))
         }
         return out
+    }
+
+    /// Move an allocation up or down among the LIVE ones by swapping with its neighbour.
+    ///
+    /// A swap rather than renumbering the whole list: one UPDATE pair per move, and it can't drift
+    /// out of step with what's on screen.
+    public func moveTarget(id: Int64, up: Bool) throws {
+        let live = try listTargets()
+        guard let i = live.firstIndex(where: { $0.id == id }) else { return }
+        let j = up ? i - 1 : i + 1
+        guard live.indices.contains(j) else { return }
+        try transaction {
+            for (target, order) in [(live[i], live[j].sortOrder), (live[j], live[i].sortOrder)] {
+                let stmt = try prepare("UPDATE targets SET sort_order = ?, updated_at = ? WHERE id = ?")
+                sqlite3_bind_int(stmt, 1, Int32(order))
+                sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+                sqlite3_bind_int64(stmt, 3, target.id)
+                try step(stmt)
+                sqlite3_finalize(stmt)
+            }
+        }
+    }
+
+    /// Persist an explicit order for the live allocations, by position in `orderedIDs`.
+    ///
+    /// Used by drag-and-drop, where a row can land anywhere — `moveTarget` only swaps neighbours,
+    /// which can't express "moved to the top".
+    public func reorderTargets(_ orderedIDs: [Int64]) throws {
+        try transaction {
+            for (index, id) in orderedIDs.enumerated() {
+                let stmt = try prepare("UPDATE targets SET sort_order = ?, updated_at = ? WHERE id = ?")
+                sqlite3_bind_int(stmt, 1, Int32(index))
+                sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+                sqlite3_bind_int64(stmt, 3, id)
+                try step(stmt)
+                sqlite3_finalize(stmt)
+            }
+        }
     }
 
     /// Retire an allocation, or bring it back. Never deletes: the point is to keep it for history.
@@ -1352,8 +1392,8 @@ public final class IntervalStore {
                           direction: Target.Direction, period: Target.Period) throws -> Int64 {
         // The conflict target names the partial index's predicate too, so this upserts against the
         // LIVE allocation and a retired one for the same subject is left alone.
-        let sql = "INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at, created_at) "
-            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        let sql = "INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at, created_at, sort_order) "
+            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM targets)) "
             + "ON CONFLICT(subject_kind, subject_id) WHERE completed_at IS NULL DO UPDATE SET "
             + "seconds = excluded.seconds, direction = excluded.direction, "
             + "period = excluded.period, updated_at = excluded.updated_at"
@@ -1576,11 +1616,21 @@ public final class IntervalStore {
         return out
     }
 
+    /// Every device this database knows about, in display order. One source for the timeline's
+    /// lanes and the sync panel's list.
+    public func deviceOrder() throws -> [String] {
+        var known = try deviceLabels().map { (id: $0.key, label: Optional($0.value)) }
+        if let localDeviceID, !known.contains(where: { $0.id == localDeviceID }) {
+            known.append((id: localDeviceID, label: nil))
+        }
+        return DeviceOrder.sorted(known)
+    }
+
     // MARK: - Feedback
 
     /// Newest first — a note list is read from the top.
     public func listFeedback(includeResolved: Bool = true) throws -> [Feedback] {
-        let sql = "SELECT id, text, device_id, created_at, resolved_at FROM feedback"
+        let sql = "SELECT id, text, device_id, created_at, resolved_at, platform FROM feedback"
             + (includeResolved ? "" : " WHERE resolved_at IS NULL")
             + " ORDER BY created_at DESC"
         let stmt = try prepare(sql)
@@ -1593,25 +1643,53 @@ public final class IntervalStore {
                 createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3)),
                 deviceID: sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : text(stmt, 2),
                 resolvedAt: sqlite3_column_type(stmt, 4) == SQLITE_NULL
-                    ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4))))
+                    ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4)),
+                platform: sqlite3_column_type(stmt, 5) == SQLITE_NULL
+                    ? nil : FeedbackPlatform(rawValue: text(stmt, 5))))
         }
         return out
     }
 
     /// Record a note. Stamped with the local device so "where was I" is answerable later.
     @discardableResult
-    public func addFeedback(_ body: String, at when: Date = Date()) throws -> Int64? {
+    public func addFeedback(_ body: String, platform: FeedbackPlatform? = nil,
+                            at when: Date = Date()) throws -> Int64? {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        let stmt = try prepare("INSERT INTO feedback (text, device_id, created_at, uid, updated_at) VALUES (?, ?, ?, ?, ?)")
+        let stmt = try prepare("INSERT INTO feedback (text, device_id, created_at, uid, updated_at, platform) VALUES (?, ?, ?, ?, ?, ?)")
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, trimmed)
         if let localDeviceID { bindText(stmt, 2, localDeviceID) } else { sqlite3_bind_null(stmt, 2) }
         sqlite3_bind_double(stmt, 3, when.timeIntervalSince1970)
         bindText(stmt, 4, UUID().uuidString)
         sqlite3_bind_double(stmt, 5, Date().timeIntervalSince1970)
+        if let platform { bindText(stmt, 6, platform.rawValue) } else { sqlite3_bind_null(stmt, 6) }
         try step(stmt)
         return sqlite3_last_insert_rowid(db)
+    }
+
+    /// Reword a note. Bumps `updated_at`, so the edit wins over a peer's older copy.
+    public func updateFeedback(id: Int64, text body: String) throws {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }   // clearing it would silently destroy the note
+        let stmt = try prepare("UPDATE feedback SET text = ?, updated_at = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, trimmed)
+        sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(stmt, 3, id)
+        try step(stmt)
+    }
+
+    /// Retag a note. Separate from `updateFeedback` because the tag is edited by clicking a pill,
+    /// with no text change to commit — and passing nil is a real value here (untagged), which an
+    /// optional argument on the reword call couldn't express.
+    public func setFeedbackPlatform(id: Int64, _ platform: FeedbackPlatform?) throws {
+        let stmt = try prepare("UPDATE feedback SET platform = ?, updated_at = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        if let platform { bindText(stmt, 1, platform.rawValue) } else { sqlite3_bind_null(stmt, 1) }
+        sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(stmt, 3, id)
+        try step(stmt)
     }
 
     public func setFeedbackResolved(id: Int64, resolved: Bool, at when: Date = Date()) throws {
@@ -1638,16 +1716,17 @@ public final class IntervalStore {
     /// The export half: notes with their uids.
     public func feedbackForExport() throws -> [(uid: String, text: String, deviceID: String?,
                                                 createdAt: TimeInterval, resolvedAt: TimeInterval?,
-                                                updatedAt: TimeInterval)] {
-        let stmt = try prepare("SELECT uid, text, device_id, created_at, resolved_at, COALESCE(updated_at, 0) FROM feedback WHERE uid IS NOT NULL")
+                                                updatedAt: TimeInterval, platform: String?)] {
+        let stmt = try prepare("SELECT uid, text, device_id, created_at, resolved_at, COALESCE(updated_at, 0), platform FROM feedback WHERE uid IS NOT NULL")
         defer { sqlite3_finalize(stmt) }
-        var out: [(String, String, String?, TimeInterval, TimeInterval?, TimeInterval)] = []
+        var out: [(String, String, String?, TimeInterval, TimeInterval?, TimeInterval, String?)] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             out.append((text(stmt, 0), text(stmt, 1),
                         sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : text(stmt, 2),
                         sqlite3_column_double(stmt, 3),
                         sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 4),
-                        sqlite3_column_double(stmt, 5)))
+                        sqlite3_column_double(stmt, 5),
+                        sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : text(stmt, 6)))
         }
         return out
     }
@@ -1656,19 +1735,23 @@ public final class IntervalStore {
     @discardableResult
     public func applyRemoteFeedback(uid: String, text body: String, deviceID: String?,
                                     createdAt: TimeInterval, resolvedAt: TimeInterval?,
-                                    remoteUpdatedAt: TimeInterval) throws -> Bool {
+                                    remoteUpdatedAt: TimeInterval,
+                                    platform: String? = nil) throws -> Bool {
         if let id = try localID(table: "feedback", uid: uid) {
             guard remoteUpdatedAt > (try updatedAt(table: "feedback", id: id) ?? 0) else { return false }
-            let stmt = try prepare("UPDATE feedback SET text = ?, resolved_at = ?, updated_at = ? WHERE id = ?")
+            // The tag rides the same LWW as the text: retagging a note on the phone has to land
+            // here, and an older peer that doesn't send the column would otherwise clear it.
+            let stmt = try prepare("UPDATE feedback SET text = ?, resolved_at = ?, updated_at = ?, platform = ? WHERE id = ?")
             defer { sqlite3_finalize(stmt) }
             bindText(stmt, 1, body)
             if let resolvedAt { sqlite3_bind_double(stmt, 2, resolvedAt) } else { sqlite3_bind_null(stmt, 2) }
             sqlite3_bind_double(stmt, 3, remoteUpdatedAt)
-            sqlite3_bind_int64(stmt, 4, id)
+            if let platform { bindText(stmt, 4, platform) } else { sqlite3_bind_null(stmt, 4) }
+            sqlite3_bind_int64(stmt, 5, id)
             try step(stmt)
             return true
         }
-        let stmt = try prepare("INSERT INTO feedback (text, device_id, created_at, resolved_at, uid, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+        let stmt = try prepare("INSERT INTO feedback (text, device_id, created_at, resolved_at, uid, updated_at, platform) VALUES (?, ?, ?, ?, ?, ?, ?)")
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, body)
         if let deviceID { bindText(stmt, 2, deviceID) } else { sqlite3_bind_null(stmt, 2) }
@@ -1676,6 +1759,7 @@ public final class IntervalStore {
         if let resolvedAt { sqlite3_bind_double(stmt, 4, resolvedAt) } else { sqlite3_bind_null(stmt, 4) }
         bindText(stmt, 5, uid)
         sqlite3_bind_double(stmt, 6, remoteUpdatedAt)
+        if let platform { bindText(stmt, 7, platform) } else { sqlite3_bind_null(stmt, 7) }
         try step(stmt)
         return true
     }

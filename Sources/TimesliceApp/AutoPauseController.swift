@@ -30,6 +30,8 @@ final class AutoPauseController: ObservableObject {
     }()
 
     private var checkpointTimer: Timer?
+    /// Repeating sweep that re-checks the thresholds from scratch.
+    private var backstopTimer: Timer?
     private var nagTimer: Timer?
     /// The task to offer resuming after an absence-triggered pause, plus why it was paused so the
     /// prompt can say "your Mac slept" or "your screen turned off" accurately.
@@ -54,6 +56,15 @@ final class AutoPauseController: ObservableObject {
         // shouldn't keep counting.
         nc.addObserver(self, selector: #selector(screensDidSleep), name: NSWorkspace.screensDidSleepNotification, object: nil)
         nc.addObserver(self, selector: #selector(screensDidWake), name: NSWorkspace.screensDidWakeNotification, object: nil)
+
+        // A single non-repeating Timer had to fire correctly once, hours out, with no recovery if it
+        // didn't — and on 2026-08-25 it didn't, recording ~98 minutes nobody worked. The cause was
+        // never found, which is the point: this sweep re-derives the answer from `runningSince` every
+        // 15s, so a missed fire self-corrects in seconds whatever the reason. The one-shot above is
+        // now an optimisation, not the guarantee.
+        backstopTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sweep() }
+        }
 
         // (Re)arm the long-session checkpoint whenever the running task or the threshold changes.
         // @Published fires in willSet (before the value updates), so hop to the next runloop tick
@@ -188,6 +199,27 @@ final class AutoPauseController: ObservableObject {
             ?? NudgePolicy.delay(since: since, threshold: settings.autoPauseSeconds)
         checkpointTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.checkpointReached() }
+        }
+    }
+
+    /// Fire anything already overdue. Idempotent: `checkpointReached` pauses the timer, so the very
+    /// condition that got us here stops being true and it can't fire twice.
+    private func sweep() {
+        // Don't interrupt a prompt that's already waiting for an answer.
+        guard !awaitingResponse, !promptShowing else { return }
+
+        if NudgePolicy.armsSessionNudge(settings.nudgeConfig, isRunning: engine.isRunning),
+           let since = engine.runningSince,
+           Date().timeIntervalSince(since) >= settings.autoPauseSeconds {
+            checkpointReached()
+            return
+        }
+        if NudgePolicy.armsPausedNudge(settings.nudgeConfig, isPaused: engine.isPaused,
+                                       awaitingAnswer: awaitingResponse),
+           let since = engine.pausedSince,
+           Date().timeIntervalSince(since) >= settings.idleNudgeSeconds,
+           !idleNudgePending {
+            idleNudgeReached()
         }
     }
 

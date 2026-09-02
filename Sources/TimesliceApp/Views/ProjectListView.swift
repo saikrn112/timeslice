@@ -58,22 +58,26 @@ struct ProjectListView: View {
     /// Cleared once it has tasks or the scope changes.
     @State private var justCreatedProjectID: Int64?
 
-    private enum Field: Hashable { case list, newTask, rename, renameGroup, newProject }
+    private enum Field: Hashable { case list, rename, renameGroup, newProject }
     @FocusState private var focus: Field?
 
     private var store: IntervalStore { appState.storeForEditing }
     /// Any in-place text entry. Missing a case here means the list's ↑/↓/space handlers steal
     /// keys mid-typing — which is exactly what broke spaces in project names.
     private var isTyping: Bool {
-        focus == .newTask || focus == .rename || focus == .renameGroup || focus == .newProject
+        focus == .rename || focus == .renameGroup || focus == .newProject
     }
 
     var body: some View {
         VStack(spacing: 0) {
             selectionToolbar
             list
-            Divider()
-            if selecting { selectionActionBar } else { addBar }
+            // The divider and bar only exist while selecting now — the add buttons moved up beside
+            // Select, so there's nothing to show here otherwise.
+            if selecting {
+                Divider()
+                selectionActionBar
+            }
             KeybindingsFooter()
         }
         .focusable()
@@ -695,9 +699,35 @@ struct ProjectListView: View {
                     .buttonStyle(.borderless).font(.system(size: 11))
                 } else {
                     Spacer()
+
+                    // Up here beside Select rather than in a bar at the bottom: both are list-level
+                    // actions, so they belong in the list's own header.
+                    Button {
+                        NotificationCenter.default.post(name: .openTaskPalette, object: nil)
+                    } label: {
+                        Label("New task", systemImage: "plus").font(.system(size: 12))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("New task or resume an existing one (Fn + ⌘ + ⇧ + A)")
+
+                    Divider().frame(height: 14)
+
+                    // Create an empty project up front, then drag tasks into it — the reverse of
+                    // assigning from a task, and how you'd set up groups before categorising.
+                    Button {
+                        creatingEmptyProject = true
+                    } label: {
+                        Label("Project", systemImage: "folder.badge.plus").font(.system(size: 12))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("New project")
                 }
             }
-            .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 0)
+            // Taller with a faint tint so it reads as a row of its own rather than controls floating
+            // above the list. Kept very light — the project headers below are deliberately quiet, and
+            // a strong fill here would compete with them.
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(Color.secondary.opacity(0.07))
         }
     }
 
@@ -733,31 +763,6 @@ struct ProjectListView: View {
     private func finishSelecting() {
         ticked.removeAll()
         selecting = false
-    }
-
-    private var addBar: some View {
-        HStack {
-            TextField("New task…", text: $newTaskName)
-                .textFieldStyle(.roundedBorder)
-                .focused($focus, equals: .newTask)
-                .onSubmit(addTask)
-            Button(action: addTask) {
-                Label("Add", systemImage: "plus")
-            }
-            .disabled(newTaskName.trimmingCharacters(in: .whitespaces).isEmpty)
-
-            Divider().frame(height: 16)
-
-            // Create an empty project up front, then drag tasks into it — the reverse of
-            // assigning from a task, and how you'd set up groups before categorising.
-            Button {
-                creatingEmptyProject = true
-            } label: {
-                Label("Project", systemImage: "folder.badge.plus")
-            }
-            .help("New project")
-        }
-        .padding(12)
     }
 
     // MARK: - Building blocks
@@ -880,16 +885,6 @@ struct ProjectListView: View {
 
     // MARK: - Actions
 
-    private func addTask() {
-        let name = newTaskName.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { return }
-        let index = appState.projects.count
-        _ = try? store.createProject(name: name, colorHex: Palette.color(forIndex: index))
-        newTaskName = ""
-        focus = .newTask
-        appState.reload()
-    }
-
     private func beginRename(_ project: Project) {
         editingName = project.name
         editingID = project.id
@@ -935,7 +930,10 @@ struct KeybindingsFooter: View {
 }
 
 /// Two columns of dots — the conventional "this is draggable" grip, as on reorderable list rows.
-private struct GripDots: View {
+///
+/// Internal rather than private: the allocations sheet reorders by drag too, and a second copy of
+/// this would be a second thing to keep looking the same.
+struct GripDots: View {
     var body: some View {
         HStack(spacing: 2) {
             ForEach(0..<2, id: \.self) { _ in

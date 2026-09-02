@@ -199,8 +199,12 @@ final class AppState: ObservableObject {
     ///
     /// `groupName` comes from a `/project` token in the palette; the group is created if it
     /// doesn't exist yet, so "assign" and "create" are the same action.
+    /// Create a task, filing it into `groupName` (created if needed). Returns the new/reused id.
+    ///
+    /// Shared with `addAndStart` so the in-window add field and the palette behave identically —
+    /// they used to diverge, and the field silently ignored a `/project` token.
     @discardableResult
-    func addAndStart(name: String, groupName: String? = nil) -> Int64? {
+    func addTask(name: String, groupName: String? = nil) -> Int64? {
         // Resolve the group FIRST: reuse-by-name is scoped to a group, so creating the task before
         // knowing its group would match it against Inbox and could reuse the wrong task.
         var groupID: Int64?
@@ -208,12 +212,19 @@ final class AppState: ObservableObject {
             groupID = try? store.upsertTaskProject(
                 name: groupName, colorHex: Palette.color(forIndex: taskProjects.count))
         }
+        // createProject(inGroup:) files it as well as scoping the duplicate check, so no follow-up.
         guard let id = try? store.createProject(name: name,
                                                 colorHex: Palette.color(forIndex: projects.count),
                                                 inGroup: groupID) else { return nil }
         // No follow-up `setTaskProject` needed: `createProject(inGroup:)` now actually files the
         // task. The old call was compensating for the parameter being ignored.
         reload()
+        return id
+    }
+
+    @discardableResult
+    func addAndStart(name: String, groupName: String? = nil) -> Int64? {
+        guard let id = addTask(name: name, groupName: groupName) else { return nil }
         selectedProjectID = id
         engine.switchTo(projectID: id)
         return id

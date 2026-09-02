@@ -74,7 +74,7 @@ struct TargetsSheet: View {
                 .padding(16)
             }
         }
-        .frame(width: 560, height: 520)
+        .frame(width: 680, height: 560)
         .onAppear { reload() }
     }
 
@@ -211,7 +211,8 @@ struct TargetsSheet: View {
         let existing = targets.first { $0.subject == subject }
         return HStack(spacing: 8) {
             Circle().fill(Color(hex: colorHex)).frame(width: 9, height: 9)
-            Text(name).font(.callout).lineLimit(1).frame(width: 130, alignment: .leading)
+            Text(name).font(.callout).lineLimit(1).truncationMode(.tail)
+                .frame(width: 150, alignment: .leading)
 
             // Budget controls sit at the RIGHT, just before delete — for both tags and projects — so
             // the "Set budget" link and the populated controls occupy the same place.
@@ -253,18 +254,18 @@ struct TargetsSheet: View {
                     }
                 }
                 .labelsHidden()
-                .frame(width: 90)
+                .frame(width: 84)
 
                 // Retire rather than delete: the allocation leaves the live list but keeps its
                 // history, which is the whole reason for the state.
-                Button {
+                // Spelled out, not a tick. A bare checkmark next to a value reads as "confirm
+                // this number", which is not what it does — it retires the allocation.
+                Button("Done") {
                     try? store.setTargetCompleted(id: existing.id, completed: true)
                     reload()
-                } label: {
-                    Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold))
                 }
-                .buttonStyle(.borderless)
-                .help("Done with this — keeps it in history")
+                .buttonStyle(.link).font(.system(size: 11))
+                .help("Finished with this — moves it to past allocations")
 
                 Button {
                     try? store.deleteTarget(id: existing.id)

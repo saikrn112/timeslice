@@ -80,7 +80,7 @@ public struct SyncEngine {
         let feedbackRecords = try store.feedbackForExport().map {
             SyncPayload.FeedbackRecord(uid: $0.uid, text: $0.text, deviceID: $0.deviceID,
                                        createdAt: $0.createdAt, resolvedAt: $0.resolvedAt,
-                                       updatedAt: $0.updatedAt)
+                                       updatedAt: $0.updatedAt, platform: $0.platform)
         }
 
         let tombs = try store.tombstoneRecords()
@@ -273,7 +273,8 @@ public struct SyncEngine {
         for f in (remote.feedback ?? []) where !deleted.contains(f.uid) {
             if try store.applyRemoteFeedback(uid: f.uid, text: f.text, deviceID: f.deviceID,
                                              createdAt: f.createdAt, resolvedAt: f.resolvedAt,
-                                             remoteUpdatedAt: f.updatedAt) {
+                                             remoteUpdatedAt: f.updatedAt,
+                                             platform: f.platform) {
                 report.feedbackApplied += 1
             }
         }

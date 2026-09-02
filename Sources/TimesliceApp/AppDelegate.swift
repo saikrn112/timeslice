@@ -87,6 +87,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in self?.showMainWindow() }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: .openTaskPalette)
+            .sink { [weak self] _ in self?.showTaskPalette() }
+            .store(in: &cancellables)
+
         if DemoData.isRequested {
             // Start a live timer so the running/paused UI shows, and open the window for capture.
             if let first = appState.projects.first { engine.switchTo(projectID: first.id) }
@@ -126,15 +130,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// actually cycled to a different task before releasing.
     private var switcherStartID: Int64?
 
-    /// When privacy hides the task name (icon-only), suppress the switcher HUD + its shortcuts
-    /// entirely, so nothing task-revealing pops up while you're sharing your screen.
-    private var switcherSuppressed: Bool { privacy.level == .iconOnly }
+    /// Privacy mode no longer blocks the switcher or the palette.
+    ///
+    /// It used to, so nothing task-revealing could appear while sharing a screen. That was redundant:
+    /// both panels set `sharingType = .none`, so they are already blank in any capture, including
+    /// full-screen. The guard bought no privacy and cost the ability to switch or add a task at all
+    /// while privacy was on — which is exactly when you're in a meeting and most likely to switch.
+    ///
+    /// What privacy still does: redact the menu-bar label and blank the windows in a capture.
+
+    /// Opens the task palette — fuzzy search, resume, create with a `/project` token.
+    ///
+    /// One implementation, two triggers: the global hotkey and the window's + button. The window used
+    /// to have its own text field that could only create a plain task, so the two disagreed about
+    /// what "add a task" means.
+    func showTaskPalette() {
+        // The palette stands alone — it shows matches, statuses and today's times, so there's no
+        // reason to drag the whole window forward just to add or resume a task.
+        quickAdd.show(
+
+                search: { [weak self] q in self?.appState.searchTasks(q) ?? [] },
+                todaySeconds: { [weak self] id in self?.appState.todaySeconds(for: id) ?? 0 },
+                onResume: { [weak self] id in
+                    self?.appState.resumeAndStart(projectID: id)
+                    self?.showHUDForRunning()
+                },
+                onCreate: { [weak self] name, group in
+                    self?.appState.addAndStart(name: name, groupName: group)
+                    self?.showHUDForRunning()
+                },
+                groups: { [weak self] in self?.appState.taskProjects ?? [] },
+                displayColor: { [weak self] id in self?.appState.displayColorHex(forTaskID: id) ?? "#8E8E93" },
+                groupName: { [weak self] id in self?.appState.shortGroupName(forTaskID: id) }
+        )
+    }
 
     private func setupHotkeys() {
         hotkeys = GlobalHotkeyManager()
 
         hotkeys.onActivate = { [weak self] in
-            guard let self, !self.switcherSuppressed else { return }
+            guard let self else { return }
             // Recency order, frozen for this hold: the task you were previously on is one press
             // away instead of wherever it sits in the list.
             let selectable = self.appState.beginSwitcherSession()
@@ -152,7 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         hotkeys.onCycle = { [weak self] delta in
-            guard let self, !self.switcherSuppressed else { return }
+            guard let self else { return }
             self.appState.moveSelection(by: delta)   // \ forward (+1), ] reverse (-1)
             self.hud.showSwitcher(tasks: self.appState.switcherProjects, selectedID: self.appState.selectedProjectID, todaySeconds: self.appState.todaySecondsByID, runningID: self.engine.runningProjectID, clock: self.engine.clock,
                                  displayColor: { [weak self] id in self?.appState.displayColorHex(forTaskID: id) ?? "#8E8E93" },
@@ -160,7 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         hotkeys.onCommit = { [weak self] in
-            guard let self, !self.switcherSuppressed else { return }
+            guard let self else { return }
             guard let selected = self.appState.selectedProjectID else { return }
             // Quick press+release on the already-running task → pause it (stays the current
             // task, so the menu bar keeps showing it). Otherwise switch to the selected task.
@@ -176,26 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         hotkeys.onPrivacy = { [weak self] in self?.privacy.cycleLevel() }
 
-        hotkeys.onQuickAdd = { [weak self] in
-            guard let self, !self.switcherSuppressed else { return }   // don't reveal input while sharing
-            // The palette stands alone — it shows matches, statuses and today's times, so
-            // there's no reason to drag the whole window forward just to add or resume a task.
-            self.quickAdd.show(
-                search: { [weak self] q in self?.appState.searchTasks(q) ?? [] },
-                todaySeconds: { [weak self] id in self?.appState.todaySeconds(for: id) ?? 0 },
-                onResume: { [weak self] id in
-                    self?.appState.resumeAndStart(projectID: id)
-                    self?.showHUDForRunning()
-                },
-                onCreate: { [weak self] name, group in
-                    self?.appState.addAndStart(name: name, groupName: group)
-                    self?.showHUDForRunning()
-                },
-                groups: { [weak self] in self?.appState.taskProjects ?? [] },
-                displayColor: { [weak self] id in self?.appState.displayColorHex(forTaskID: id) ?? "#8E8E93" },
-                groupName: { [weak self] id in self?.appState.shortGroupName(forTaskID: id) }
-            )
-        }
+        hotkeys.onQuickAdd = { [weak self] in self?.showTaskPalette() }
 
         // Requires Accessibility permission. If not yet granted, guide the user, then poll.
         // Only a screenshot run skips this — the modal would sit on top of the window being

@@ -1568,6 +1568,95 @@ func testDeviceLanes() {
         check(Aggregations.orderedDevices(later) == ["personal", "work"],
               "and is a fixed, predictable sequence rather than arrival-dependent")
     }
+
+    do { // note 21: the timeline and the device list must agree, so both take one explicit order
+        let order = DeviceOrder.sorted([(id: "uuid-zzz", label: "Air"),
+                                        (id: "uuid-aaa", label: "Studio")])
+        check(order == ["uuid-zzz", "uuid-aaa"],
+              "devices order by the label you see, not by the uuid you don't")
+
+        let segs = Aggregations.daySegments(
+            intervals: [iv(1, 9, 10, "uuid-aaa"), iv(2, 11, 12, "uuid-zzz")],
+            day: day, calendar: cal, deviceOrder: order)
+        check(Aggregations.orderedDevices(segs, deviceOrder: order) == ["uuid-zzz", "uuid-aaa"],
+              "lanes follow that same order rather than sorting the ids for themselves")
+        check(segs.first { $0.deviceID == "uuid-zzz" }?.lane == 0,
+              "so Air is the top lane here, exactly as it's the top row of the device list")
+
+        // A device with nothing today drops out without shifting the ones that remain.
+        let thin = Aggregations.daySegments(intervals: [iv(1, 9, 10, "uuid-aaa")],
+                                            day: day, calendar: cal, deviceOrder: order)
+        check(Aggregations.orderedDevices(thin, deviceOrder: order) == ["uuid-aaa"],
+              "an idle device contributes no lane rather than an empty one")
+
+        // Unlabelled devices still land somewhere predictable, after everything ranked.
+        let withStray = Aggregations.daySegments(
+            intervals: [iv(1, 9, 10, "uuid-aaa"), iv(2, 11, 12, "stray")],
+            day: day, calendar: cal, deviceOrder: order)
+        check(Aggregations.orderedDevices(withStray, deviceOrder: order) == ["uuid-aaa", "stray"],
+              "a device the caller didn't rank sorts after the ones it did")
+
+        check(DeviceOrder.key(id: "b", label: "  ") == ("b", "b"),
+              "a blank label is no label, not a name that sorts before every real one")
+        check(DeviceOrder.sorted([(id: "b", label: "Mac"), (id: "a", label: "Mac")]) == ["a", "b"],
+              "two devices sharing a name can't swap places — the id breaks the tie")
+    }
+}
+
+// MARK: - Feedback platform tag
+
+func testFeedbackPlatform() {
+    print("Feedback platform tag:")
+    do {
+        let (store, url) = try! makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let mac = try! store.addFeedback("grip doesn't drag", platform: .macOS)!
+        let untagged = try! store.addFeedback("no idea whose problem this is")!
+
+        var notes = try! store.listFeedback()
+        check(notes.first { $0.id == mac }?.platform == .macOS, "the tag is stored with the note")
+        check(notes.first { $0.id == untagged }?.platform == nil,
+              "and stays absent rather than being guessed from the device that wrote it")
+
+        // Retagging is its own call: the pill is clicked with no text edit to commit.
+        try! store.setFeedbackPlatform(id: mac, .both)
+        notes = try! store.listFeedback()
+        check(notes.first { $0.id == mac }?.platform == .both, "retagging a note sticks")
+        try! store.setFeedbackPlatform(id: mac, nil)
+        check(try! store.listFeedback().first { $0.id == mac }?.platform == nil,
+              "clicking the selected pill again clears the tag")
+        try! store.setFeedbackPlatform(id: mac, .iOS)
+
+        // The tag has to travel, or tagging on the phone is invisible on the Mac.
+        let exported = try! store.feedbackForExport()
+        check(exported.first { $0.text == "grip doesn't drag" }?.platform == "ios",
+              "the tag is exported for sync")
+
+        do {
+            let (peer, purl) = try! makeStore()
+            defer { try? FileManager.default.removeItem(at: purl) }
+            for row in exported {
+                _ = try! peer.applyRemoteFeedback(uid: row.uid, text: row.text,
+                                                  deviceID: row.deviceID,
+                                                  createdAt: row.createdAt,
+                                                  resolvedAt: row.resolvedAt,
+                                                  remoteUpdatedAt: row.updatedAt,
+                                                  platform: row.platform)
+            }
+            let arrived = try! peer.listFeedback()
+            check(arrived.first { $0.text == "grip doesn't drag" }?.platform == .iOS,
+                  "and arrives on the peer, not just the text")
+
+            // A later retag on one device wins on the other, like any other edit.
+            let id = arrived.first { $0.text == "grip doesn't drag" }!.id
+            let uid = exported.first { $0.text == "grip doesn't drag" }!.uid
+            _ = try! peer.applyRemoteFeedback(uid: uid, text: "grip doesn't drag",
+                                              deviceID: nil, createdAt: 0, resolvedAt: nil,
+                                              remoteUpdatedAt: Date().timeIntervalSince1970 + 60,
+                                              platform: "both")
+            check(try! peer.listFeedback().first { $0.id == id }?.platform == .both,
+                  "a newer retag from a peer replaces the older tag")
+        }
+    }
 }
 
 // MARK: - Paused presence
@@ -3458,6 +3547,54 @@ func testFeedback() throws {
     }
 }
 
+// MARK: - macOS feedback fixes
+
+func testAllocationOrdering() throws {
+    print("Allocation ordering:")
+    let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+    let a = try store.upsertTaskProject(name: "aaa", colorHex: "#fff")
+    let b = try store.upsertTaskProject(name: "bbb", colorHex: "#fff")
+    let c = try store.upsertTaskProject(name: "ccc", colorHex: "#fff")
+    for g in [a, b, c] {
+        try store.setTarget(subject: .project(g), seconds: 3600, direction: .atLeast, period: .week)
+    }
+    func order() throws -> [Int64] { try store.listTargets().map { $0.subject.id } }
+    check(try order() == [a, b, c], "new allocations land at the end, in creation order")
+
+    try store.moveTarget(id: try store.listTargets()[2].id, up: true)
+    check(try order() == [a, c, b], "moving one up swaps it with its neighbour")
+    try store.moveTarget(id: try store.listTargets()[0].id, up: true)
+    check(try order() == [a, c, b], "moving the first one up is a no-op, not a crash")
+    try store.moveTarget(id: try store.listTargets()[2].id, up: false)
+    check(try order() == [a, c, b], "and so is moving the last one down")
+
+    // Drag-and-drop moves a row to an arbitrary position, which a neighbour swap can't express.
+    let ids = try store.listTargets().map(\.id)
+    try store.reorderTargets([ids[2], ids[0], ids[1]])
+    check(try order() == [b, a, c], "an explicit order is persisted as given")
+    try store.reorderTargets(try store.listTargets().map(\.id).reversed())
+    check(try order() == [c, a, b], "and reversing it works too")
+}
+
+func testDuplicateNameIsProjectScoped() throws {
+    print("Project-scoped names:")
+    let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+    let jobs = try store.upsertTaskProject(name: "job chores", colorHex: "#fff")
+    let prof = try store.upsertTaskProject(name: "profiling", colorHex: "#fff")
+
+    let first = try store.createProject(name: "meetings", colorHex: "#fff", inGroup: jobs)
+    // The reported bug: a `meetings` under one project must not block one under another.
+    let second = try store.createProject(name: "meetings", colorHex: "#fff", inGroup: prof)
+    check(first != second, "the same name under a different project is a different task")
+    let both = try store.listProjects(includeArchived: true).filter { $0.name == "meetings" }
+    check(both.count == 2, "both exist")
+    check(both.compactMap(\.taskProjectID).sorted() == [jobs, prof].sorted(),
+          "and each is filed in the project it was created for")
+    // And within one project it still reuses rather than forking.
+    let again = try store.createProject(name: "meetings", colorHex: "#fff", inGroup: prof)
+    check(again == second, "but the same name in the SAME project still reuses")
+}
+
 // MARK: - Run
 
 do {
@@ -3477,6 +3614,7 @@ do {
     testNudgePolicy()
     try testDeviceAttribution()
     testDeviceLanes()
+    testFeedbackPlatform()
     testPausedPresence()
     try testTaskNameReuse()
     try testDeleteInterval()
@@ -3502,6 +3640,8 @@ do {
     try testCrossDeviceTakeover()
     try testRollOpenInterval()
     try testFeedback()
+    try testAllocationOrdering()
+    try testDuplicateNameIsProjectScoped()
     testTagTotals()
     testTargetMath()
 } catch {

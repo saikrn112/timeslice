@@ -144,11 +144,15 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         public var createdAt: TimeInterval
         public var resolvedAt: TimeInterval?
         public var updatedAt: TimeInterval
+        /// "macos" | "ios" | "both", or absent. A raw string rather than the enum so a value from
+        /// a newer peer decodes instead of failing the whole payload.
+        public var platform: String?
 
         public init(uid: String, text: String, deviceID: String?, createdAt: TimeInterval,
-                    resolvedAt: TimeInterval?, updatedAt: TimeInterval) {
+                    resolvedAt: TimeInterval?, updatedAt: TimeInterval, platform: String? = nil) {
             self.uid = uid; self.text = text; self.deviceID = deviceID
             self.createdAt = createdAt; self.resolvedAt = resolvedAt; self.updatedAt = updatedAt
+            self.platform = platform
         }
     }
 

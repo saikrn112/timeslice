@@ -48,6 +48,7 @@ struct MainWindowView: View {
 
             Spacer()
 
+            notesButton
             settingsButton
             privacyIndicator
         }
@@ -89,6 +90,36 @@ struct MainWindowView: View {
     }
 
     @State private var showSettings = false
+    @State private var showNotes = false
+    @State private var openNoteCount = 0
+
+    /// Notes live up here rather than inside Settings: they're written whenever something is
+    /// noticed, which is while using the app, and a thing you reach for often shouldn't be two
+    /// clicks deep in a panel of preferences.
+    private var notesButton: some View {
+        Button { showNotes.toggle() } label: {
+            // Outline and secondary, like the gear and the eye beside it. A filled accent bubble
+            // read as a live alert rather than as a third utility button — the open count belongs
+            // in the tooltip, not in the chrome.
+            Image(systemName: "bubble.left")
+                .font(.system(size: 12))
+                .foregroundStyle(Color.secondary)
+        }
+        .buttonStyle(.borderless)
+        .help(openNoteCount > 0 ? "Feedback — \(openNoteCount) open" : "Feedback")
+        .onAppear { refreshNoteCount() }
+        .sheet(isPresented: $showNotes) {
+            FeedbackSheet(store: appState.storeForEditing) {
+                showNotes = false
+                refreshNoteCount()
+            }
+        }
+    }
+
+    private func refreshNoteCount() {
+        openNoteCount =
+            ((try? appState.storeForEditing.listFeedback(includeResolved: false)) ?? []).count
+    }
 
     private var settingsButton: some View {
         Button { showSettings.toggle() } label: {
@@ -120,8 +151,9 @@ struct MainWindowView: View {
             return "Privacy off — the menu bar shows your task name and these windows appear "
                  + "in a screen share. Click to hide everything (Fn + ⌘ + ⇧ + P)."
         case .iconOnly:
-            return "Privacy on — task name hidden, windows blank out in a screen share, and the "
-                 + "switcher is disabled. Click to reveal again (Fn + ⌘ + ⇧ + P)."
+            return "Privacy on — task name hidden and windows blank out in a screen share. The "
+                 + "switcher and palette still work; they're excluded from capture too. "
+                 + "Click to reveal again (Fn + ⌘ + ⇧ + P)."
         }
     }
 }
