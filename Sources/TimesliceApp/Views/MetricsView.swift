@@ -1167,48 +1167,37 @@ struct MetricsView: View {
                         .foregroundStyle(base.opacity(0.32))
                         .opacity(dim)
                         .cornerRadius(2)
-                        // …with the focused portion overlaid solid inside it, FULL width so it reads
-                        // as part of the same bar. Deep time is a subset of total by definition, so
-                        // it nests cleanly — but only with `.unstacked`: two BarMarks at the same x
-                        // stack by default, which drew each bar at total + focused (a 7.1h day at
-                        // 100% focus read as 14.2h).
-                        BarMark(
-                            x: .value(bucketUnitWord.capitalized, b.start, unit: bucketComponent),
-                            y: .value("Focused", b.deepSeconds / 3600),
-                            width: barWidth,
-                            stacking: .unstacked
-                        )
-                        .foregroundStyle(base)
-                        .opacity(dim)
-                        .cornerRadius(2)
-                        // Three measures, not two: total, focused, and how much of the total was the
-                        // pinned selection. The third can't be another filled bar — it isn't a subset
-                        // of the focused time (or a superset), so nesting one inside the other would
-                        // state a relationship that doesn't hold. It's drawn as a translucent red
-                        // wash up to its height with a solid cap: the wash shows the AMOUNT, the cap
-                        // marks the line, and the blue underneath stays visible through both.
+                        // …then the focused portion and the pinned selection, both FULL width and
+                        // both solid. Three nested bars, all opaque, no washes.
+                        //
+                        // Drawn SHORTER LAST. Same-width solid bars occlude whatever sits behind
+                        // them, so with a fixed order one of the two inner measures could vanish
+                        // entirely — a 3h selection inside 5h of focus, or the reverse. Putting the
+                        // shorter one in front means both are always visible: the taller one shows
+                        // above the shorter, and the shorter reads as the bar's base.
+                        //
+                        // All of this needs `.unstacked`. BarMarks at the same x stack by default,
+                        // which drew each bar at total + focused (a 7.1h day at 100% focus read as
+                        // 14.2h).
                         let selected = selectedByBucket[b.start] ?? 0
-                        if selected > 0 {
+                        // Paired with their colours and sorted tallest-first, so the layer order is
+                        // stated once instead of being reconstructed from a comparison downstream.
+                        let layers = [(seconds: b.deepSeconds, label: "Focused", color: base),
+                                      (seconds: selected, label: "Selected",
+                                       color: Self.selectionOverlay)]
+                            .filter { $0.seconds > 0 }
+                            .sorted { $0.seconds > $1.seconds }
+                        ForEach(Array(layers.enumerated()), id: \.offset) { _, layer in
                             BarMark(
-                                x: .value(bucketUnitWord.capitalized, b.start, unit: bucketComponent),
-                                y: .value("Selected", selected / 3600),
+                                x: .value(bucketUnitWord.capitalized, b.start,
+                                          unit: bucketComponent),
+                                y: .value(layer.label, layer.seconds / 3600),
                                 width: barWidth,
                                 stacking: .unstacked
                             )
-                            .foregroundStyle(Self.selectionOverlay.opacity(0.42))
+                            .foregroundStyle(layer.color)
                             .opacity(dim)
                             .cornerRadius(2)
-                            // The cap: without it a wash over a dark bar is easy to miss entirely.
-                            // A thin RectangleMark, not a RuleMark — a rule spans the whole plot,
-                            // and this has to sit on one bucket's bar.
-                            RectangleMark(
-                                x: .value(bucketUnitWord.capitalized, b.start, unit: bucketComponent),
-                                y: .value("Selected", selected / 3600),
-                                width: barWidth,
-                                height: .fixed(2)
-                            )
-                            .foregroundStyle(Self.selectionOverlay)
-                            .opacity(dim)
                         }
                     }
                 }
