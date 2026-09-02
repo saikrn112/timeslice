@@ -242,41 +242,75 @@ final class TimerModel: ObservableObject {
 
     /// Start `task`, or pause it when it's already the running one — the same gesture the Mac
     /// binds to space, and what the Action Button triggers.
+    /// Toggle a task, updating the Live Activity BEFORE anything expensive.
+    ///
+    /// Pause/play on the Lock Screen took about a second. The cause was ordering, not the intent
+    /// machinery: `reload()` ran first, and it loads EVERY interval ever recorded and aggregates it twice
+    /// (today totals and all-time totals over the full history). Only after all that did the activity
+    /// update — so the visible state change waited on months of rows.
+    ///
+    /// The write itself is one statement. So: write, refresh the island, then do the bookkeeping. The
+    /// committed figure for the island comes from a today-bounded query rather than the full reload, which
+    /// is the only number the activity actually needs.
+    ///
+    /// Nothing is lost by deferring `reload()` — it repaints the in-app list, which you aren't looking at
+    /// when you press a button on your Lock Screen.
     func toggle(taskID: Int64) {
         guard let store else { return }
         let wasRunning = running != nil
+        let isPausing = running?.projectID == taskID
         do {
-            if running?.projectID == taskID {
+            if isPausing {
                 try store.stopOpenInterval()
                 currentTaskID = taskID          // stays current, mirroring the Mac's paused state
                 pausedSince = Date()
-                reload()
+                // Island first, from a cheap read. `task(id:)` uses the in-memory list, which is already
+                // correct — pausing changes no task, only an interval.
                 if let task = task(id: taskID) {
-                    syncActivity(startedAt: Date(), isRunning: false, task: task)
+                    syncActivity(startedAt: Date(), isRunning: false, task: task,
+                                 committedOverride: committedTodayNow(for: taskID))
                 }
                 Haptics.paused()
-                rearmNudges()
-                SyncController.shared.publishSoon()
             } else {
                 try store.switchTo(projectID: taskID)
                 currentTaskID = taskID
                 pausedSince = nil
-                reload()
-                if let running {
-                    syncActivity(startedAt: running.start, isRunning: true)
+                // `running` isn't refreshed yet, so read the open interval directly — one indexed row.
+                if let open = try? store.openInterval(), let task = task(id: taskID) {
+                    running = open
+                    syncActivity(startedAt: open.start, isRunning: true, task: task,
+                                 committedOverride: committedTodayNow(for: taskID))
                 }
-                // Switching between tasks feels different from starting from idle.
                 if wasRunning { Haptics.switched() } else { Haptics.started() }
-                rearmNudges()
-                SyncController.shared.publishSoon()
             }
+            // Everything below is bookkeeping the pressed button doesn't wait on.
+            reload()
+            rearmNudges()
+            SyncController.shared.publishSoon()
         } catch {
             loadError = "\(error)"
         }
     }
 
-    /// What the Action Button runs: resume/pause whatever is current, or fall back to the most
-    /// recently used task so a single press always does something useful.
+    /// Stop tracking entirely: no current task, so the island ends rather than showing a paused one.
+    ///
+    /// End the activity FIRST, for the same reason `toggle` updates it first — the visible change shouldn't
+    /// queue behind a full reload.
+    func stop() {
+        guard let store else { return }
+        try? store.stopOpenInterval()
+        currentTaskID = nil
+        pausedSince = nil
+        LiveActivityController.end()
+        reload()
+        // Stopping is not pausing: nothing is outstanding, so both nudges are cancelled outright.
+        NudgeScheduler.shared.cancelAll()
+        // Clears our running marker on the other devices, so nothing keeps thinking we hold the timer.
+        SyncController.shared.publishSoon()
+    }
+
+    /// Pause the running task, or resume the current one. What the Action Button and the Live Activity's
+    /// pause button call.
     func toggleCurrent() {
         if let id = currentTaskID ?? running?.projectID {
             toggle(taskID: id)
@@ -285,21 +319,8 @@ final class TimerModel: ObservableObject {
         if let pick = recencyOrdered.first { toggle(taskID: pick.id) }
     }
 
-    func stop() {
-        guard let store else { return }
-        try? store.stopOpenInterval()
-        currentTaskID = nil
-        pausedSince = nil
-        reload()
-        LiveActivityController.end()
-        // Stopping is not pausing: nothing is outstanding, so both nudges are cancelled outright.
-        NudgeScheduler.shared.cancelAll()
-        // Clears our running marker on the other devices, so nothing keeps thinking we hold the timer.
-        SyncController.shared.publishSoon()
-    }
-
-    /// Switch to the task worked before this one — index 1 of the shared recency order, since index 0
-    /// is the current task. Drives the Live Activity's "previous" button.
+    /// Switch to the task worked before this one — index 1 of the shared recency order, exactly where one
+    /// press of the Mac's `\` key lands. Index 0 is the current task, which is pinned.
     func switchToPrevious() {
         if let previous = recencyOrdered.dropFirst().first { toggle(taskID: previous.id) }
     }
@@ -445,7 +466,25 @@ final class TimerModel: ObservableObject {
                                        committedToday: committedTodaySeconds[taskID] ?? 0)
     }
 
-    private func syncActivity(startedAt: Date, isRunning: Bool, task explicit: Project? = nil) {
+    /// One task's committed seconds today, read with a DATE-BOUNDED query.
+    ///
+    /// `reload()` gets this from `store.intervals()` — every interval ever recorded — then aggregates it
+    /// twice. That's fine once per data change, and far too much to sit in front of a button press.
+    /// Bounded to today, it's a few rows.
+    ///
+    /// Still `Aggregations.todayTotals`, not arithmetic here: the day boundary is DST-sensitive and that
+    /// logic exists once, in Core.
+    private func committedTodayNow(for taskID: Int64) -> TimeInterval {
+        guard let store else { return committedTodaySeconds[taskID] ?? 0 }
+        let now = Date()
+        let dayStart = Calendar.current.startOfDay(for: now)
+        let todays = ((try? store.intervals(from: dayStart)) ?? []).filter { !$0.isRunning }
+        return Aggregations.todayTotals(projects: allTasks, intervals: todays, now: now)
+            .first { $0.project.id == taskID }?.seconds ?? 0
+    }
+
+    private func syncActivity(startedAt: Date, isRunning: Bool, task explicit: Project? = nil,
+                              committedOverride: TimeInterval? = nil) {
         guard let id = currentTaskID, let task = explicit ?? self.task(id: id) else { return }
         // Passed straight through now that the base excludes the open interval. An earlier version
         // subtracted a freshly-computed `live` from a total that already contained an older one —
@@ -455,7 +494,7 @@ final class TimerModel: ObservableObject {
             state: .init(taskName: task.name,
                          colorHex: colorHex(for: task),
                          startedAt: startedAt,
-                         committedTodaySeconds: committedTodaySeconds[id] ?? 0,
+                         committedTodaySeconds: committedOverride ?? committedTodaySeconds[id] ?? 0,
                          isRunning: isRunning,
                          recents: switcherRecents(excluding: id)))
     }
