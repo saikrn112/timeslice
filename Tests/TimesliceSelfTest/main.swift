@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import TimesliceCore
 import TimesliceUI
 import SwiftUI
@@ -1745,6 +1746,42 @@ func testFeedbackAttachments() {
         check(try! store.tombstoneRecords().contains { $0.uid == shot.uid
                                                     && $0.kind == "feedback_attachment" },
               "each image is tombstoned, or a peer would sync it straight back")
+    }
+}
+
+// MARK: - Image downscaling
+
+func testImageBytes() {
+    print("Image bytes:")
+    let target = ImageBytes.targetSize(width: 3024, height: 1964, maxDimension: 1600)
+    check(target.width == 1600, "the longest edge lands exactly on the cap")
+    check(target.height == 1039, "and the other edge keeps the aspect ratio")
+
+    let small = ImageBytes.targetSize(width: 800, height: 600, maxDimension: 1600)
+    check(small == (800, 600), "an image already under the cap is left alone, not upscaled")
+
+    let tall = ImageBytes.targetSize(width: 900, height: 3200, maxDimension: 1600)
+    check(tall.height == 1600 && tall.width == 450, "height counts as the longest edge too")
+
+    let sliver = ImageBytes.targetSize(width: 4000, height: 1, maxDimension: 1600)
+    check(sliver.height == 1,
+          "a one-pixel edge survives rounding — zero height would fail to encode at all")
+
+    // And it produces real PNG bytes, downscaled, from a real image.
+    let context = CGContext(data: nil, width: 3200, height: 1600, bitsPerComponent: 8,
+                            bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    context.setFillColor(red: 1, green: 0, blue: 0, alpha: 1)
+    context.fill(CGRect(x: 0, y: 0, width: 3200, height: 1600))
+    let png = ImageBytes.png(from: context.makeImage()!)
+    check(png != nil, "encoding produces bytes")
+    check(png?.prefix(4).elementsEqual([0x89, 0x50, 0x4E, 0x47]) == true,
+          "and they're a PNG, since that's what the attachment filename claims")
+    if let png, let decoded = CGImageSourceCreateWithData(png as CFData, nil)
+        .flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }) {
+        check(decoded.width == 1600, "the stored image really is the smaller one")
+    } else {
+        check(false, "the encoded PNG decodes again")
     }
 }
 
@@ -3705,6 +3742,7 @@ do {
     testDeviceLanes()
     testFeedbackPlatform()
     testFeedbackAttachments()
+    testImageBytes()
     testPausedPresence()
     try testTaskNameReuse()
     try testDeleteInterval()

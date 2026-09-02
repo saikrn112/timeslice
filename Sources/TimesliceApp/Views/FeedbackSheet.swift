@@ -318,7 +318,7 @@ struct FeedbackSheet: View {
                         .foregroundStyle(note.isOpen ? Color.primary : Color.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
-                        // Double-click to reword, the same gesture task and project rows use.
+                        // Double-click still works, but it isn't the affordance — see the pencil.
                         .onTapGesture(count: 2) { beginEdit(note) }
                 }
                 // When and where it was written — usually the context that makes a terse note
@@ -369,6 +369,18 @@ struct FeedbackSheet: View {
             }
 
             Spacer(minLength: 4)
+
+            // A visible button, not just a double-click. Double-click was the only way in and it
+            // competes with text selection inside the same label — two clicks that land a few pixels
+            // apart, or a shade too slow, select a word instead, which reads as the app ignoring you.
+            Button {
+                if editingID == note.id { commitEdit(note) } else { beginEdit(note) }
+            } label: {
+                Image(systemName: editingID == note.id ? "checkmark" : "pencil")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .buttonStyle(.borderless)
+            .help(editingID == note.id ? "Save" : "Edit this note")
 
             Button {
                 try? store.deleteFeedback(id: note.id)
