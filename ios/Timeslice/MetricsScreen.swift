@@ -967,28 +967,45 @@ struct MetricsScreen: View {
     /// Anchored at the PRESENT period rather than at the selection, so the strip doesn't slide out from
     /// under you when you tap; the window then extends backwards far enough to keep an older selection
     /// visible, capped so browsing a year back doesn't build hundreds of cards.
+    /// How many periods the strip offers, independent of what's selected.
+    ///
+    /// The window used to stop as soon as it reached the SELECTION (with a floor of 14). Past a fortnight
+    /// that made the selected card the oldest one on the strip every time — so there was never anything to
+    /// its left, and swiping back could only ever advance one card at a time even though months of data
+    /// existed. A fixed depth means you can scroll freely.
+    private static let stripDepth = 60
+
     private func buildStrip(intervals: [Interval], deep: TimeInterval, now: Date) -> [PeriodCard] {
         guard range.unit != .all else { return [] }
         let present = DateRange.resolve(unit: range.unit, anchor: now, earliest: earliest)
 
         var windows: [DateRange] = []
         var cursor = present
-        // 14 covers a fortnight of days or a year of months on screen; the cap bounds the walk back to
-        // an old selection.
-        for step in 0..<60 {
+        // Walk a FIXED depth back, extending only if the selection is older than that — so an old
+        // selection is still reachable without making the depth depend on it in the normal case.
+        let depth = Self.stripDepth
+        for step in 0..<(depth * 2) {
             windows.append(cursor)
             let reachedSelection = cursor.start <= range.start
-            if step >= 13 && reachedSelection { break }
-            if let earliest, cursor.start <= earliest, step >= 13 { break }
+            if step >= depth - 1 && reachedSelection { break }
+            // Stop at the first period that starts before the earliest recorded interval: cards older
+            // than the data are guaranteed empty, and they'd push real ones off the scroll.
+            if let earliest, cursor.start <= earliest { break }
             let next = cursor.stepped(by: -1, earliest: earliest)
             // `stepped` clamps rather than throwing, so an unmoving cursor is the end of the road.
             guard next.start < cursor.start else { break }
             cursor = next
         }
 
+        // Narrow the interval list to the span the strip covers, ONCE, before summarising each period.
+        // `Aggregations.summary` walks whatever it's given, and it's called per card — handing it the
+        // full history 60 times is the cost that made a deep strip unaffordable before.
+        let spanStart = windows.last?.start ?? present.start
+        let inSpan = intervals.filter { ($0.end ?? now) >= spanStart }
+
         // Oldest first: the strip reads left-to-right into the present, and scrolls to the right end.
         var cards = windows.reversed().map { window in
-            let s = Aggregations.summary(intervals: intervals, range: window,
+            let s = Aggregations.summary(intervals: inSpan, range: window,
                                          deepThreshold: deep, now: now)
             return PeriodCard(range: window, totalSeconds: s.totalSeconds,
                               deepSeconds: s.deepSeconds)
