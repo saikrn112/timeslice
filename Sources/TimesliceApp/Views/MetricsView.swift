@@ -560,6 +560,7 @@ struct MetricsView: View {
                     // whatever the name needed and run straight over the lane above and below — with
                     // three devices the three names overlapped into an unreadable stack.
                     .frame(width: laneHeight(lanes: lanes) - 6)
+                    .help(deviceName(device))
                     .rotationEffect(.degrees(-90))
                     .frame(maxHeight: .infinity)
                     .help("\(device ?? "unattributed") — \(compactDuration(deviceSeconds(device)))")
@@ -890,6 +891,9 @@ struct MetricsView: View {
             Text(row.name).font(.callout).lineLimit(1)
                 .foregroundStyle(row.tag == nil ? Color.secondary : Color.primary)
                 .frame(width: 130, alignment: .leading)
+                // Names are as long as they need to be; a clipped one with no way to read the rest
+                // is a puzzle rather than a label.
+                .help(row.name)
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.secondary.opacity(0.12))
@@ -1324,6 +1328,7 @@ struct MetricsView: View {
                     .foregroundStyle(.tertiary)
             }
             .frame(width: 130, alignment: .leading)
+            .help(row.name)
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.secondary.opacity(0.12))
@@ -1351,7 +1356,9 @@ struct MetricsView: View {
         HStack(spacing: 10) {
             let hex = appState.displayColorHex(for: total.project)
             Circle().fill(Color(hex: hex)).frame(width: 9, height: 9)
-            Text(total.project.name).font(.callout).lineLimit(1).frame(width: 130, alignment: .leading)
+            Text(total.project.name).font(.callout).lineLimit(1)
+                .frame(width: 130, alignment: .leading)
+                .help(total.project.name)
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.secondary.opacity(0.12))
@@ -1576,7 +1583,12 @@ struct MetricsView: View {
     /// — a project and a tag that contains it — count that work once. Follows the range filter, so
     /// the same selection answers it for a day, a week, a month or six.
     private var selectionSubtitleText: String? {
-        guard !pinnedFocuses.isEmpty else { return nil }
+        // Never nil: a subtitle that appears from nothing adds a line to the header, which pushes
+        // the chart and everything under it down — the jump this was meant to stop. When nothing is
+        // pinned it says what clicking does, which the section needed anyway.
+        guard !pinnedFocuses.isEmpty else {
+            return "click one to see its share, or several to combine them"
+        }
         let ids = focusedTaskIDs ?? []
         let selected = rankedTotals.filter { ids.contains($0.project.id) }
             .reduce(0.0) { $0 + $1.seconds }
@@ -1743,6 +1755,9 @@ struct MetricsView: View {
             .frame(width: 10, height: 14)
             Text(row.name).font(.callout).lineLimit(1).truncationMode(.tail)
                 .frame(width: 96, alignment: .leading)
+                // 96pt doesn't hold a long tag name, and a truncated label with no way to read the
+                // rest is just a puzzle.
+                .help(row.name)
             Text("\(row.target.direction.symbol) \(row.target.period.rawValue)")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
                 .lineLimit(1)

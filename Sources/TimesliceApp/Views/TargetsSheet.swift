@@ -19,7 +19,6 @@ struct TargetsSheet: View {
     /// Every task, for the per-task allocation list. Loaded in `reload` with everything else.
     @State private var allTasks: [Project] = []
     @State private var taskQuery = ""
-    @State private var showTasks = false
     /// Task ids in most-recent-first order, captured on open.
     @State private var recencyOrder: [Int64] = []
     /// Re-read after every edit. Cheap (a handful of rows) and avoids the whole class of bugs where
@@ -204,21 +203,20 @@ struct TargetsSheet: View {
             HStack(spacing: 6) {
                 Text("TASKS").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
                 Spacer()
-                if showTasks {
-                    TextField("Find a task", text: $taskQuery)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 160)
-                }
-                Button(showTasks ? "Hide" : "Show") { showTasks.toggle() }
-                    .buttonStyle(.link).font(.system(size: 11))
+                TextField("Find a task", text: $taskQuery)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 160)
             }
             Text("For a one-off goal that doesn't deserve a project of its own.")
                 .font(.caption2).foregroundStyle(.secondary)
 
-            if showTasks {
-                // FIXED height, scrolled inside. Letting the list size to its contents made the
-                // whole sheet grow and shrink on every keystroke as the match count changed, which
-                // is unusable for typing into.
+            // Always shown, no Show/Hide toggle: one more button to reach the thing you came for,
+            // and hiding a list that's already height-capped and scrollable saves nothing.
+            //
+            // FIXED height, scrolled inside. Letting it size to its contents made the whole sheet
+            // grow and shrink on every keystroke as the match count changed, which is unusable for
+            // typing into.
+            Group {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
                         let rows = matchingTasks
@@ -236,15 +234,11 @@ struct TargetsSheet: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(height: 168)
-            } else if !taskTargets.isEmpty {
-                // Tasks that already HAVE an allocation stay visible while the section is collapsed,
-                // or setting one would feel like it hadn't been saved.
-                ForEach(taskTargets) { task in
-                    subjectRow(name: task.name,
-                               colorHex: appState.displayColorHex(for: task),
-                               subject: .task(task.id), onDelete: nil)
-                }
+                // Ten rows. Deep enough to browse without the sheet becoming mostly task list.
+                .frame(height: 230)
+                // A scrollbar that appears once the content overflows reflows the rows under it. On
+                // permanently, so the gutter is always the same width.
+                .scrollIndicators(.visible)
             }
         }
     }
@@ -339,6 +333,10 @@ struct TargetsSheet: View {
 
     /// One row: the subject, then its budget. `onDelete` is nil for projects — they're deleted from
     /// the Tasks tab, and offering it here would imply this sheet owns them.
+    /// One subject and its allocation controls.
+    ///
+    /// The name is tooltipped because it truncates: task and tag names are as long as they need to
+    /// be, and a clipped label with no way to read the rest is a puzzle rather than a label.
     private func subjectRow(name: String, colorHex: String, subject: TargetSubject,
                             onDelete: (() -> Void)?) -> some View {
         let existing = targets.first { $0.subject == subject }
@@ -346,6 +344,7 @@ struct TargetsSheet: View {
             Circle().fill(Color(hex: colorHex)).frame(width: 9, height: 9)
             Text(name).font(.callout).lineLimit(1).truncationMode(.tail)
                 .frame(width: 150, alignment: .leading)
+                .help(name)
 
             // Budget controls sit at the RIGHT, just before delete — for both tags and projects — so
             // the "Set budget" link and the populated controls occupy the same place.
@@ -397,14 +396,18 @@ struct TargetsSheet: View {
 
                 // Retire rather than delete: the allocation leaves the live list but keeps its
                 // history, which is the whole reason for the state.
-                // Spelled out, not a tick. A bare checkmark next to a value reads as "confirm
-                // this number", which is not what it does — it retires the allocation.
-                Button("Done") {
+                //
+                // Named after WHERE it goes, not after being finished. It was a tick, which read as
+                // "confirm this number"; then "Done", which read as "done editing" — the one thing
+                // a button in a sheet is most likely to mean. "Move to past" can't be either, and it
+                // names the section the allocation lands in.
+                Button("Move to past") {
                     try? store.setTargetCompleted(id: existing.id, completed: true)
                     reload()
                 }
                 .buttonStyle(.link).font(.system(size: 11))
-                .help("Finished with this — moves it to past allocations")
+                .help("Finished with this allocation — keeps it, and its history, under "
+                      + "PAST ALLOCATIONS")
 
                 Button {
                     try? store.deleteTarget(id: existing.id)
