@@ -98,4 +98,8 @@ extension Notification.Name {
     /// Asks for the task palette. Posted by the window's + button so it opens the SAME palette the
     /// hotkey does, rather than a second, weaker add form that has to be kept in step.
     static let openTaskPalette = Notification.Name("com.timeslice.openTaskPalette")
+    /// Asks for the feedback window. A notification rather than a direct call because the toolbar
+    /// button is inside a SwiftUI view, and the window is owned by the AppDelegate — the same route
+    /// the palette takes.
+    static let openFeedbackWindow = Notification.Name("com.timeslice.openFeedbackWindow")
 }

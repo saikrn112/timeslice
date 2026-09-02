@@ -87,6 +87,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in self?.showMainWindow() }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: .openFeedbackWindow)
+            .sink { [weak self] _ in self?.showFeedbackWindow() }
+            .store(in: &cancellables)
+
         NotificationCenter.default.publisher(for: .openTaskPalette)
             .sink { [weak self] _ in self?.showTaskPalette() }
             .store(in: &cancellables)
@@ -288,6 +292,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for (index, name) in starters.enumerated() {
             try store.createProject(name: name, colorHex: Palette.color(forIndex: index))
         }
+    }
+
+    /// Retained across closes so the window keeps its size, its position and any half-written note.
+    private var feedbackWindowController: FeedbackWindowController?
+
+    private func showFeedbackWindow() {
+        if feedbackWindowController == nil {
+            feedbackWindowController = FeedbackWindowController(store: appState.storeForEditing,
+                                                               privacy: privacy)
+        }
+        feedbackWindowController?.show()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func showMainWindow() {

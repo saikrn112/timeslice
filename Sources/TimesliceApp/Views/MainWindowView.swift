@@ -90,18 +90,13 @@ struct MainWindowView: View {
     }
 
     @State private var showSettings = false
-    @State private var showNotes = false
     @State private var openNoteCount = 0
-    /// Held out here so a click that dismisses the notes popover doesn't take a half-written note
-    /// with it.
-    @State private var noteDraft = ""
-    @State private var noteDraftPlatform: FeedbackPlatform? = .macOS
 
     /// Feedback lives up here rather than inside Settings: it's written whenever something is
     /// noticed, which is while using the app, and a thing you reach for often shouldn't be two
     /// clicks deep in a panel of preferences.
     private var notesButton: some View {
-        Button { showNotes.toggle() } label: {
+        Button { NotificationCenter.default.post(name: .openFeedbackWindow, object: nil) } label: {
             // Outline and secondary, like the gear and the eye beside it. A filled accent bubble
             // read as a live alert rather than as a third utility button — the open count belongs
             // in the tooltip, not in the chrome.
@@ -112,15 +107,14 @@ struct MainWindowView: View {
         .buttonStyle(.borderless)
         .help(openNoteCount > 0 ? "Feedback — \(openNoteCount) open" : "Feedback")
         .onAppear { refreshNoteCount() }
-        // A popover, not a sheet: a sheet is modal and can only be dismissed by its own button,
-        // and every other thing on this row opens a popover you can click away from.
-        .popover(isPresented: $showNotes, arrowEdge: .bottom) {
-            FeedbackSheet(store: appState.storeForEditing,
-                          draft: $noteDraft, draftPlatform: $noteDraftPlatform) {
-                showNotes = false
-                refreshNoteCount()
-            }
-            .onDisappear { refreshNoteCount() }
+        // Opens a WINDOW, not a popover or a sheet. Both close as soon as you click the thing the
+        // note is about, which is exactly when you need the list — see `FeedbackWindowController`.
+        // The count refreshes on the store's own change notification, since the window can add
+        // notes while this toolbar is untouched.
+        // A window can add notes while this toolbar is untouched, so the count follows the store's
+        // own change notification instead of a reload on open.
+        .onReceive(NotificationCenter.default.publisher(for: TimesliceNotifications.dataDidChange)) { _ in
+            refreshNoteCount()
         }
     }
 
