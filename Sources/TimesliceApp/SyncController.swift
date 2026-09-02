@@ -342,6 +342,38 @@ final class SyncController: ObservableObject {
         }
     }
 
+    /// Upload images this device holds and fetch ones it only has a manifest row for.
+    ///
+    /// Separate from the payload round-trip on purpose: an image is immutable and possibly a
+    /// megabyte, so it's transferred once and then never looked at again, while the payload is
+    /// rewritten every time anything changes.
+    private func transferAttachments(engineSync: SyncEngine) async -> Int {
+        guard let transport else { return 0 }
+        let store = await MainActor.run { self.appState.storeForEditing }
+
+        for pending in (try? await MainActor.run { try store.attachmentsNeedingUpload() }) ?? [] {
+            guard let data = try? Data(contentsOf: store.fileURL(forAttachment: pending.uid))
+            else { continue }
+            do {
+                try transport.putBlob(name: pending.blobName, data: data)
+                try? await MainActor.run { try store.markAttachmentUploaded(uid: pending.uid) }
+            } catch {
+                // Left unmarked, so the next sync tries again.
+                continue
+            }
+        }
+
+        var fetched = 0
+        for missing in (try? await MainActor.run { try store.attachmentsMissingBytes() }) ?? [] {
+            guard let data = try? transport.fetchBlob(name: missing.blobName), !data.isEmpty
+            else { continue }          // not uploaded yet — the row legitimately outruns the bytes
+            if (try? await MainActor.run {
+                try store.storeAttachmentBytes(uid: missing.uid, png: data)
+            }) != nil { fetched += 1 }
+        }
+        return fetched
+    }
+
     @objc func syncNow() {
         guard let transport else { return }
         // ALWAYS off the main thread. Drive calls block on the network, and blocking the main
@@ -442,6 +474,13 @@ final class SyncController: ObservableObject {
             } else {
                 try transport.putRunning(nil, deviceID: deviceID)
             }
+
+            // Images move as their own blobs, AFTER the manifest is published, so a peer never
+            // learns about a picture before the bytes it names are fetchable. Failures here are
+            // logged and dropped: a screenshot that didn't make it is worth retrying next sync, not
+            // worth failing the whole sync over.
+            let moved = await transferAttachments(engineSync: engineSync)
+            combined.attachmentsApplied += moved
 
             let report = combined      // ditto: snapshot before crossing the actor boundary
             let peersSeen = discovered

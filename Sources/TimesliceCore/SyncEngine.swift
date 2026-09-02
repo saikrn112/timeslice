@@ -83,11 +83,17 @@ public struct SyncEngine {
                                        updatedAt: $0.updatedAt, platform: $0.platform)
         }
 
+        let attachmentRecords = try store.attachmentsForExport().map {
+            SyncPayload.AttachmentRecord(uid: $0.uid, feedbackUID: $0.feedbackUID,
+                                         filename: $0.filename, byteSize: $0.byteSize,
+                                         createdAt: $0.createdAt, updatedAt: $0.updatedAt)
+        }
+
         let tombs = try store.tombstoneRecords()
         return SyncPayload(deviceID: deviceID, deviceLabel: deviceLabel,
                            writtenAt: now.timeIntervalSince1970,
                            tags: tagRecords, tagLinks: linkRecords, targets: targetRecords,
-                           feedback: feedbackRecords,
+                           feedback: feedbackRecords, attachments: attachmentRecords,
                            tasks: taskRecords, projects: projectRecords,
                            intervals: intervalRecords, tombstones: tombs)
     }
@@ -276,6 +282,16 @@ public struct SyncEngine {
                                              remoteUpdatedAt: f.updatedAt,
                                              platform: f.platform) {
                 report.feedbackApplied += 1
+            }
+        }
+        // Attachments after the notes they hang off: the manifest row references a note by uid, and
+        // arriving first would mean a picture belonging to nothing.
+        for a in (remote.attachments ?? []) where !deleted.contains(a.uid) {
+            if try store.applyRemoteAttachment(uid: a.uid, feedbackUID: a.feedbackUID,
+                                               filename: a.filename, byteSize: a.byteSize,
+                                               createdAt: a.createdAt,
+                                               remoteUpdatedAt: a.updatedAt) {
+                report.attachmentsApplied += 1
             }
         }
         return report

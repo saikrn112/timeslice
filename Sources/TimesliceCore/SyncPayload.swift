@@ -27,6 +27,9 @@ public struct SyncPayload: Codable, Equatable, Sendable {
     public var targets: [TargetRecord]?
     /// Notes. Optional for the same reason as the rest: an older build's payload must still decode.
     public var feedback: [FeedbackRecord]?
+    /// The manifest of images attached to feedback. Just the manifest — the bytes travel as their
+    /// own blobs, because this payload is rewritten in full on every publish.
+    public var attachments: [AttachmentRecord]?
 
     public struct TaskRecord: Codable, Equatable, Sendable {
         public var uid: String
@@ -156,6 +159,22 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         }
     }
 
+    public struct AttachmentRecord: Codable, Equatable, Sendable {
+        public var uid: String
+        /// The note it belongs to, by uid — a row id means a different note over here.
+        public var feedbackUID: String
+        public var filename: String
+        public var byteSize: Int
+        public var createdAt: TimeInterval
+        public var updatedAt: TimeInterval
+
+        public init(uid: String, feedbackUID: String, filename: String, byteSize: Int,
+                    createdAt: TimeInterval, updatedAt: TimeInterval) {
+            self.uid = uid; self.feedbackUID = feedbackUID; self.filename = filename
+            self.byteSize = byteSize; self.createdAt = createdAt; self.updatedAt = updatedAt
+        }
+    }
+
     public struct TombstoneRecord: Codable, Equatable, Sendable {
         public var uid: String
         public var kind: String        // "interval" | "task" | "task_project"
@@ -169,6 +188,7 @@ public struct SyncPayload: Codable, Equatable, Sendable {
     public init(deviceID: String, deviceLabel: String? = nil, writtenAt: TimeInterval,
                 tags: [TagRecord]? = nil, tagLinks: [TagLinkRecord]? = nil,
                 targets: [TargetRecord]? = nil, feedback: [FeedbackRecord]? = nil,
+                attachments: [AttachmentRecord]? = nil,
                 tasks: [TaskRecord], projects: [ProjectRecord], intervals: [IntervalRecord],
                 tombstones: [TombstoneRecord]) {
         self.deviceID = deviceID; self.deviceLabel = deviceLabel
@@ -176,6 +196,7 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         self.projects = projects; self.intervals = intervals; self.tombstones = tombstones
         self.tags = tags; self.tagLinks = tagLinks; self.targets = targets
         self.feedback = feedback
+        self.attachments = attachments
     }
 }
 
@@ -247,6 +268,7 @@ public struct MergeReport: Equatable, Sendable {
     public var tagLinksAdded = 0
     public var targetsApplied = 0
     public var feedbackApplied = 0
+    public var attachmentsApplied = 0
     public var deletionsApplied = 0
 
     public init() {}
@@ -258,5 +280,6 @@ public struct MergeReport: Equatable, Sendable {
             && intervalsReattributed == 0
             && tagsAdded == 0 && tagsMergedByName.isEmpty && tagEditsApplied == 0
             && tagLinksAdded == 0 && targetsApplied == 0 && feedbackApplied == 0
+            && attachmentsApplied == 0
     }
 }

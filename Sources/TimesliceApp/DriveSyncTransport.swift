@@ -112,6 +112,34 @@ final class DriveSyncTransport: SyncTransport {
         }
     }
 
+    // MARK: - Blobs (feedback images)
+
+    /// Write-once. The name comes from a uid, so if it's already there the bytes are already right
+    /// and re-uploading a screenshot on every sync would be pure waste.
+    func putBlob(name: String, data: Data) throws {
+        if try lookup(name: name) != nil { return }
+        let id = try blocking { try await self.api.create(name: name, contents: data) }
+        cacheLock.lock(); idCache[name] = id; cacheLock.unlock()
+    }
+
+    func fetchBlob(name: String) throws -> Data? {
+        guard let id = try lookup(name: name) else { return nil }
+        do {
+            return try blocking { try await self.api.download(id: id) }
+        } catch DriveAPI.DriveError.notFound {
+            // Deleted under us — drop the stale id so a later attempt looks again rather than
+            // retrying an id that can never resolve.
+            cacheLock.lock(); idCache[name] = nil; cacheLock.unlock()
+            return nil
+        }
+    }
+
+    func deleteBlob(name: String) throws {
+        guard let id = try lookup(name: name) else { return }
+        try? blocking { try await self.api.delete(id: id) }
+        cacheLock.lock(); idCache[name] = nil; cacheLock.unlock()
+    }
+
     /// Create on first write, PATCH thereafter — Drive allows duplicate names, so without the id
     /// cache every publish would append another copy of the same logical file.
     private func upsert(name: String, contents: Data) throws {
