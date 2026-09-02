@@ -240,6 +240,16 @@ public final class IntervalStore {
         // row: a note has no duration and is never aggregated, so keeping it out of the
         // interval tables means it cannot accidentally land in a time total.
         _ = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, device_id TEXT, created_at REAL NOT NULL, resolved_at REAL, uid TEXT, updated_at REAL)", nil, nil, nil)
+        // Preferences that have to agree across devices. Keyed by NAME, not by a uid: unlike a row
+        // id, a setting's key already means the same thing everywhere, so there's nothing to
+        // translate and no tombstone to keep (a deleted preference is just its default).
+        _ = sqlite3_exec(db, """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at REAL NOT NULL)
+            """, nil, nil, nil)
+
         // Images pasted onto a note. Bytes live next to the database, keyed by uid; this table is
         // only the manifest, small enough to ride the sync payload.
         _ = sqlite3_exec(db, """
@@ -1807,6 +1817,69 @@ public final class IntervalStore {
         sqlite3_bind_double(stmt, 6, remoteUpdatedAt)
         if let platform { bindText(stmt, 7, platform) } else { sqlite3_bind_null(stmt, 7) }
         try step(stmt)
+        return true
+    }
+
+    // MARK: - Shared settings
+
+    /// Preferences that govern what gets RECORDED, so they can't be allowed to differ per device.
+    ///
+    /// The reported symptom: every over-30-minute session came from one Mac, because
+    /// `autoPauseMinutes` lived in that machine's `UserDefaults` and nothing carried it. A threshold
+    /// that decides where an interval ends is part of the data model, not a local taste like window
+    /// size — so these travel, and cosmetic preferences deliberately don't.
+    public static let syncedSettingKeys = ["autoPauseMinutes", "idleNudgeMinutes", "promptsEnabled"]
+
+    public func setSetting(_ key: String, value: String, at when: Date = Date()) throws {
+        let stmt = try prepare("""
+            INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, key)
+        bindText(stmt, 2, value)
+        sqlite3_bind_double(stmt, 3, when.timeIntervalSince1970)
+        try step(stmt)
+    }
+
+    public func settingsForExport() throws -> [(key: String, value: String,
+                                                updatedAt: TimeInterval)] {
+        let stmt = try prepare("SELECT key, value, updated_at FROM settings")
+        defer { sqlite3_finalize(stmt) }
+        var out: [(String, String, TimeInterval)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append((text(stmt, 0), text(stmt, 1), sqlite3_column_double(stmt, 2)))
+        }
+        return out
+    }
+
+    public func settingValue(_ key: String) throws -> (value: String, updatedAt: TimeInterval)? {
+        let stmt = try prepare("SELECT value, updated_at FROM settings WHERE key = ?")
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, key)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return (text(stmt, 0), sqlite3_column_double(stmt, 1))
+    }
+
+    /// Last write wins, per key. Returns true when the local value actually changed, so the caller
+    /// knows whether to tell the app to adopt it.
+    @discardableResult
+    public func applyRemoteSetting(key: String, value: String,
+                                   remoteUpdatedAt: TimeInterval) throws -> Bool {
+        // Unknown keys are ignored rather than stored: a newer build syncing a setting this one has
+        // never heard of would otherwise accumulate rows nothing reads.
+        guard Self.syncedSettingKeys.contains(key) else { return false }
+        if let existing = try settingValue(key) {
+            guard remoteUpdatedAt > existing.updatedAt else { return false }
+            if existing.value == value {
+                // Same value, newer stamp: record the stamp so the clocks converge, but don't
+                // report a change nobody has to act on.
+                try setSetting(key, value: value,
+                               at: Date(timeIntervalSince1970: remoteUpdatedAt))
+                return false
+            }
+        }
+        try setSetting(key, value: value, at: Date(timeIntervalSince1970: remoteUpdatedAt))
         return true
     }
 

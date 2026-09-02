@@ -89,11 +89,16 @@ public struct SyncEngine {
                                          createdAt: $0.createdAt, updatedAt: $0.updatedAt)
         }
 
+        let settingRecords = try store.settingsForExport().map {
+            SyncPayload.SettingRecord(key: $0.key, value: $0.value, updatedAt: $0.updatedAt)
+        }
+
         let tombs = try store.tombstoneRecords()
         return SyncPayload(deviceID: deviceID, deviceLabel: deviceLabel,
                            writtenAt: now.timeIntervalSince1970,
                            tags: tagRecords, tagLinks: linkRecords, targets: targetRecords,
                            feedback: feedbackRecords, attachments: attachmentRecords,
+                           settings: settingRecords,
                            tasks: taskRecords, projects: projectRecords,
                            intervals: intervalRecords, tombstones: tombs)
     }
@@ -282,6 +287,14 @@ public struct SyncEngine {
                                              remoteUpdatedAt: f.updatedAt,
                                              platform: f.platform) {
                 report.feedbackApplied += 1
+            }
+        }
+        // Shared thresholds. No dependency on anything else in the payload, and no tombstones —
+        // a key that stops being sent just keeps its last value.
+        for setting in (remote.settings ?? []) {
+            if try store.applyRemoteSetting(key: setting.key, value: setting.value,
+                                            remoteUpdatedAt: setting.updatedAt) {
+                report.settingsApplied += 1
             }
         }
         // Attachments after the notes they hang off: the manifest row references a note by uid, and

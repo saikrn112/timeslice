@@ -1721,6 +1721,58 @@ func testFeedbackAttachments() {
     }
 }
 
+// MARK: - Settings that have to agree across devices
+
+func testSharedSettings() {
+    print("Shared settings:")
+    do {
+        let (store, url) = try! makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let (peer, purl) = try! makeStore(); defer { try? FileManager.default.removeItem(at: purl) }
+
+        // This is the reported bug: two devices, two different auto-pause thresholds, and nothing
+        // carrying one to the other — so one Mac recorded hour-long sessions while the other capped
+        // them at 30 minutes.
+        let early = Date(timeIntervalSince1970: 1_000_000)
+        let later = Date(timeIntervalSince1970: 2_000_000)
+        try! store.setSetting("autoPauseMinutes", value: "30", at: later)
+        try! peer.setSetting("autoPauseMinutes", value: "60", at: early)
+
+        let exported = try! store.settingsForExport()
+        check(exported.contains { $0.key == "autoPauseMinutes" && $0.value == "30" },
+              "the threshold is exported for sync")
+
+        for row in exported {
+            _ = try! peer.applyRemoteSetting(key: row.key, value: row.value,
+                                             remoteUpdatedAt: row.updatedAt)
+        }
+        check(try! peer.settingValue("autoPauseMinutes")?.value == "30",
+              "the newer write wins, so both devices end up recording to the same threshold")
+
+        // And the older one can't win on a later pass.
+        check(!(try! store.applyRemoteSetting(key: "autoPauseMinutes", value: "60",
+                                              remoteUpdatedAt: early.timeIntervalSince1970)),
+              "an older value from a peer is ignored")
+        check(try! store.settingValue("autoPauseMinutes")?.value == "30",
+              "and doesn't overwrite what's here")
+
+        // Same value with a newer stamp converges the clocks without reporting a change — the app
+        // adopts settings on that signal, and re-adopting an unchanged value churns @Published.
+        check(!(try! store.applyRemoteSetting(key: "autoPauseMinutes", value: "30",
+                                              remoteUpdatedAt: later.timeIntervalSince1970 + 100)),
+              "the same value arriving later isn't reported as a change")
+
+        // Cosmetic preferences deliberately don't travel; nor does a key from a newer build.
+        check(!(try! peer.applyRemoteSetting(key: "highlightDimPercent", value: "10",
+                                            remoteUpdatedAt: later.timeIntervalSince1970)),
+              "an unsynced key is ignored rather than stored")
+        check(try! peer.settingValue("highlightDimPercent") == nil,
+              "so nothing accumulates rows that nothing reads")
+        check(IntervalStore.syncedSettingKeys.sorted()
+                == ["autoPauseMinutes", "idleNudgeMinutes", "promptsEnabled"],
+              "only the thresholds that decide what gets RECORDED are shared")
+    }
+}
+
 // MARK: - Deleting part of a session
 
 func testIntervalSlice() {
@@ -2958,6 +3010,7 @@ do {
     testDeviceLanes()
     testFeedbackPlatform()
     testFeedbackAttachments()
+    testSharedSettings()
     testIntervalSlice()
     testImageBytes()
     testPausedPresence()

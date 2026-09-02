@@ -53,6 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (with privacy on, windows use sharingType = .none and appear blank to any capture).
         if DemoData.isRequested { privacy.setWindowsAlwaysCapturable(true) }
         appState = AppState(store: store, engine: engine)
+        // Thresholds that decide where an interval ends now live in the database and travel with
+        // everything else, so this device stops being the only one that knows them.
+        settings.attach(store: store)
         // Restore the open interval FIRST, then reload — otherwise totals are computed while
         // nothing is running and the menu bar's first paint has no current task (it only
         // appeared after a manual pause/start nudged a refresh).

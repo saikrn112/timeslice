@@ -14,21 +14,34 @@ final class Settings: ObservableObject {
 
     /// Daily target hours (goal line on the daily-hours chart).
     /// Prompt "still working?" after a session has run this long (0 = off).
+    ///
+    /// SYNCED. It decides where an interval ends, so it's part of the data model rather than a local
+    /// taste — one Mac left on 60 while another sat on 30 produced hour-long sessions that looked
+    /// like the checkpoint was broken.
     @Published var autoPauseMinutes: Int {
-        didSet { defaults.set(autoPauseMinutes, forKey: Keys.autoPauseMinutes) }
+        didSet {
+            defaults.set(autoPauseMinutes, forKey: Keys.autoPauseMinutes)
+            publishSynced(Keys.autoPauseMinutes, String(autoPauseMinutes))
+        }
     }
 
     /// Prompt "still paused?" after the current task has sat paused this long (0 = off).
     /// Catches the opposite mistake to `autoPauseMinutes`: forgetting to *un*pause after a break.
     @Published var idleNudgeMinutes: Int {
-        didSet { defaults.set(idleNudgeMinutes, forKey: Keys.idleNudgeMinutes) }
+        didSet {
+            defaults.set(idleNudgeMinutes, forKey: Keys.idleNudgeMinutes)
+            publishSynced(Keys.idleNudgeMinutes, String(idleNudgeMinutes))
+        }
     }
 
     /// Master switch for every nudge — both directions. When false, nothing prompts, whatever
     /// the individual thresholds say. Sleep still pauses the timer (that protects the data);
     /// it just won't ask anything on wake.
     @Published var promptsEnabled: Bool {
-        didSet { defaults.set(promptsEnabled, forKey: Keys.promptsEnabled) }
+        didSet {
+            defaults.set(promptsEnabled, forKey: Keys.promptsEnabled)
+            publishSynced(Keys.promptsEnabled, promptsEnabled ? "1" : "0")
+        }
     }
 
     /// Hours you're awake on a typical day — the denominator for "how much of my day did I
@@ -112,6 +125,55 @@ final class Settings: ObservableObject {
             syncMode = .folder
         } else {
             syncMode = SyncMode(rawValue: defaults.string(forKey: Keys.syncMode) ?? "") ?? .off
+        }
+    }
+
+    // MARK: - Sync
+
+    /// The store, once it exists. Weak isn't needed — `AppState` owns it and outlives this — but the
+    /// reference is optional because `Settings` is built before the database is opened.
+    private var store: IntervalStore?
+    /// Set while adopting a peer's value, so writing it back doesn't stamp a NEW timestamp on it and
+    /// beat the peer's edit forever — a feedback loop that would make the two devices fight.
+    private var isAdopting = false
+
+    /// Called once the store is open. Seeds any synced key the database hasn't seen, so a first run
+    /// on this build joins in with the values already configured here rather than with nothing.
+    func attach(store: IntervalStore) {
+        self.store = store
+        for (key, value) in syncedValues() where (try? store.settingValue(key)) ?? nil == nil {
+            try? store.setSetting(key, value: value)
+        }
+        adoptSyncedSettings()
+    }
+
+    private func syncedValues() -> [(String, String)] {
+        [(Keys.autoPauseMinutes, String(autoPauseMinutes)),
+         (Keys.idleNudgeMinutes, String(idleNudgeMinutes)),
+         (Keys.promptsEnabled, promptsEnabled ? "1" : "0")]
+    }
+
+    private func publishSynced(_ key: String, _ value: String) {
+        guard !isAdopting, let store else { return }
+        try? store.setSetting(key, value: value)
+    }
+
+    /// Take on whatever the store holds — called after a merge, when a peer's newer value has landed.
+    func adoptSyncedSettings() {
+        guard let store else { return }
+        isAdopting = true
+        defer { isAdopting = false }
+        if let row = (try? store.settingValue(Keys.autoPauseMinutes)) ?? nil,
+           let n = Int(row.value), n != autoPauseMinutes {
+            autoPauseMinutes = n
+        }
+        if let row = (try? store.settingValue(Keys.idleNudgeMinutes)) ?? nil,
+           let n = Int(row.value), n != idleNudgeMinutes {
+            idleNudgeMinutes = n
+        }
+        if let row = (try? store.settingValue(Keys.promptsEnabled)) ?? nil {
+            let on = row.value == "1"
+            if on != promptsEnabled { promptsEnabled = on }
         }
     }
 

@@ -27,6 +27,8 @@ public struct SyncPayload: Codable, Equatable, Sendable {
     public var targets: [TargetRecord]?
     /// Notes. Optional for the same reason as the rest: an older build's payload must still decode.
     public var feedback: [FeedbackRecord]?
+    /// Preferences that decide what gets recorded, so every device applies the same thresholds.
+    public var settings: [SettingRecord]?
     /// The manifest of images attached to feedback. Just the manifest — the bytes travel as their
     /// own blobs, because this payload is rewritten in full on every publish.
     public var attachments: [AttachmentRecord]?
@@ -159,6 +161,18 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         }
     }
 
+    public struct SettingRecord: Codable, Equatable, Sendable {
+        public var key: String
+        /// Stringified, so one record type carries ints, bools and anything added later without the
+        /// payload schema needing to know which is which.
+        public var value: String
+        public var updatedAt: TimeInterval
+
+        public init(key: String, value: String, updatedAt: TimeInterval) {
+            self.key = key; self.value = value; self.updatedAt = updatedAt
+        }
+    }
+
     public struct AttachmentRecord: Codable, Equatable, Sendable {
         public var uid: String
         /// The note it belongs to, by uid — a row id means a different note over here.
@@ -189,6 +203,7 @@ public struct SyncPayload: Codable, Equatable, Sendable {
                 tags: [TagRecord]? = nil, tagLinks: [TagLinkRecord]? = nil,
                 targets: [TargetRecord]? = nil, feedback: [FeedbackRecord]? = nil,
                 attachments: [AttachmentRecord]? = nil,
+                settings: [SettingRecord]? = nil,
                 tasks: [TaskRecord], projects: [ProjectRecord], intervals: [IntervalRecord],
                 tombstones: [TombstoneRecord]) {
         self.deviceID = deviceID; self.deviceLabel = deviceLabel
@@ -197,6 +212,7 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         self.tags = tags; self.tagLinks = tagLinks; self.targets = targets
         self.feedback = feedback
         self.attachments = attachments
+        self.settings = settings
     }
 }
 
@@ -269,6 +285,8 @@ public struct MergeReport: Equatable, Sendable {
     public var targetsApplied = 0
     public var feedbackApplied = 0
     public var attachmentsApplied = 0
+    /// Settings adopted from a peer. Surfaced so the app knows to re-read them.
+    public var settingsApplied = 0
     public var deletionsApplied = 0
 
     public init() {}
@@ -280,6 +298,6 @@ public struct MergeReport: Equatable, Sendable {
             && intervalsReattributed == 0
             && tagsAdded == 0 && tagsMergedByName.isEmpty && tagEditsApplied == 0
             && tagLinksAdded == 0 && targetsApplied == 0 && feedbackApplied == 0
-            && attachmentsApplied == 0
+            && attachmentsApplied == 0 && settingsApplied == 0
     }
 }

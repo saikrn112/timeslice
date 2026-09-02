@@ -1134,6 +1134,11 @@ struct MetricsView: View {
                           uniquingKeysWith: { a, b in a + b })
     }
 
+    /// Whether the bars are showing the pinned selection instead of focused time.
+    private var hasSelectionOverlay: Bool {
+        !(focusedTaskIDs ?? []).isEmpty && !pinnedFocuses.isEmpty
+    }
+
     /// Colour of the selection overlay. Deliberately not a shade of the accent: the overlay answers
     /// a different question from the bar it sits on, and another blue would read as more of the same
     /// measure.
@@ -1141,7 +1146,9 @@ struct MetricsView: View {
 
     private var hoursChart: some View {
         section("Hours \(bucketNoun)",
-                subtitle: "solid = focused (≥\(settings.deepBlockMinutes)m blocks)") {
+                subtitle: hasSelectionOverlay
+                    ? "solid = the selected allocations"
+                    : "solid = focused (≥\(settings.deepBlockMinutes)m blocks)") {
             if buckets.isEmpty {
                 placeholder("Nothing tracked in this range")
             } else {
@@ -1160,32 +1167,26 @@ struct MetricsView: View {
                         .foregroundStyle(base.opacity(0.32))
                         .opacity(dim)
                         .cornerRadius(2)
-                        // …with the focused portion overlaid solid inside it. Deep time is a
-                        // subset of total by definition, so it nests cleanly — but only with
-                        // `.unstacked`: two BarMarks at the same x stack by default, which drew
-                        // each bar at total + focused (a 7.1h day at 100% focus read as 14.2h).
-                        BarMark(
-                            x: .value(bucketUnitWord.capitalized, b.start, unit: bucketComponent),
-                            y: .value("Focused", b.deepSeconds / 3600),
-                            width: barWidth,
-                            stacking: .unstacked
-                        )
-                        .foregroundStyle(base)
-                        .opacity(dim)
-                        .cornerRadius(2)
-                        // The pinned selection, laid over the same bar in a colour that isn't a
-                        // shade of the accent — this has to read as "a different question", not as
-                        // "more of the same measure". Narrower so the total behind it stays visible
-                        // rather than being replaced.
+                        // …with the inner portion overlaid solid inside it, FULL width so it reads
+                        // as part of the same bar. Both are subsets of the total by definition, so
+                        // they nest cleanly — but only with `.unstacked`: two BarMarks at the same x
+                        // stack by default, which drew each bar at total + focused (a 7.1h day at
+                        // 100% focus read as 14.2h).
+                        //
+                        // Which inner quantity is shown depends on whether anything is pinned. Three
+                        // nested numbers in one bar would be unreadable, and unlike focus-vs-total
+                        // the selection and the focused time aren't subsets of each other — drawing
+                        // both would invite reading one as part of the other.
                         let selected = selectedByBucket[b.start] ?? 0
-                        if selected > 0 {
+                        let inner = hasSelectionOverlay ? selected : b.deepSeconds
+                        if inner > 0 {
                             BarMark(
                                 x: .value(bucketUnitWord.capitalized, b.start, unit: bucketComponent),
-                                y: .value("Selected", selected / 3600),
-                                width: overlayBarWidth,
+                                y: .value(hasSelectionOverlay ? "Selected" : "Focused", inner / 3600),
+                                width: barWidth,
                                 stacking: .unstacked
                             )
-                            .foregroundStyle(Self.selectionOverlay)
+                            .foregroundStyle(hasSelectionOverlay ? Self.selectionOverlay : base)
                             .opacity(dim)
                             .cornerRadius(2)
                         }
@@ -1502,17 +1503,6 @@ struct MetricsView: View {
         let step = cal.date(byAdding: bucketComponent, value: 1, to: first)?
             .timeIntervalSince(first) ?? 86_400
         return first.addingTimeInterval(-step / 2)...last.addingTimeInterval(step / 2)
-    }
-
-    /// Half the bar, so the total behind the selection overlay stays visible rather than being
-    /// replaced by it. Spelled out per unit because `MarkDimension` isn't arithmetic.
-    private var overlayBarWidth: MarkDimension {
-        switch range.unit {
-        case .day, .week: return .fixed(13)
-        case .month: return .fixed(8)
-        case .sixMonths: return .fixed(7)
-        case .year, .all: return .fixed(11)
-        }
     }
 
     // MARK: - Building blocks
