@@ -41,7 +41,6 @@ struct TasksView: View {
                         NowCard()
                             .padding(.bottom, 12)
                     }
-                    controlRow
                     if model.tasks.isEmpty && model.archivedTasks.isEmpty {
                         empty
                     } else if !query.isEmpty {
@@ -65,6 +64,7 @@ struct TasksView: View {
             }
             .background(Theme.page)
             .navigationTitle("Timeslice")
+            .toolbar { viewMenu }
             // Add and switch live at the BOTTOM, not in the top-right corner.
             //
             // Those are the two most-used actions in the app and they were in the hardest place on the
@@ -185,33 +185,41 @@ struct TasksView: View {
         .buttonStyle(.plain)
     }
 
-    /// One low-chrome row: scope on the left, grouping on the right — the Mac's arrangement, where
-    /// these are plain text buttons rather than control blocks.
-    private var controlRow: some View {
-        HStack(spacing: 8) {
-            ForEach(Array(TimeScope.allCases.enumerated()), id: \.element.id) { i, s in
-                if i > 0 { Text("·").font(Theme.caption).foregroundStyle(.tertiary) }
-                Button { scope = s } label: {
-                    Text(s.rawValue)
-                        .font(.system(size: 12, weight: scope == s ? .semibold : .regular))
-                        .foregroundStyle(scope == s ? Color.accentColor : Color.secondary)
+    /// Scope and grouping as ONE toolbar menu.
+    ///
+    /// These were a row sitting between the hero card and the first group header — a filter floating in
+    /// the middle of the content it filters, taking a line of vertical space and reading as neither header
+    /// nor control.
+    ///
+    /// A menu, and at the TOP, deliberately against the pattern of moving things to the bottom: Add and
+    /// Switch went down because they're actions you take constantly, whereas scope and grouping are view
+    /// options you set and forget. The bottom is scarce and belongs to the frequent thing. The label shows
+    /// the current state, so nothing is hidden by folding it away.
+    private var viewMenu: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                Picker("Scope", selection: $scope) {
+                    ForEach(TimeScope.allCases) { s in Text(s.rawValue).tag(s) }
                 }
-                .buttonStyle(.plain)
-            }
-            Spacer()
-            // Hidden with no projects: "group by project" that groups nothing is chrome the list
-            // doesn't need, which is the same reason the Mac stays flat until a project exists.
-            if !model.groups.isEmpty {
-                Button { grouped.toggle() } label: {
-                    Label(grouped ? "Projects" : "Recent",
-                          systemImage: grouped ? "folder" : "clock")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                // Only meaningful once a project exists — grouping nothing is the same list either way,
+                // which is why the Mac's list stays flat until then.
+                if !model.groups.isEmpty {
+                    Picker("Group by", selection: $grouped) {
+                        Label("Projects", systemImage: "folder").tag(true)
+                        Label("Recent", systemImage: "clock").tag(false)
+                    }
                 }
-                .buttonStyle(.plain)
+            } label: {
+                HStack(spacing: 4) {
+                    Text(scope.rawValue)
+                    if !model.groups.isEmpty {
+                        Text("·").foregroundStyle(.tertiary)
+                        Image(systemName: grouped ? "folder" : "clock")
+                    }
+                }
+                .font(.system(size: 13, weight: .medium))
             }
         }
-        .padding(.bottom, 8)
     }
 
     private var empty: some View {
@@ -364,14 +372,23 @@ struct TasksView: View {
         .padding(.bottom, 4)
     }
 
+    /// Archived tasks, filtered by the search like everything else.
+    ///
+    /// It wasn't: the section rendered `model.archivedTasks` verbatim, so searching "ios" still listed
+    /// "old prototype" — which doesn't contain an i at all. Every other section respected the query, so
+    /// the one that didn't looked like a broken match rather than an unfiltered list.
+    ///
+    /// Hidden entirely while searching if nothing archived matches, rather than showing an empty
+    /// disclosure that implies there might be something behind it.
     @ViewBuilder
     private var archived: some View {
-        if !model.archivedTasks.isEmpty {
+        let shown = model.searchArchived(query)
+        if !shown.isEmpty {
             Button { withAnimation { showArchived.toggle() } } label: {
                 HStack(spacing: 4) {
                     Image(systemName: showArchived ? "chevron.down" : "chevron.right")
                         .font(.system(size: 9))
-                    Text("Archived (\(model.archivedTasks.count))").font(Theme.sectionHeader)
+                    Text("Archived (\(shown.count))").font(Theme.sectionHeader)
                 }
                 .foregroundStyle(.secondary)
             }
@@ -380,7 +397,7 @@ struct TasksView: View {
 
             if showArchived {
                 card {
-                    ForEach(Array(model.archivedTasks.enumerated()), id: \.element.id) { i, task in
+                    ForEach(Array(shown.enumerated()), id: \.element.id) { i, task in
                         HStack(spacing: Theme.rowSpacing) {
                             Circle().fill(Color(hex: model.colorHex(for: task)).opacity(0.5))
                                 .frame(width: Theme.dot, height: Theme.dot)
@@ -395,7 +412,7 @@ struct TasksView: View {
                             .buttonStyle(.plain).foregroundStyle(.secondary)
                         }
                         .padding(.vertical, Theme.rowVPadding)
-                        if i < model.archivedTasks.count - 1 { Divider() }
+                        if i < shown.count - 1 { Divider() }
                     }
                 }
             }

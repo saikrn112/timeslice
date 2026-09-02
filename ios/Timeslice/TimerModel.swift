@@ -117,6 +117,18 @@ final class TimerModel: ObservableObject {
                                limit: limit)
     }
 
+    /// Search ARCHIVED tasks, ranked by the same Core function as the live list.
+    ///
+    /// Separate because `searchResults` deliberately ranks only active tasks — an archived task
+    /// shouldn't compete with live ones for the top of the palette. But the archived SECTION still has
+    /// to honour the query, or it lists tasks that plainly don't match.
+    func searchArchived(_ query: String, limit: Int = 50) -> [Project] {
+        guard !query.isEmpty else { return archivedTasks }
+        return TaskSearch.rank(query: TaskSearch.parse(query).name, projects: archivedTasks,
+                               lastActivity: lastActivity, groupNames: groupNamesByTask,
+                               limit: limit).map(\.project)
+    }
+
     /// Group name per task id — shared with the Mac's palette via `TaskSearch.groupNames`.
     private var groupNamesByTask: [Int64: String] {
         TaskSearch.groupNames(tasks: tasks, groups: groups)

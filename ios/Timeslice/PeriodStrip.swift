@@ -56,11 +56,17 @@ struct PeriodStrip: View {
 
     var body: some View {
         GeometryReader { geo in
-            // Half a viewport, less half a card: enough padding at each end that the FIRST and LAST
-            // cards can also sit in the middle. Without it `anchor: .center` clamps at the content's
-            // edge, so the newest period would still stick to the right — which is the behaviour being
-            // fixed here, just moved one card along.
-            let sideInset = max(Self.spacing, (geo.size.width - Self.cardWidth) / 2)
+            // ASYMMETRIC insets, and that asymmetry is the whole behaviour.
+            //
+            // LEADING gets half a viewport, so an older card can reach the middle. TRAILING gets almost
+            // nothing, so the newest period sits flush against the right edge when it's selected —
+            // `anchor: .center` simply clamps at the content's end and lands it there.
+            //
+            // Padding both ends (which is what this did) centred Today with dead space to its right,
+            // making the strip look like it had scrolled somewhere odd. With only the leading inset you
+            // get the described behaviour for free: Today is right-most, and the first swipe left brings
+            // the selection to the centre, where every further swipe keeps it.
+            let leadInset = max(Self.spacing, (geo.size.width - Self.cardWidth) / 2)
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: Self.spacing) {
@@ -72,7 +78,8 @@ struct PeriodStrip: View {
                             .id(card.id)
                         }
                     }
-                    .padding(.horizontal, sideInset)
+                    .padding(.leading, leadInset)
+                    .padding(.trailing, Self.spacing)
                     .padding(.vertical, 2)
                     // SNAP to a card instead of coasting to a stop between two.
                     //
