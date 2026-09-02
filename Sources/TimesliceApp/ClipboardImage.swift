@@ -1,15 +1,12 @@
 import AppKit
+import TimesliceCore
 import UniformTypeIdentifiers
 
 /// Getting a screenshot out of the clipboard (or off a drop) and into PNG bytes.
 ///
-/// Everything is normalised to PNG and scaled down on the way in. A retina screenshot is several
-/// megabytes of TIFF, and every one of those bytes would be uploaded to Drive and downloaded again
-/// by each device — a feedback note doesn't need more than enough pixels to see what's wrong.
+/// Everything is normalised to PNG and scaled down on the way in — see `ImageBytes`, which both
+/// apps share so a screenshot is stored the same way whichever one took it.
 enum ClipboardImage {
-    /// Longest edge, in pixels.
-    static let maxDimension: CGFloat = 1600
-
     static func png() -> Data? {
         let board = NSPasteboard.general
         // Ask for the image types first, then fall back to a file URL: dragging a screenshot from
@@ -41,31 +38,12 @@ enum ClipboardImage {
         }
     }
 
+    /// The `NSImage` → `CGImage` step is all that's platform-specific; the resize and encode live
+    /// in `ImageBytes` so the phone produces byte-identical output for the same picture.
     static func png(from image: NSImage) -> Data? {
-        guard let source = image.representations.compactMap({ $0 as? NSBitmapImageRep }).first
-                ?? image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:))
+        var rect = CGRect(origin: .zero, size: image.size)
+        guard let cg = image.cgImage(forProposedRect: &rect, context: nil, hints: nil)
         else { return nil }
-
-        // pixelsWide, not size.width: `size` is in points, so on a retina display it reports half
-        // the real resolution and the image would be scaled to twice the intended size.
-        let w = CGFloat(source.pixelsWide), h = CGFloat(source.pixelsHigh)
-        let scale = min(1, maxDimension / max(w, h))
-        guard scale < 1 else { return source.representation(using: .png, properties: [:]) }
-
-        let target = NSSize(width: (w * scale).rounded(), height: (h * scale).rounded())
-        guard let context = CGContext(
-            data: nil, width: Int(target.width), height: Int(target.height),
-            bitsPerComponent: 8, bytesPerRow: 0,
-            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
-            let cg = source.cgImage
-        else { return source.representation(using: .png, properties: [:]) }
-
-        context.interpolationQuality = .high
-        context.draw(cg, in: CGRect(origin: .zero, size: target))
-        guard let scaled = context.makeImage() else {
-            return source.representation(using: .png, properties: [:])
-        }
-        return NSBitmapImageRep(cgImage: scaled).representation(using: .png, properties: [:])
+        return ImageBytes.png(from: cg)
     }
 }
