@@ -63,14 +63,15 @@ struct FeedbackSheet: View {
                 Toggle("Show done", isOn: $showResolved)
                     .toggleStyle(.checkbox).font(.caption)
                 Button {
+                    // Pull, don't just re-read: if the note you're waiting for hasn't reached this
+                    // device yet, reloading the same rows tells you nothing.
+                    NotificationCenter.default.post(name: .syncNow, object: nil)
                     reload()
                 } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 10))
                 }
                 .buttonStyle(.borderless)
-                // Notes arrive from the phone while this window sits open, and a window that never
-                // updates is worse than a popover that at least reloaded every time it opened.
-                .help("Check for notes synced from another device")
+                .help("Sync now and reload — for a note just written on another device")
             }
             .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 8)
 
@@ -278,9 +279,10 @@ struct FeedbackSheet: View {
             .buttonStyle(.plain)
             .help(note.isOpen ? "Mark done" : "Reopen")
 
-            // The id, so a note can be referred to by number when handing work to an agent.
-            // Monospaced and fixed-width so the text column still lines up down the list.
-            Text("#\(note.id)")
+            // The SHARED number, not the row id: a note has to be called the same thing here and on
+            // the phone, or "issue 47" doesn't identify anything. Monospaced and fixed-width so the
+            // text column still lines up down the list.
+            Text("#\(note.seq)")
                 .font(.system(size: 10, design: .monospaced)).monospacedDigit()
                 .foregroundStyle(.tertiary)
                 .frame(width: 30, alignment: .trailing)

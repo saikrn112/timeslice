@@ -269,6 +269,15 @@ public final class IntervalStore {
         // Which app the note is about — added later, so it's a migration for existing notes and
         // stays NULL on them rather than being guessed from the device that wrote them.
         _ = sqlite3_exec(db, "ALTER TABLE feedback ADD COLUMN platform TEXT", nil, nil, nil)
+
+        // The number a note is CALLED. Not its row id: that's a local autoincrement, so the same
+        // note was "#41" here and something else on the phone — and notes refer to each other by
+        // number ("for issue 47…"), which made those references ambiguous about which device's
+        // numbering they meant. This one is assigned once and travels.
+        _ = sqlite3_exec(db, "ALTER TABLE feedback ADD COLUMN seq INTEGER", nil, nil, nil)
+        // Backfill from the row id. On the Mac where the existing references were written this
+        // reproduces exactly the numbers already in use, so nothing that says "issue 47" breaks.
+        _ = sqlite3_exec(db, "UPDATE feedback SET seq = id WHERE seq IS NULL", nil, nil, nil)
         _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_uid ON feedback(uid)", nil, nil, nil)
 
         try backfillSyncColumns()
@@ -1679,7 +1688,7 @@ public final class IntervalStore {
 
     /// Newest first — a note list is read from the top.
     public func listFeedback(includeResolved: Bool = true) throws -> [Feedback] {
-        let sql = "SELECT id, text, device_id, created_at, resolved_at, platform FROM feedback"
+        let sql = "SELECT id, text, device_id, created_at, resolved_at, platform, COALESCE(seq, id) FROM feedback"
             + (includeResolved ? "" : " WHERE resolved_at IS NULL")
             + " ORDER BY created_at DESC"
         let stmt = try prepare(sql)
@@ -1694,7 +1703,8 @@ public final class IntervalStore {
                 resolvedAt: sqlite3_column_type(stmt, 4) == SQLITE_NULL
                     ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4)),
                 platform: sqlite3_column_type(stmt, 5) == SQLITE_NULL
-                    ? nil : FeedbackPlatform(rawValue: text(stmt, 5))))
+                    ? nil : FeedbackPlatform(rawValue: text(stmt, 5)),
+                seq: sqlite3_column_int64(stmt, 6)))
         }
         return out
     }
@@ -1705,7 +1715,10 @@ public final class IntervalStore {
                             at when: Date = Date()) throws -> Int64? {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        let stmt = try prepare("INSERT INTO feedback (text, device_id, created_at, uid, updated_at, platform) VALUES (?, ?, ?, ?, ?, ?)")
+        let stmt = try prepare("""
+            INSERT INTO feedback (text, device_id, created_at, uid, updated_at, platform, seq)
+            VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM feedback))
+            """)
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, trimmed)
         if let localDeviceID { bindText(stmt, 2, localDeviceID) } else { sqlite3_bind_null(stmt, 2) }
@@ -1772,17 +1785,19 @@ public final class IntervalStore {
     /// The export half: notes with their uids.
     public func feedbackForExport() throws -> [(uid: String, text: String, deviceID: String?,
                                                 createdAt: TimeInterval, resolvedAt: TimeInterval?,
-                                                updatedAt: TimeInterval, platform: String?)] {
-        let stmt = try prepare("SELECT uid, text, device_id, created_at, resolved_at, COALESCE(updated_at, 0), platform FROM feedback WHERE uid IS NOT NULL")
+                                                updatedAt: TimeInterval, platform: String?,
+                                                seq: Int64)] {
+        let stmt = try prepare("SELECT uid, text, device_id, created_at, resolved_at, COALESCE(updated_at, 0), platform, COALESCE(seq, id) FROM feedback WHERE uid IS NOT NULL")
         defer { sqlite3_finalize(stmt) }
-        var out: [(String, String, String?, TimeInterval, TimeInterval?, TimeInterval, String?)] = []
+        var out: [(String, String, String?, TimeInterval, TimeInterval?, TimeInterval, String?, Int64)] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             out.append((text(stmt, 0), text(stmt, 1),
                         sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : text(stmt, 2),
                         sqlite3_column_double(stmt, 3),
                         sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 4),
                         sqlite3_column_double(stmt, 5),
-                        sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : text(stmt, 6)))
+                        sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : text(stmt, 6),
+                        sqlite3_column_int64(stmt, 7)))
         }
         return out
     }
@@ -1792,11 +1807,14 @@ public final class IntervalStore {
     public func applyRemoteFeedback(uid: String, text body: String, deviceID: String?,
                                     createdAt: TimeInterval, resolvedAt: TimeInterval?,
                                     remoteUpdatedAt: TimeInterval,
-                                    platform: String? = nil) throws -> Bool {
+                                    platform: String? = nil,
+                                    seq: Int64? = nil) throws -> Bool {
         if let id = try localID(table: "feedback", uid: uid) {
             guard remoteUpdatedAt > (try updatedAt(table: "feedback", id: id) ?? 0) else { return false }
             // The tag rides the same LWW as the text: retagging a note on the phone has to land
             // here, and an older peer that doesn't send the column would otherwise clear it.
+            // The number is NOT overwritten on an edit: it's an identity, not a field. Rewording a
+            // note somewhere else must not renumber it, or every reference to it goes stale.
             let stmt = try prepare("UPDATE feedback SET text = ?, resolved_at = ?, updated_at = ?, platform = ? WHERE id = ?")
             defer { sqlite3_finalize(stmt) }
             bindText(stmt, 1, body)
@@ -1807,7 +1825,12 @@ public final class IntervalStore {
             try step(stmt)
             return true
         }
-        let stmt = try prepare("INSERT INTO feedback (text, device_id, created_at, resolved_at, uid, updated_at, platform) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        let stmt = try prepare("""
+            INSERT INTO feedback
+                (text, device_id, created_at, resolved_at, uid, updated_at, platform, seq)
+            VALUES (?, ?, ?, ?, ?, ?, ?,
+                    COALESCE(?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM feedback)))
+            """)
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, body)
         if let deviceID { bindText(stmt, 2, deviceID) } else { sqlite3_bind_null(stmt, 2) }
@@ -1816,8 +1839,65 @@ public final class IntervalStore {
         bindText(stmt, 5, uid)
         sqlite3_bind_double(stmt, 6, remoteUpdatedAt)
         if let platform { bindText(stmt, 7, platform) } else { sqlite3_bind_null(stmt, 7) }
+        // A peer's number is adopted as-is. Only a note that arrives WITHOUT one — from a build
+        // that predates this — gets a fresh number here.
+        if let seq { sqlite3_bind_int64(stmt, 8, seq) } else { sqlite3_bind_null(stmt, 8) }
         try step(stmt)
         return true
+    }
+
+    /// Resolve two notes claiming the same number.
+    ///
+    /// Possible when two devices each create a note before hearing from the other: both pick
+    /// `max + 1` and both are right locally. The older note (by creation instant, uid breaking a tie)
+    /// keeps the number and the newer one moves to the end — a rule that reads the same data on every
+    /// device and therefore reaches the same answer on every device, with no coordination.
+    ///
+    /// Returns how many notes were renumbered.
+    @discardableResult
+    public func normalizeFeedbackNumbers() throws -> Int {
+        let stmt = try prepare("""
+            SELECT id, uid, created_at, COALESCE(seq, id) FROM feedback
+            WHERE uid IS NOT NULL ORDER BY COALESCE(seq, id), created_at, uid
+            """)
+        var rows: [(id: Int64, uid: String, createdAt: Double, seq: Int64)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            rows.append((sqlite3_column_int64(stmt, 0), text(stmt, 1),
+                         sqlite3_column_double(stmt, 2), sqlite3_column_int64(stmt, 3)))
+        }
+        sqlite3_finalize(stmt)
+
+        var claimed: [Int64: (createdAt: Double, uid: String)] = [:]
+        var losers: [(id: Int64, createdAt: Double, uid: String)] = []
+        for row in rows {
+            if let held = claimed[row.seq] {
+                // Whoever is older keeps it; the other is queued for a new number.
+                if (row.createdAt, row.uid) < (held.createdAt, held.uid) {
+                    claimed[row.seq] = (row.createdAt, row.uid)
+                    if let displaced = rows.first(where: { $0.uid == held.uid }) {
+                        losers.append((displaced.id, held.createdAt, held.uid))
+                    }
+                } else {
+                    losers.append((row.id, row.createdAt, row.uid))
+                }
+            } else {
+                claimed[row.seq] = (row.createdAt, row.uid)
+            }
+        }
+        guard !losers.isEmpty else { return 0 }
+
+        var next = (claimed.keys.max() ?? 0) + 1
+        // Renumbered in creation order, so the tail reads chronologically like the rest of the list.
+        for loser in losers.sorted(by: { ($0.createdAt, $0.uid) < ($1.createdAt, $1.uid) }) {
+            let up = try prepare("UPDATE feedback SET seq = ?, updated_at = ? WHERE id = ?")
+            sqlite3_bind_int64(up, 1, next)
+            sqlite3_bind_double(up, 2, Date().timeIntervalSince1970)
+            sqlite3_bind_int64(up, 3, loser.id)
+            try step(up)
+            sqlite3_finalize(up)
+            next += 1
+        }
+        return losers.count
     }
 
     // MARK: - Shared settings

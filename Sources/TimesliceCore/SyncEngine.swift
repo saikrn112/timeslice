@@ -80,7 +80,8 @@ public struct SyncEngine {
         let feedbackRecords = try store.feedbackForExport().map {
             SyncPayload.FeedbackRecord(uid: $0.uid, text: $0.text, deviceID: $0.deviceID,
                                        createdAt: $0.createdAt, resolvedAt: $0.resolvedAt,
-                                       updatedAt: $0.updatedAt, platform: $0.platform)
+                                       updatedAt: $0.updatedAt, platform: $0.platform,
+                                       seq: $0.seq)
         }
 
         let attachmentRecords = try store.attachmentsForExport().map {
@@ -285,10 +286,13 @@ public struct SyncEngine {
             if try store.applyRemoteFeedback(uid: f.uid, text: f.text, deviceID: f.deviceID,
                                              createdAt: f.createdAt, resolvedAt: f.resolvedAt,
                                              remoteUpdatedAt: f.updatedAt,
-                                             platform: f.platform) {
+                                             platform: f.platform, seq: f.seq) {
                 report.feedbackApplied += 1
             }
         }
+        // Two devices offline at once can both hand a new note the same number. Settled here, over
+        // the merged set, by a rule that gives every device the same answer.
+        if report.feedbackApplied > 0 { _ = try store.normalizeFeedbackNumbers() }
         // Shared thresholds. No dependency on anything else in the payload, and no tombstones —
         // a key that stops being sent just keeps its last value.
         for setting in (remote.settings ?? []) {

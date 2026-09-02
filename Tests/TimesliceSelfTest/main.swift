@@ -1678,6 +1678,74 @@ func testFeedbackPlatform() {
     }
 }
 
+// MARK: - Feedback numbering
+
+func testFeedbackNumbering() {
+    print("Feedback numbering:")
+    do {
+        let (mac, macURL) = try! makeStore(); defer { try? FileManager.default.removeItem(at: macURL) }
+        let (phone, phoneURL) = try! makeStore(); defer { try? FileManager.default.removeItem(at: phoneURL) }
+
+        // The reported bug: the number shown was the local row id, so the same note was #3 here and
+        // something else there — and notes refer to each other by number ("for issue 47…").
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        for i in 1...3 { _ = try! mac.addFeedback("mac note \(i)", at: t0.addingTimeInterval(Double(i))) }
+        let macNotes = try! mac.listFeedback().sorted { $0.seq < $1.seq }
+        check(macNotes.map(\.seq) == [1, 2, 3], "numbers start at 1 and count up")
+
+        // Sync them across. The peer must adopt the numbers, not mint its own.
+        func push(from a: IntervalStore, to b: IntervalStore) {
+            for row in try! a.feedbackForExport() {
+                _ = try! b.applyRemoteFeedback(uid: row.uid, text: row.text, deviceID: row.deviceID,
+                                               createdAt: row.createdAt, resolvedAt: row.resolvedAt,
+                                               remoteUpdatedAt: row.updatedAt,
+                                               platform: row.platform, seq: row.seq)
+            }
+            _ = try! b.normalizeFeedbackNumbers()
+        }
+        push(from: mac, to: phone)
+        let onPhone = try! phone.listFeedback()
+        check(onPhone.count == 3, "all three arrive")
+        for note in onPhone {
+            let here = macNotes.first { $0.text == note.text }!
+            check(note.seq == here.seq, "\"\(note.text)\" is called #\(here.seq) on both devices")
+        }
+
+        // Rewording a note elsewhere must not renumber it, or every reference goes stale.
+        let target = try! phone.listFeedback().first { $0.text == "mac note 2" }!
+        try! phone.updateFeedback(id: target.id, text: "mac note 2, reworded")
+        push(from: phone, to: mac)
+        check(try! mac.listFeedback().first { $0.text == "mac note 2, reworded" }?.seq == 2,
+              "an edit changes the text and leaves the number alone")
+
+        // Both devices offline, both create a note: both pick the same next number, and the clash
+        // has to settle the same way on each of them without any coordination.
+        let clashMac = try! mac.addFeedback("written on the mac", at: t0.addingTimeInterval(100))!
+        let clashPhone = try! phone.addFeedback("written on the phone", at: t0.addingTimeInterval(200))!
+        check(try! mac.listFeedback().first { $0.id == clashMac }?.seq == 4,
+              "each device independently picks 4")
+        check(try! phone.listFeedback().first { $0.id == clashPhone }?.seq == 4,
+              "which is why they collide")
+
+        push(from: mac, to: phone)
+        push(from: phone, to: mac)
+        let macFinal = try! mac.listFeedback()
+        let phoneFinal = try! phone.listFeedback()
+        check(Set(macFinal.map(\.seq)).count == macFinal.count, "no two notes share a number here")
+        check(Set(phoneFinal.map(\.seq)).count == phoneFinal.count, "nor there")
+        for note in macFinal {
+            let there = phoneFinal.first { $0.text == note.text }
+            check(there?.seq == note.seq,
+                  "\"\(note.text)\" settled on #\(note.seq) on BOTH devices, unprompted")
+        }
+        // The one created first keeps the contested number — the rule is age, not arrival order.
+        check(macFinal.first { $0.text == "written on the mac" }?.seq == 4,
+              "the older of the two clashing notes keeps 4")
+        check(macFinal.first { $0.text == "written on the phone" }?.seq == 5,
+              "and the newer one moves to the end")
+    }
+}
+
 // MARK: - Feedback attachments
 
 func testFeedbackAttachments() {
@@ -3055,6 +3123,7 @@ do {
     try testDeviceAttribution()
     testDeviceLanes()
     testFeedbackPlatform()
+    testFeedbackNumbering()
     testFeedbackAttachments()
     testSharedSettings()
     testIntervalSlice()

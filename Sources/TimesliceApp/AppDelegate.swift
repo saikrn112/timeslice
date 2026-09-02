@@ -90,6 +90,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in self?.showMainWindow() }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: .syncNow)
+            .sink { [weak self] _ in self?.sync?.syncNow() }
+            .store(in: &cancellables)
+
         NotificationCenter.default.publisher(for: .openFeedbackWindow)
             .sink { [weak self] _ in self?.showFeedbackWindow() }
             .store(in: &cancellables)

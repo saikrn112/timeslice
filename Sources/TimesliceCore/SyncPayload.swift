@@ -152,12 +152,17 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         /// "macos" | "ios" | "both", or absent. A raw string rather than the enum so a value from
         /// a newer peer decodes instead of failing the whole payload.
         public var platform: String?
+        /// The number the note is called. Travels so "issue 47" means one note everywhere; absent
+        /// from a build that predates it, in which case the receiver assigns one.
+        public var seq: Int64?
 
         public init(uid: String, text: String, deviceID: String?, createdAt: TimeInterval,
-                    resolvedAt: TimeInterval?, updatedAt: TimeInterval, platform: String? = nil) {
+                    resolvedAt: TimeInterval?, updatedAt: TimeInterval, platform: String? = nil,
+                    seq: Int64? = nil) {
             self.uid = uid; self.text = text; self.deviceID = deviceID
             self.createdAt = createdAt; self.resolvedAt = resolvedAt; self.updatedAt = updatedAt
             self.platform = platform
+            self.seq = seq
         }
     }
 

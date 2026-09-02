@@ -102,4 +102,7 @@ extension Notification.Name {
     /// button is inside a SwiftUI view, and the window is owned by the AppDelegate — the same route
     /// the palette takes.
     static let openFeedbackWindow = Notification.Name("com.timeslice.openFeedbackWindow")
+    /// Asks for an immediate sync. Posted by the feedback window's refresh button, which is used
+    /// precisely when something written on another device hasn't arrived yet.
+    static let syncNow = Notification.Name("com.timeslice.syncNow")
 }
