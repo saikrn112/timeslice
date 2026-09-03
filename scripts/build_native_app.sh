@@ -19,7 +19,19 @@ APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 SIGN_IDENTITY="${TIMESLICE_SIGN_IDENTITY:--}"
 
 echo "Building $APP_BINARY ($BUILD_CONFIG)…"
-swift build --package-path "$ROOT" -c "$BUILD_CONFIG" --product "$APP_BINARY"
+# TIMESLICE_DEV switches on the developer tools (the feedback list, sync diagnostics). Set
+# TIMESLICE_RELEASE=1 to build what a real user would get, with those compiled out entirely.
+DEV_FLAGS=()
+if [ "${TIMESLICE_RELEASE:-0}" != "1" ]; then
+  DEV_FLAGS=(-Xswiftc -DTIMESLICE_DEV)
+  echo "  (developer tools ON — set TIMESLICE_RELEASE=1 for a release build)"
+fi
+
+# `${arr[@]+"${arr[@]}"}` and not `"${arr[@]}"`: macOS ships bash 3.2, where an EMPTY array under
+# `set -u` is an unbound variable and the release build died on it. This form expands to nothing at
+# all when the array is empty, rather than to one empty argument.
+swift build --package-path "$ROOT" -c "$BUILD_CONFIG" \
+  ${DEV_FLAGS[@]+"${DEV_FLAGS[@]}"} --product "$APP_BINARY"
 BIN_DIR="$(swift build --package-path "$ROOT" -c "$BUILD_CONFIG" --show-bin-path)"
 
 rm -rf "$APP_BUNDLE"

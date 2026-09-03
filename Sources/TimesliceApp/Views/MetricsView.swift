@@ -197,27 +197,55 @@ struct MetricsView: View {
     // MARK: - Tiles
 
     private var tiles: some View {
-        HStack(spacing: 12) {
+        let s = effectiveSummary
+        return HStack(spacing: 12) {
             goalTile
-            tile("Focus", value: percent(summary?.focusRatio ?? 0),
+            tile("Focus", value: percent(s?.focusRatio ?? 0),
                  caption: "≥\(settings.deepBlockMinutes)m blocks", tint: .purple)
             if isDay {
-                tile("Switches", value: "\(summary?.switches ?? 0)", caption: "this day", tint: .orange)
-                tile("Longest", value: Format.compact(summary?.longestSessionSeconds ?? 0),
+                tile("Switches", value: "\(s?.switches ?? 0)", caption: "this day", tint: .orange)
+                tile("Longest", value: Format.compact(s?.longestSessionSeconds ?? 0),
                      caption: "session", tint: .teal)
             } else {
-                tile("Avg/day", value: hours(summary?.avgPerActiveDay ?? 0),
+                tile("Avg/day", value: hours(s?.avgPerActiveDay ?? 0),
                      caption: "active days only", tint: .teal)
-                tile("Best day", value: hours(summary?.bestDaySeconds ?? 0), caption: "in range", tint: .blue)
+                tile("Best day", value: hours(s?.bestDaySeconds ?? 0), caption: "in range", tint: .blue)
+            }
+            // What these numbers are ABOUT, when it isn't everything. Without it the tiles look like
+            // the range's totals and quietly aren't — and a filter you can't see is worse than none.
+            if !pinnedFocuses.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Image(systemName: "line.3.horizontal.decrease.circle.fill")
+                        .font(.system(size: 11)).foregroundStyle(Self.selectionOverlay)
+                    Text(pinnedFocuses.count == 1 ? "selected\nallocation"
+                                                  : "\(pinnedFocuses.count) selected\nallocations")
+                        .font(.system(size: 9)).foregroundStyle(.secondary)
+                        .fixedSize()
+                }
             }
         }
+    }
+
+    /// The tiles' numbers, narrowed to the pinned allocations when there are any.
+    ///
+    /// Selecting an allocation and then a range asked "how did THIS go over that period"; the tiles
+    /// answered a different question — everything tracked in the range — sitting right above the
+    /// bars that had already narrowed. Recomputed from the intervals already in hand, filtered by
+    /// task, so it costs a pass over an array rather than another query.
+    private var effectiveSummary: RangeSummary? {
+        guard let ids = focusedTaskIDs, !ids.isEmpty else { return summary }
+        return Aggregations.summary(
+            intervals: rangeIntervals.filter { ids.contains($0.projectID) },
+            range: range,
+            deepThreshold: settings.deepBlockSeconds
+        )
     }
 
     private var goalTile: some View {
         // Measured against the hours you're AWAKE, not a work target. Now that everything gets
         // tracked, "4.0h / 8.0h" said nothing about the remaining twelve hours — and the gap is the
         // number that actually answers "did I use today or lose it".
-        let total = (summary?.totalSeconds ?? 0) + liveExtra
+        let total = (effectiveSummary?.totalSeconds ?? 0) + liveExtra
         // Every CALENDAR day in the range counts, including ones with nothing tracked: a day you
         // recorded nothing is exactly when the gap should be widest. Counting only active days would
         // hide that by shrinking the denominator to match.
@@ -267,7 +295,14 @@ struct MetricsView: View {
 
     /// Live seconds for a running task, but only when the range covers now.
     private var liveExtra: TimeInterval {
-        range.isCurrent() ? engine.clock.elapsed : 0
+        guard range.isCurrent() else { return 0 }
+        // While the tiles are narrowed to a selection, the running timer only belongs in them if the
+        // task it's on is part of that selection — otherwise the Tracked figure ticks upwards on time
+        // that the number explicitly excludes.
+        if let ids = focusedTaskIDs, !ids.isEmpty {
+            guard let running = engine.runningProjectID, ids.contains(running) else { return 0 }
+        }
+        return engine.clock.elapsed
     }
 
     private func tile(_ label: String, value: String, caption: String, tint: Color) -> some View {

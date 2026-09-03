@@ -48,7 +48,8 @@ struct MainWindowView: View {
 
             Spacer()
 
-            notesButton
+            // Developer tool: absent from a release build entirely, not merely disabled.
+            if BuildFlags.developerToolsEnabled { notesButton }
             settingsButton
             privacyIndicator
         }

@@ -313,6 +313,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var feedbackWindowController: FeedbackWindowController?
 
     private func showFeedbackWindow() {
+        // Belt as well as braces: the notification can only be posted by UI that's already gated, but
+        // a window that opens in a release build because someone wired up a new caller is worse than
+        // a redundant check.
+        guard BuildFlags.developerToolsEnabled else { return }
         if feedbackWindowController == nil {
             feedbackWindowController = FeedbackWindowController(store: appState.storeForEditing,
                                                                privacy: privacy)

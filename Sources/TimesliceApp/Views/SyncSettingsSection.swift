@@ -152,22 +152,27 @@ struct SyncSettingsSection: View {
             Text("Last synced \(relative(at))").font(.caption2).foregroundStyle(.tertiary)
         }
 
-        HStack(spacing: 6) {
-            Text("Google Drive (app data)")
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(.quaternary)
-            Spacer()
-            // Answers "is this actually working?" without needing a second device.
-            Button("Test") { sync.runSelfTest() }
-                .buttonStyle(.link).font(.system(size: 10))
-        }
-        if let result = sync.selfTestResult {
-            Text(result)
-                .font(.system(size: 10))
-                .foregroundStyle(result.hasPrefix("Working") ? Color.green
-                                 : (result == "Checking…" ? Color.secondary : Color.orange))
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+        // Diagnostics: a developer tool. The self-test writes a probe file and reports transport
+        // internals, and the storage path is an implementation detail — neither is anyone's business
+        // in a shipped build, where "is sync working" is answered by the last-synced line above.
+        if BuildFlags.developerToolsEnabled {
+            HStack(spacing: 6) {
+                Text("Google Drive (app data)")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.quaternary)
+                Spacer()
+                // Answers "is this actually working?" without needing a second device.
+                Button("Test") { sync.runSelfTest() }
+                    .buttonStyle(.link).font(.system(size: 10))
+            }
+            if let result = sync.selfTestResult {
+                Text(result)
+                    .font(.system(size: 10))
+                    .foregroundStyle(result.hasPrefix("Working") ? Color.green
+                                     : (result == "Checking…" ? Color.secondary : Color.orange))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
         }
     }
 
