@@ -108,6 +108,50 @@ public enum Theme {
                                       minRatio: 3.0))
     }
 
+    // MARK: - Metrics type scale
+    //
+    // Metrics gets its OWN scale, larger than the task list's.
+    //
+    // The list is scanned — you're looking for a name you already know, so density helps. Metrics is READ,
+    // and it was ported from a Mac page where a pointer and a 27" display make 9pt captions reasonable. On a
+    // phone that produced numbers you squint at, reported twice. Nothing here is below 12pt, and the figures
+    // that carry the answer are 28-34.
+
+    /// The one number a screen exists to show.
+    public static let metricHero = Font.system(size: 34, weight: .semibold, design: .rounded)
+    /// A section's headline figure.
+    public static let metricValue = Font.system(size: 24, weight: .semibold, design: .rounded)
+    /// A supporting figure — a stat in a row of three.
+    public static let metricStat = Font.system(size: 19, weight: .semibold, design: .rounded)
+    /// Section titles.
+    public static let metricSection = Font.system(size: 17, weight: .semibold)
+    /// Row labels: task names, allocation names.
+    public static let metricLabel = Font.system(size: 15)
+    /// Captions and units. The FLOOR — nothing in metrics goes smaller.
+    public static let metricCaption = Font.system(size: 13)
+    /// Monospaced durations, so columns line up and a ticking figure doesn't reflow.
+    public static let metricTime = Font.system(size: 15, design: .monospaced)
+
+    // MARK: - Metrics chrome
+    //
+    // Grey, with ONE accent.
+    //
+    // The tinted tiles — purple focus, orange switches, teal longest, blue best-day — were my invention, not
+    // the Mac's, and they broke the rule this file opens with: colour is information, never decoration. Four
+    // arbitrary hues next to each task's own colour made the page read as noise, and nothing was learnable
+    // from them since the hue meant only "this is the third tile".
+    //
+    // So chrome is `.primary`/`.secondary`/`.tertiary`, the accent marks what's SELECTED, and the only
+    // saturated colour on the page belongs to a task, project or tag — which is the one place a colour
+    // carries meaning.
+
+    /// Fill behind a selected/filtered element.
+    public static let metricSelection = Color.accentColor.opacity(0.15)
+    /// A neutral bar or ring track.
+    public static let metricTrack = Color.secondary.opacity(0.16)
+    /// A neutral filled bar, where the thing measured has no colour of its own.
+    public static let metricNeutralFill = Color.secondary.opacity(0.55)
+
     // MARK: - Devices
 
     /// Colour for the Nth device on a timeline.
