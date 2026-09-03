@@ -1796,11 +1796,24 @@ func testWeekdaysSync() {
         check(try! b.listTargets().first?.weekdays == Weekdays.weekdaysOnly,
               "and arrive on the peer — a pace that differs per device is the bug we just fixed")
 
-        // A peer on an older build sends no weekdays at all. That has to read as every day, the
-        // behaviour those builds had, not as no days (which would make the pace infinite).
+        // A peer on an older build sends no weekdays at all — and it can easily be the most recent
+        // writer. Silence has to mean "no opinion", NOT "every day": overwriting with all-seven
+        // would let a device that can't even see the setting destroy it just by editing the amount.
         pushTargets(weekdaysOverride: .some(nil), bumpBy: 60)
-        check(try! b.listTargets().first?.weekdays.isAll == true,
-              "an older peer's silence means every day, not no days")
+        check(try! b.listTargets().first?.weekdays == Weekdays.weekdaysOnly,
+              "an older peer's newer edit leaves the days it doesn't know about alone")
+
+        // But a row arriving for the FIRST time with no weekdays does default to every day, which is
+        // the behaviour those builds had.
+        do {
+            let (c, cURL) = try! makeStore(); defer { try? FileManager.default.removeItem(at: cURL) }
+            let tagC = try! c.upsertTag(name: "office", colorHex: "#f00")
+            _ = try! c.applyRemoteTarget(uid: "fresh-uid", subject: .tag(tagC),
+                                        seconds: 10 * 3600, direction: .atLeast, period: .week,
+                                        remoteUpdatedAt: 1_000, weekdays: nil)
+            check(try! c.listTargets().first?.weekdays.isAll == true,
+                  "a brand-new allocation from an older peer is every day")
+        }
     }
 }
 

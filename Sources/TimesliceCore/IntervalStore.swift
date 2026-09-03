@@ -1605,7 +1605,12 @@ public final class IntervalStore {
 
         if let mineID {
             guard remoteUpdatedAt > mineUpdated else { return false }
-            let stmt = try prepare("UPDATE targets SET seconds = ?, direction = ?, period = ?, uid = ?, updated_at = ?, completed_at = ?, weekdays = ? WHERE id = ?")
+            // `COALESCE(?, weekdays, 127)`: a peer that doesn't SEND the column has no opinion about
+            // it, which is different from saying "every day". Writing 127 on its behalf meant one
+            // edit from a device on an older build silently reset a Monday-to-Friday allocation to
+            // all seven — losing a setting that device couldn't even see, purely by being the most
+            // recent writer.
+            let stmt = try prepare("UPDATE targets SET seconds = ?, direction = ?, period = ?, uid = ?, updated_at = ?, completed_at = ?, weekdays = COALESCE(?, weekdays, 127) WHERE id = ?")
             defer { sqlite3_finalize(stmt) }
             sqlite3_bind_double(stmt, 1, seconds)
             bindText(stmt, 2, direction.rawValue)
@@ -1614,9 +1619,8 @@ public final class IntervalStore {
             sqlite3_bind_double(stmt, 5, remoteUpdatedAt)
             if let completedAt { sqlite3_bind_double(stmt, 6, completedAt) }
             else { sqlite3_bind_null(stmt, 6) }
-            // A peer that doesn't send the column means "every day", which is what it had before the
-            // column existed — not "no days", which would make the pace infinite.
-            sqlite3_bind_int(stmt, 7, Int32(weekdays ?? Weekdays.all.rawValue))
+            if let weekdays { sqlite3_bind_int(stmt, 7, Int32(weekdays)) }
+            else { sqlite3_bind_null(stmt, 7) }
             sqlite3_bind_int64(stmt, 8, mineID)
             try step(stmt)
             return true
