@@ -1188,7 +1188,7 @@ struct MetricsView: View {
     private var hoursChart: some View {
         section("Hours \(bucketNoun)",
                 subtitle: hasSelectionOverlay
-                    ? "solid = focused (≥\(settings.deepBlockMinutes)m blocks) · red = selected"
+                    ? "solid = focused (≥\(settings.deepBlockMinutes)m blocks) · red over it = selected"
                     : "solid = focused (≥\(settings.deepBlockMinutes)m blocks)") {
             if buckets.isEmpty {
                 placeholder("Nothing tracked in this range")
@@ -1208,35 +1208,37 @@ struct MetricsView: View {
                         .foregroundStyle(base.opacity(0.32))
                         .opacity(dim)
                         .cornerRadius(2)
-                        // …then the focused portion and the pinned selection, both FULL width and
-                        // both solid. Three nested bars, all opaque, no washes.
-                        //
-                        // Drawn SHORTER LAST. Same-width solid bars occlude whatever sits behind
-                        // them, so with a fixed order one of the two inner measures could vanish
-                        // entirely — a 3h selection inside 5h of focus, or the reverse. Putting the
-                        // shorter one in front means both are always visible: the taller one shows
-                        // above the shorter, and the shorter reads as the bar's base.
-                        //
-                        // All of this needs `.unstacked`. BarMarks at the same x stack by default,
-                        // which drew each bar at total + focused (a 7.1h day at 100% focus read as
-                        // 14.2h).
+                        // …with the focused portion overlaid solid inside it. Deep time is a subset
+                        // of total by definition, so it nests cleanly — but only with `.unstacked`:
+                        // BarMarks at the same x stack by default, which drew each bar at total +
+                        // focused (a 7.1h day at 100% focus read as 14.2h).
+                        BarMark(
+                            x: .value(bucketUnitWord.capitalized, b.start, unit: bucketComponent),
+                            y: .value("Focused", b.deepSeconds / 3600),
+                            width: barWidth,
+                            stacking: .unstacked
+                        )
+                        .foregroundStyle(base)
+                        .opacity(dim)
+                        .cornerRadius(2)
+                        // Then the selection, laid OVER the other two at half opacity — always last, no
+                        // ordering to get right. Where it covers the solid focused bar the two mix
+                        // into violet; above that it sits on the faint total and reads as plain red.
+                        // So all three are legible whether the selection is taller or shorter than
+                        // the focused time, which is what the opaque version couldn't do: an opaque
+                        // layer hides whatever is behind it from the baseline up, and a bar that
+                        // starts at zero then looks exactly like a stacked segment starting where the
+                        // one in front ended.
                         let selected = selectedByBucket[b.start] ?? 0
-                        // Paired with their colours and sorted tallest-first, so the layer order is
-                        // stated once instead of being reconstructed from a comparison downstream.
-                        let layers = [(seconds: b.deepSeconds, label: "Focused", color: base),
-                                      (seconds: selected, label: "Selected",
-                                       color: Self.selectionOverlay)]
-                            .filter { $0.seconds > 0 }
-                            .sorted { $0.seconds > $1.seconds }
-                        ForEach(Array(layers.enumerated()), id: \.offset) { _, layer in
+                        if selected > 0 {
                             BarMark(
                                 x: .value(bucketUnitWord.capitalized, b.start,
                                           unit: bucketComponent),
-                                y: .value(layer.label, layer.seconds / 3600),
+                                y: .value("Selected", selected / 3600),
                                 width: barWidth,
                                 stacking: .unstacked
                             )
-                            .foregroundStyle(layer.color)
+                            .foregroundStyle(Self.selectionOverlay.opacity(0.5))
                             .opacity(dim)
                             .cornerRadius(2)
                         }
