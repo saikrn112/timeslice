@@ -1,5 +1,6 @@
 import SwiftUI
 import TimesliceCore
+import TimesliceUI
 
 /// One place to manage tags and the budgets attached to them.
 ///
@@ -16,6 +17,11 @@ struct TargetsSheet: View {
     /// Retired allocations with their allocated-vs-spent figures, for the history list.
     @State private var history: [AllocationHistory] = []
     @State private var newTagName = ""
+    /// Every task, for the per-task allocation list. Loaded in `reload` with everything else.
+    @State private var allTasks: [Project] = []
+    @State private var taskQuery = ""
+    /// Task ids in most-recent-first order, captured on open.
+    @State private var recencyOrder: [Int64] = []
     /// Re-read after every edit. Cheap (a handful of rows) and avoids the whole class of bugs where
     /// the sheet shows something the store no longer agrees with.
     private func reload() {
@@ -30,6 +36,8 @@ struct TargetsSheet: View {
         let retired = all.filter { !$0.isLive }
         guard !retired.isEmpty else { return [] }
         let tasks = (try? store.listProjects(includeArchived: true)) ?? []
+        allTasks = tasks
+        recencyOrder = appState.recencyOrderedProjects.map(\.id)
         let tagsByID = Dictionary(uniqueKeysWithValues: tags.map { ($0.id, $0) })
         let intervals = (try? store.intervals()) ?? []
         let byTask = (try? store.effectiveTagIDsByTask()) ?? [:]
@@ -69,6 +77,7 @@ struct TargetsSheet: View {
                 VStack(alignment: .leading, spacing: 18) {
                     tagSection
                     projectSection
+                    taskSection
                     historySection
                 }
                 .padding(16)
@@ -118,6 +127,41 @@ struct TargetsSheet: View {
         }
     }
 
+    /// S M T W T F S. Every day is on by default; tapping one narrows the allocation to the days it's
+    /// actually meant to happen on, which is what makes its per-day pace mean anything — a 10h week
+    /// worked Monday to Friday is 2h a day, not 1h26m.
+    ///
+    /// Only the DENOMINATOR changes. An hour recorded on an unselected day still counts towards the
+    /// total, because saying "I do this on weekdays" describes how the hours are meant to be spread,
+    /// not a refusal to count Sunday's work.
+    private func weekdayBubbles(for target: Target) -> some View {
+        HStack(spacing: 2) {
+            ForEach(0..<7, id: \.self) { bit in
+                let on = target.weekdays.effective.contains(weekday: bit + 1)
+                Button {
+                    let next = target.weekdays.effective.toggling(weekday: bit + 1)
+                    // Turning the last one off would divide the target by zero days, so an empty
+                    // selection is stored as "every day" — which is what it means anyway.
+                    try? store.setTargetWeekdays(id: target.id, next.selectedCount == 0 ? .all : next)
+                    reload()
+                } label: {
+                    Text(Weekdays.initials[bit])
+                        .font(.system(size: 9, weight: on ? .semibold : .regular))
+                        .frame(width: 15, height: 15)
+                        .background(Circle().fill(on ? Color.accentColor.opacity(0.28)
+                                                     : Color.secondary.opacity(0.10)))
+                        .foregroundStyle(on ? Color.accentColor : Color.secondary)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .help(target.weekdays.effective.isAll
+              ? "Every day — tap to pick the days this is meant to happen on"
+              : "\(target.weekdays.selectedCount) days a week, so the pace is "
+                + "\(Format.compact(target.seconds / Double(max(1, target.weekdays.selectedCount)))) per day")
+    }
+
     private func addTag() {
         let name = newTagName.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return }
@@ -144,6 +188,96 @@ struct TargetsSheet: View {
         }
     }
 
+    // MARK: - Tasks
+
+    /// An allocation directly on one task.
+    ///
+    /// Note 51: an ad-hoc goal ("ten hours on the tax return") was only expressible by inventing a
+    /// project to hang it off, which litters the project list with one-task projects that exist for
+    /// no other reason. `TargetSubject` and `Aggregations` already understood `.task`; nothing but
+    /// this list was missing.
+    ///
+    /// Searchable and collapsed by default, because there are two orders of magnitude more tasks than
+    /// projects and an unfiltered list of every task ever tracked would bury the two sections above.
+    private var taskSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("TASKS").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
+                Spacer()
+                TextField("Find a task", text: $taskQuery)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 160)
+            }
+            Text("For a one-off goal that doesn't deserve a project of its own.")
+                .font(.caption2).foregroundStyle(.secondary)
+
+            // Always shown, no Show/Hide toggle: one more button to reach the thing you came for,
+            // and hiding a list that's already height-capped and scrollable saves nothing.
+            //
+            // FIXED height, scrolled inside. Letting it size to its contents made the whole sheet
+            // grow and shrink on every keystroke as the match count changed, which is unusable for
+            // typing into.
+            Group {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        let rows = matchingTasks
+                        if rows.isEmpty {
+                            Text(taskQuery.isEmpty ? "No tasks yet"
+                                                   : "No task matches \"\(taskQuery)\"")
+                                .font(.caption).foregroundStyle(.tertiary)
+                        } else {
+                            ForEach(rows) { task in
+                                subjectRow(name: task.name,
+                                           colorHex: appState.displayColorHex(for: task),
+                                           subject: .task(task.id), onDelete: nil)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                // Ten rows. Deep enough to browse without the sheet becoming mostly task list.
+                .frame(height: 230)
+                // A scrollbar that appears once the content overflows reflows the rows under it. On
+                // permanently, so the gutter is always the same width.
+                .scrollIndicators(.visible)
+                // Corner ticks rather than a box. The list reads best blended into the sheet, but
+                // then nothing says it scrolls — and a half-visible row at the bottom edge is a
+                // weak hint that only appears when you happen to have the right number of tasks.
+                // Four short brackets mark the region's extent without drawing a container.
+                .overlay(ScrollCorners().stroke(Color.secondary.opacity(0.35), lineWidth: 1))
+                .padding(.vertical, 2)
+            }
+        }
+    }
+
+    /// Tasks matching the search, most recently worked on first.
+    ///
+    /// Recency order, not alphabetical or creation order: a goal is nearly always about something
+    /// you're in the middle of, so what you touched today should be the first thing offered. The
+    /// same reasoning (and the same source) as the task switcher's LRU cycle. No cap any more —
+    /// the list scrolls at a fixed height instead, so length costs nothing.
+    private var matchingTasks: [Project] {
+        let q = taskQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        let pool = q.isEmpty ? orderedTasks : orderedTasks.filter { $0.name.lowercased().contains(q) }
+        return pool
+    }
+
+    /// LRU order, resolved once per sheet open rather than per keystroke — it queries the store.
+    private var orderedTasks: [Project] {
+        guard !recencyOrder.isEmpty else { return allTasks }
+        let rank = Dictionary(uniqueKeysWithValues: recencyOrder.enumerated().map { ($1, $0) })
+        return allTasks.sorted { (rank[$0.id] ?? .max, $0.id) < (rank[$1.id] ?? .max, $1.id) }
+    }
+
+    /// Tasks that already carry a live allocation.
+    private var taskTargets: [Project] {
+        let ids = Set(targets.compactMap { target -> Int64? in
+            if case .task(let id) = target.subject { return id }
+            return nil
+        })
+        return allTasks.filter { ids.contains($0.id) }
+    }
+
     // MARK: - History
 
     /// Retired allocations: what was set aside against what actually went in.
@@ -154,7 +288,7 @@ struct TargetsSheet: View {
     private var historySection: some View {
         if !history.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                Text("PAST ALLOCATIONS")
+                Text("ARCHIVED ALLOCATIONS")
                     .font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
                 Text("Allocated is the amount × the time it was live for. Editing an amount while an "
                      + "allocation is running changes its history too — the figure isn't versioned.")
@@ -206,6 +340,10 @@ struct TargetsSheet: View {
 
     /// One row: the subject, then its budget. `onDelete` is nil for projects — they're deleted from
     /// the Tasks tab, and offering it here would imply this sheet owns them.
+    /// One subject and its allocation controls.
+    ///
+    /// The name is tooltipped because it truncates: task and tag names are as long as they need to
+    /// be, and a clipped label with no way to read the rest is a puzzle rather than a label.
     private func subjectRow(name: String, colorHex: String, subject: TargetSubject,
                             onDelete: (() -> Void)?) -> some View {
         let existing = targets.first { $0.subject == subject }
@@ -213,6 +351,7 @@ struct TargetsSheet: View {
             Circle().fill(Color(hex: colorHex)).frame(width: 9, height: 9)
             Text(name).font(.callout).lineLimit(1).truncationMode(.tail)
                 .frame(width: 150, alignment: .leading)
+                .help(name)
 
             // Budget controls sit at the RIGHT, just before delete — for both tags and projects — so
             // the "Set budget" link and the populated controls occupy the same place.
@@ -256,16 +395,26 @@ struct TargetsSheet: View {
                 .labelsHidden()
                 .frame(width: 84)
 
+                // Which days it's meant to happen on. Only offered for a week or a month — a daily
+                // allocation is already about one day, and picking days for it would be nonsense.
+                if existing.period != .day {
+                    weekdayBubbles(for: existing)
+                }
+
                 // Retire rather than delete: the allocation leaves the live list but keeps its
                 // history, which is the whole reason for the state.
-                // Spelled out, not a tick. A bare checkmark next to a value reads as "confirm
-                // this number", which is not what it does — it retires the allocation.
-                Button("Done") {
+                //
+                // Named after WHERE it goes, not after being finished. It was a tick, which read as
+                // "confirm this number"; then "Done", which read as "done editing" — the one thing a
+                // button in a sheet is most likely to mean. "Archive" can be neither, and it's the
+                // word the section below uses.
+                Button("Archive") {
                     try? store.setTargetCompleted(id: existing.id, completed: true)
                     reload()
                 }
                 .buttonStyle(.link).font(.system(size: 11))
-                .help("Finished with this — moves it to past allocations")
+                .help("Finished with this allocation — keeps it, and its history, under "
+                      + "ARCHIVED ALLOCATIONS")
 
                 Button {
                     try? store.deleteTarget(id: existing.id)
@@ -353,5 +502,30 @@ private struct HoursField: View {
     private func format(_ s: TimeInterval) -> String {
         let h = s / 3600
         return h == h.rounded() ? "\(Int(h))" : String(format: "%.1f", h)
+    }
+}
+
+/// Four L-shaped corner ticks, marking out a scrollable region without boxing it in.
+///
+/// A full border would make the list a container and lose the blended-into-the-sheet look that's
+/// worth keeping; nothing at all leaves the fact that it scrolls to be discovered by accident.
+struct ScrollCorners: Shape {
+    /// Length of each arm. Long enough to read as a deliberate mark, short enough not to imply a box.
+    var arm: CGFloat = 9
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        // Each corner is two arms from the corner point, so the stroke joins cleanly instead of
+        // drawing two overlapping segments with a doubled-opacity pixel where they meet.
+        for corner in [(rect.minX, rect.minY, 1.0, 1.0),
+                       (rect.maxX, rect.minY, -1.0, 1.0),
+                       (rect.minX, rect.maxY, 1.0, -1.0),
+                       (rect.maxX, rect.maxY, -1.0, -1.0)] {
+            let (x, y, dx, dy) = corner
+            path.move(to: CGPoint(x: x + arm * dx, y: y))
+            path.addLine(to: CGPoint(x: x, y: y))
+            path.addLine(to: CGPoint(x: x, y: y + arm * dy))
+        }
+        return path
     }
 }

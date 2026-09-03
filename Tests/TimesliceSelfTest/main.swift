@@ -1334,6 +1334,52 @@ func testNudgePolicy() {
 
     let both = NudgePolicy.Config(promptsEnabled: true, sessionMinutes: 60, pausedMinutes: 15)
 
+    do {   // the reported bug: "Leave paused" and it asks again fifteen seconds later, forever
+        let pausedAt = Date(timeIntervalSince1970: 1_000_000)
+        let due = pausedAt.addingTimeInterval(20 * 60)      // 20m paused, threshold is 15m
+
+        check(NudgePolicy.firesPausedNudge(both, isPaused: true, awaitingAnswer: false,
+                                          promptPending: false, pausedSince: pausedAt,
+                                          handledFor: nil, now: due),
+              "a task paused past the threshold gets asked about")
+        check(!NudgePolicy.firesPausedNudge(both, isPaused: true, awaitingAnswer: false,
+                                           promptPending: false, pausedSince: pausedAt,
+                                           handledFor: pausedAt, now: due),
+              "but not twice for the SAME pause — that's what made Leave paused a loop")
+        check(!NudgePolicy.firesPausedNudge(both, isPaused: true, awaitingAnswer: false,
+                                           promptPending: false, pausedSince: pausedAt,
+                                           handledFor: pausedAt,
+                                           now: due.addingTimeInterval(3600)),
+              "and it stays answered an hour later, not just for the next sweep")
+
+        // A genuinely NEW pause is a new question, with nothing needing to be reset.
+        let pausedAgain = pausedAt.addingTimeInterval(7200)
+        check(NudgePolicy.firesPausedNudge(both, isPaused: true, awaitingAnswer: false,
+                                          promptPending: false, pausedSince: pausedAgain,
+                                          handledFor: pausedAt,
+                                          now: pausedAgain.addingTimeInterval(20 * 60)),
+              "a later pause is asked about even though the previous one was answered")
+
+        // The conditions that were already right stay right.
+        check(!NudgePolicy.firesPausedNudge(both, isPaused: true, awaitingAnswer: false,
+                                           promptPending: false, pausedSince: pausedAt,
+                                           handledFor: nil,
+                                           now: pausedAt.addingTimeInterval(60)),
+              "a pause shorter than the threshold isn't due yet")
+        check(!NudgePolicy.firesPausedNudge(both, isPaused: true, awaitingAnswer: false,
+                                           promptPending: true, pausedSince: pausedAt,
+                                           handledFor: nil, now: due),
+              "a prompt already on screen isn't asked a second time")
+        check(!NudgePolicy.firesPausedNudge(both, isPaused: true, awaitingAnswer: true,
+                                           promptPending: false, pausedSince: pausedAt,
+                                           handledFor: nil, now: due),
+              "and it never stacks on the still-working prompt, whose pause isn't yours")
+        check(!NudgePolicy.firesPausedNudge(both, isPaused: false, awaitingAnswer: false,
+                                           promptPending: false, pausedSince: nil,
+                                           handledFor: nil, now: due),
+              "nothing to nudge about when nothing is paused")
+    }
+
     // The two nudges are mutually exclusive: one needs a running timer, the other a paused one.
     check(NudgePolicy.armsSessionNudge(both, isRunning: true), "running arms the session nudge")
     check(!NudgePolicy.armsPausedNudge(both, isPaused: false, awaitingAnswer: false),
@@ -1660,6 +1706,213 @@ func testFeedbackPlatform() {
     }
 }
 
+// MARK: - Allocation weekdays
+
+func testAllocationWeekdays() {
+    print("Allocation weekdays:")
+
+    // Sunday is bit 0, matching Calendar's 1-based weekday minus one.
+    check(Weekdays.all.selectedCount == 7, "every day by default")
+    check(Weekdays.weekdaysOnly.selectedCount == 5, "Monday to Friday is five days")
+    check(Weekdays.weekdaysOnly.contains(weekday: 2) && Weekdays.weekdaysOnly.contains(weekday: 6),
+          "which are Monday and Friday in Calendar's numbering")
+    check(!Weekdays.weekdaysOnly.contains(weekday: 1) && !Weekdays.weekdaysOnly.contains(weekday: 7),
+          "and not Sunday or Saturday")
+    check(Weekdays.all.toggling(weekday: 1).selectedCount == 6, "toggling a day off leaves six")
+    check(Weekdays.none.effective.isAll,
+          "no days selected means every day — there's no allocation you never work on, and zero "
+              + "days would make the pace infinite")
+    check(Weekdays(rawValue: 0xFF).selectedCount == 7,
+          "a stray high bit is discarded rather than counted as an eighth day")
+
+    // Counting the allocation's own days inside a range.
+    let weekStart = date(2026, 8, 24, 0, 0)          // Monday
+    let weekEnd = date(2026, 8, 31, 0, 0)
+    check(Weekdays.all.daysIn(start: weekStart, end: weekEnd, calendar: cal) == 7,
+          "a full week has seven of everybody's days")
+    check(Weekdays.weekdaysOnly.daysIn(start: weekStart, end: weekEnd, calendar: cal) == 5,
+          "and five weekdays")
+
+    // The bug this walk had: normalising to startOfDay in a DIFFERENT calendar pulled the cursor
+    // into the previous day, so a week counted as eight days and every pace came out low.
+    check(Weekdays.all.daysIn(start: weekStart, end: weekEnd) == 7,
+          "the count doesn't depend on the walker's calendar matching the range's")
+
+    // A weekend-only allocation over a Tuesday-to-Thursday window has none of its days in view.
+    let midweek = date(2026, 8, 25, 0, 0)
+    let thursday = date(2026, 8, 27, 0, 0)
+    let weekends = Weekdays(rawValue: 0b1000001)
+    check(weekends.daysIn(start: midweek, end: thursday, calendar: cal) == 0,
+          "a weekend allocation has no days in a midweek window")
+
+    // And the pace: 10h a week over five days is 2h a day, not 1h26m.
+    let fiveDay = Target(id: 1, subject: .tag(1), seconds: 10 * 3600,
+                         direction: .atLeast, period: .week, weekdays: .weekdaysOnly)
+    let p = TargetMath.progress(target: fiveDay, name: "office", actualSeconds: 6 * 3600,
+                                rangeStart: weekStart, rangeEnd: weekEnd,
+                                now: date(2026, 8, 26, 12, 0), calendar: cal)
+    check(p.workingDays == 5, "the pace divides by the days it's meant to happen on")
+    check(approx(p.targetPerDaySeconds / 3600, 2, 0.01), "10h over five days is 2h a day")
+    check(approx(p.averagePerDaySeconds / 3600, 6.0 / 5, 0.01),
+          "and the actual average uses the same five days")
+    check(approx(p.expectedSeconds / 3600, 10, 0.01),
+          "the WEEK's expectation is unchanged — days change the spread, not the total")
+
+    // Time recorded on an unselected day still counts. Saying "I do this on weekdays" describes how
+    // the hours are meant to be spread, not a refusal to count Sunday's work.
+    let sundayWork = TargetMath.progress(target: fiveDay, name: "office",
+                                         actualSeconds: 10 * 3600,
+                                         rangeStart: weekStart, rangeEnd: weekEnd,
+                                         now: weekEnd, calendar: cal)
+    check(sundayWork.verdict == .met, "hitting the total counts however the hours fell")
+
+    // Pro-rating onto a VIEWED day: a Saturday expects nothing from a weekdays-only allocation.
+    let saturday = date(2026, 8, 29, 0, 0)
+    let onSaturday = TargetMath.progress(target: fiveDay, name: "office", actualSeconds: 0,
+                                         rangeStart: weekStart, rangeEnd: weekEnd,
+                                         now: saturday, viewedRangeDays: 1,
+                                         viewedRangeStart: saturday,
+                                         viewedRangeEnd: date(2026, 8, 30, 0, 0), calendar: cal)
+    check(onSaturday.rangeExpectedSeconds == 0,
+          "a Saturday expects nothing from a Monday-to-Friday allocation")
+    let onWednesday = TargetMath.progress(target: fiveDay, name: "office", actualSeconds: 0,
+                                          rangeStart: weekStart, rangeEnd: weekEnd,
+                                          now: date(2026, 8, 26, 12, 0), viewedRangeDays: 1,
+                                          viewedRangeStart: date(2026, 8, 26, 0, 0),
+                                          viewedRangeEnd: date(2026, 8, 27, 0, 0), calendar: cal)
+    check(approx(onWednesday.rangeExpectedSeconds / 3600, 2, 0.01),
+          "and a Wednesday expects the full 2h, not a seventh of the week")
+}
+
+// MARK: - Allocation weekdays travel
+
+func testWeekdaysSync() {
+    print("Allocation weekdays over sync:")
+    do {
+        let (a, aURL) = try! makeStore(); defer { try? FileManager.default.removeItem(at: aURL) }
+        let (b, bURL) = try! makeStore(); defer { try? FileManager.default.removeItem(at: bURL) }
+        let tagA = try! a.upsertTag(name: "office", colorHex: "#f00")
+        _ = try! a.setTarget(subject: .tag(tagA), seconds: 10 * 3600,
+                            direction: .atLeast, period: .week, weekdays: .weekdaysOnly)
+        check(try! a.listTargets().first?.weekdays.selectedCount == 5, "the days are stored")
+
+        // Both halves have to travel: the tag the allocation points at, then the allocation. Same
+        // route `SyncEngine.merge` takes — resolve the subject's UID to a local row first.
+        // `insertRemoteTag`, not `applyRemoteTagEdit`: the peer has never seen this tag, and the
+        // edit path only updates one that's already there.
+        for row in try! a.tagsWithUIDs() {
+            _ = try! b.insertRemoteTag(uid: row.uid, name: row.tag.name,
+                                       colorHex: row.tag.colorHex,
+                                       sortOrder: row.tag.sortOrder, updatedAt: row.updatedAt)
+        }
+        func pushTargets(weekdaysOverride: Int?? = nil, bumpBy: TimeInterval = 0) {
+            for t in try! a.targetsForExport() {
+                guard let table = IntervalStore.table(forSubjectKind: t.subjectKind),
+                      let subjectID = try! b.localID(table: table, uid: t.subjectUID),
+                      let subject = TargetSubject(kind: t.subjectKind, id: subjectID)
+                else { continue }
+                _ = try! b.applyRemoteTarget(
+                    uid: t.uid, subject: subject, seconds: t.seconds,
+                    direction: Target.Direction(rawValue: t.direction)!,
+                    period: Target.Period(rawValue: t.period)!,
+                    remoteUpdatedAt: t.updatedAt + bumpBy, createdAt: t.createdAt,
+                    completedAt: t.completedAt,
+                    weekdays: weekdaysOverride ?? t.weekdays)
+            }
+        }
+        pushTargets()
+        check(try! b.listTargets().first?.weekdays == Weekdays.weekdaysOnly,
+              "and arrive on the peer — a pace that differs per device is the bug we just fixed")
+
+        // A peer on an older build sends no weekdays at all — and it can easily be the most recent
+        // writer. Silence has to mean "no opinion", NOT "every day": overwriting with all-seven
+        // would let a device that can't even see the setting destroy it just by editing the amount.
+        pushTargets(weekdaysOverride: .some(nil), bumpBy: 60)
+        check(try! b.listTargets().first?.weekdays == Weekdays.weekdaysOnly,
+              "an older peer's newer edit leaves the days it doesn't know about alone")
+
+        // But a row arriving for the FIRST time with no weekdays does default to every day, which is
+        // the behaviour those builds had.
+        do {
+            let (c, cURL) = try! makeStore(); defer { try? FileManager.default.removeItem(at: cURL) }
+            let tagC = try! c.upsertTag(name: "office", colorHex: "#f00")
+            _ = try! c.applyRemoteTarget(uid: "fresh-uid", subject: .tag(tagC),
+                                        seconds: 10 * 3600, direction: .atLeast, period: .week,
+                                        remoteUpdatedAt: 1_000, weekdays: nil)
+            check(try! c.listTargets().first?.weekdays.isAll == true,
+                  "a brand-new allocation from an older peer is every day")
+        }
+    }
+}
+
+// MARK: - Feedback numbering
+
+func testFeedbackNumbering() {
+    print("Feedback numbering:")
+    do {
+        let (mac, macURL) = try! makeStore(); defer { try? FileManager.default.removeItem(at: macURL) }
+        let (phone, phoneURL) = try! makeStore(); defer { try? FileManager.default.removeItem(at: phoneURL) }
+
+        // The reported bug: the number shown was the local row id, so the same note was #3 here and
+        // something else there — and notes refer to each other by number ("for issue 47…").
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        for i in 1...3 { _ = try! mac.addFeedback("mac note \(i)", at: t0.addingTimeInterval(Double(i))) }
+        let macNotes = try! mac.listFeedback().sorted { $0.seq < $1.seq }
+        check(macNotes.map(\.seq) == [1, 2, 3], "numbers start at 1 and count up")
+
+        // Sync them across. The peer must adopt the numbers, not mint its own.
+        func push(from a: IntervalStore, to b: IntervalStore) {
+            for row in try! a.feedbackForExport() {
+                _ = try! b.applyRemoteFeedback(uid: row.uid, text: row.text, deviceID: row.deviceID,
+                                               createdAt: row.createdAt, resolvedAt: row.resolvedAt,
+                                               remoteUpdatedAt: row.updatedAt,
+                                               platform: row.platform, seq: row.seq)
+            }
+            _ = try! b.normalizeFeedbackNumbers()
+        }
+        push(from: mac, to: phone)
+        let onPhone = try! phone.listFeedback()
+        check(onPhone.count == 3, "all three arrive")
+        for note in onPhone {
+            let here = macNotes.first { $0.text == note.text }!
+            check(note.seq == here.seq, "\"\(note.text)\" is called #\(here.seq) on both devices")
+        }
+
+        // Rewording a note elsewhere must not renumber it, or every reference goes stale.
+        let target = try! phone.listFeedback().first { $0.text == "mac note 2" }!
+        try! phone.updateFeedback(id: target.id, text: "mac note 2, reworded")
+        push(from: phone, to: mac)
+        check(try! mac.listFeedback().first { $0.text == "mac note 2, reworded" }?.seq == 2,
+              "an edit changes the text and leaves the number alone")
+
+        // Both devices offline, both create a note: both pick the same next number, and the clash
+        // has to settle the same way on each of them without any coordination.
+        let clashMac = try! mac.addFeedback("written on the mac", at: t0.addingTimeInterval(100))!
+        let clashPhone = try! phone.addFeedback("written on the phone", at: t0.addingTimeInterval(200))!
+        check(try! mac.listFeedback().first { $0.id == clashMac }?.seq == 4,
+              "each device independently picks 4")
+        check(try! phone.listFeedback().first { $0.id == clashPhone }?.seq == 4,
+              "which is why they collide")
+
+        push(from: mac, to: phone)
+        push(from: phone, to: mac)
+        let macFinal = try! mac.listFeedback()
+        let phoneFinal = try! phone.listFeedback()
+        check(Set(macFinal.map(\.seq)).count == macFinal.count, "no two notes share a number here")
+        check(Set(phoneFinal.map(\.seq)).count == phoneFinal.count, "nor there")
+        for note in macFinal {
+            let there = phoneFinal.first { $0.text == note.text }
+            check(there?.seq == note.seq,
+                  "\"\(note.text)\" settled on #\(note.seq) on BOTH devices, unprompted")
+        }
+        // The one created first keeps the contested number — the rule is age, not arrival order.
+        check(macFinal.first { $0.text == "written on the mac" }?.seq == 4,
+              "the older of the two clashing notes keeps 4")
+        check(macFinal.first { $0.text == "written on the phone" }?.seq == 5,
+              "and the newer one moves to the end")
+    }
+}
+
 // MARK: - Feedback attachments
 
 func testFeedbackAttachments() {
@@ -1746,6 +1999,124 @@ func testFeedbackAttachments() {
         check(try! store.tombstoneRecords().contains { $0.uid == shot.uid
                                                     && $0.kind == "feedback_attachment" },
               "each image is tombstoned, or a peer would sync it straight back")
+    }
+}
+
+// MARK: - Settings that have to agree across devices
+
+func testSharedSettings() {
+    print("Shared settings:")
+    do {
+        let (store, url) = try! makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let (peer, purl) = try! makeStore(); defer { try? FileManager.default.removeItem(at: purl) }
+
+        // This is the reported bug: two devices, two different auto-pause thresholds, and nothing
+        // carrying one to the other — so one Mac recorded hour-long sessions while the other capped
+        // them at 30 minutes.
+        let early = Date(timeIntervalSince1970: 1_000_000)
+        let later = Date(timeIntervalSince1970: 2_000_000)
+        try! store.setSetting("autoPauseMinutes", value: "30", at: later)
+        try! peer.setSetting("autoPauseMinutes", value: "60", at: early)
+
+        let exported = try! store.settingsForExport()
+        check(exported.contains { $0.key == "autoPauseMinutes" && $0.value == "30" },
+              "the threshold is exported for sync")
+
+        for row in exported {
+            _ = try! peer.applyRemoteSetting(key: row.key, value: row.value,
+                                             remoteUpdatedAt: row.updatedAt)
+        }
+        check(try! peer.settingValue("autoPauseMinutes")?.value == "30",
+              "the newer write wins, so both devices end up recording to the same threshold")
+
+        // And the older one can't win on a later pass.
+        check(!(try! store.applyRemoteSetting(key: "autoPauseMinutes", value: "60",
+                                              remoteUpdatedAt: early.timeIntervalSince1970)),
+              "an older value from a peer is ignored")
+        check(try! store.settingValue("autoPauseMinutes")?.value == "30",
+              "and doesn't overwrite what's here")
+
+        // Same value with a newer stamp converges the clocks without reporting a change — the app
+        // adopts settings on that signal, and re-adopting an unchanged value churns @Published.
+        check(!(try! store.applyRemoteSetting(key: "autoPauseMinutes", value: "30",
+                                              remoteUpdatedAt: later.timeIntervalSince1970 + 100)),
+              "the same value arriving later isn't reported as a change")
+
+        // Cosmetic preferences deliberately don't travel; nor does a key from a newer build.
+        check(!(try! peer.applyRemoteSetting(key: "highlightDimPercent", value: "10",
+                                            remoteUpdatedAt: later.timeIntervalSince1970)),
+              "an unsynced key is ignored rather than stored")
+        check(try! peer.settingValue("highlightDimPercent") == nil,
+              "so nothing accumulates rows that nothing reads")
+        check(IntervalStore.syncedSettingKeys.sorted()
+                == ["autoPauseMinutes", "idleNudgeMinutes", "promptsEnabled"],
+              "only the thresholds that decide what gets RECORDED are shared")
+    }
+}
+
+// MARK: - Deleting part of a session
+
+func testIntervalSlice() {
+    print("Interval slicing:")
+    let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+    func mins(_ n: Double) -> Date { t0.addingTimeInterval(n * 60) }
+
+    func fresh() -> (IntervalStore, URL, Int64) {
+        let (store, url) = try! makeStore()
+        let p = try! store.createProject(name: "P", colorHex: "#f00")
+        try! store.insertClosedInterval(projectID: p, start: t0, end: mins(60), deviceID: "air")
+        return (store, url, p)
+    }
+
+    do {   // a bite out of the middle leaves two pieces
+        let (store, url, _) = fresh(); defer { try? FileManager.default.removeItem(at: url) }
+        check(try! store.deleteIntervalSlice(id: store.intervals(from: t0).first!.id,
+                                            from: mins(20), to: mins(30)) == 2,
+              "cutting the middle out leaves the head and the tail")
+        let left = try! store.intervals(from: t0).sorted { $0.start < $1.start }
+        check(left.count == 2, "two rows, not one edited row")
+        check(left[0].end == mins(20) && left[1].start == mins(30),
+              "and they stop and start exactly at the cut")
+        check(left.allSatisfy { $0.deviceID == "air" },
+              "the device that RECORDED it is carried over — re-stamping would corrupt attribution")
+    }
+
+    do {   // trimming the tail, which is the commute repair case
+        let (store, url, _) = fresh(); defer { try? FileManager.default.removeItem(at: url) }
+        let id = try! store.intervals(from: t0).first!.id
+        check(try! store.deleteIntervalSlice(id: id, from: mins(17), to: mins(60)) == 1,
+              "cutting to the end leaves just the head")
+        let left = try! store.intervals(from: t0)
+        check(left.count == 1 && left[0].end == mins(17), "which ends where the cut began")
+    }
+
+    do {   // the whole thing
+        let (store, url, _) = fresh(); defer { try? FileManager.default.removeItem(at: url) }
+        let id = try! store.intervals(from: t0).first!.id
+        check(try! store.deleteIntervalSlice(id: id, from: t0, to: mins(60)) == 0,
+              "cutting the whole span leaves nothing")
+        check(try! store.intervals(from: t0).isEmpty, "and the row is gone")
+        check(try! store.tombstoneRecords().contains { $0.kind == "interval" },
+              "tombstoned, or a peer's log re-adds it on the next sync")
+    }
+
+    do {   // a sliver isn't worth a row
+        let (store, url, _) = fresh(); defer { try? FileManager.default.removeItem(at: url) }
+        let id = try! store.intervals(from: t0).first!.id
+        // Cut everything but the last half-second.
+        _ = try! store.deleteIntervalSlice(id: id, from: t0, to: mins(60).addingTimeInterval(-0.5))
+        check(try! store.intervals(from: t0).isEmpty,
+              "a sub-second remainder is dropped rather than kept as an empty-looking session")
+    }
+
+    do {   // a running interval is refused: its end moves, so the slice wouldn't be the visible one
+        let (store, url) = try! makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let p = try! store.createProject(name: "P", colorHex: "#f00")
+        try! store.switchTo(projectID: p, at: t0)
+        let id = try! store.openInterval()!.id
+        check(try! store.deleteIntervalSlice(id: id, from: t0, to: mins(5)) == -1,
+              "slicing a running interval is refused")
+        check(try! store.openInterval() != nil, "and it's still running afterwards")
     }
 }
 
@@ -3917,7 +4288,12 @@ do {
     try testDeviceAttribution()
     testDeviceLanes()
     testFeedbackPlatform()
+    testAllocationWeekdays()
+    testWeekdaysSync()
+    testFeedbackNumbering()
     testFeedbackAttachments()
+    testSharedSettings()
+    testIntervalSlice()
     testImageBytes()
     testPausedPresence()
     try testTaskNameReuse()

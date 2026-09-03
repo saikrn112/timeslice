@@ -491,6 +491,10 @@ final class SyncController: ObservableObject {
                     self.appState.reload()
                     NotificationCenter.default.post(name: TimesliceNotifications.dataDidChange, object: nil)
                 }
+                // A peer's newer threshold has to reach the live objects, not just the table — the
+                // auto-pause timer is armed from `Settings`, so a value sitting unread in the
+                // database would change nothing about when this device actually pauses.
+                if report.settingsApplied > 0 { self.settings.adoptSyncedSettings() }
                 self.applyMarkers(markers, discovered: peersSeen)
                 self.lastSyncedAt = Date()
                 // Only mention skipped files; a clean sync should say nothing.

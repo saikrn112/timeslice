@@ -90,6 +90,15 @@ targets:
         # letting the extension reach TimerModel would drag a sqlite connection into it, which is
         # exactly what 0xdead10cc punishes.
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: TIMESLICE_APP
+      configs:
+        # TIMESLICE_DEV switches on the Feedback tab and Diagnostics (note 71). Debug only, so a
+        # Release build — TestFlight, App Store — ships without them. DEBUG alone would do it, but
+        # naming the flag makes the intent explicit and matches the Mac's build script.
+        #
+        # NOTE: these conditions apply to THIS target only. Xcode does not pass them down to the
+        # SwiftPM package's targets, which is why `DeveloperTools` lives in the app and not in Core.
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: TIMESLICE_APP TIMESLICE_DEV
     dependencies:
       - package: Timeslice
         product: TimesliceCore

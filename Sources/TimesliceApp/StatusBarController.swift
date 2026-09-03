@@ -256,6 +256,12 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         let menu = NSMenu()
         menu.addItem(withTitle: "Open Timeslice", action: #selector(openMain), keyEquivalent: "")
             .target = self
+        // Reachable with the main window closed: feedback is its own window now, so it doesn't
+        // depend on that toolbar being on screen. Developer tool, so it isn't in a release build.
+        if BuildFlags.developerToolsEnabled {
+            menu.addItem(withTitle: "Feedback…", action: #selector(openFeedback), keyEquivalent: "")
+                .target = self
+        }
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
@@ -265,5 +271,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     @objc private func openMain() {
         NotificationCenter.default.post(name: .openMainWindow, object: nil)
+    }
+
+    @objc private func openFeedback() {
+        NotificationCenter.default.post(name: .openFeedbackWindow, object: nil)
     }
 }

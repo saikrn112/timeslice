@@ -46,6 +46,9 @@ public struct Feedback: Identifiable, Hashable, Sendable {
     /// Set once it's been dealt with. Kept rather than deleted, so the list of what's been done
     /// survives; `deleteFeedback` exists for genuine mistakes.
     public let resolvedAt: Date?
+    /// The number this note is CALLED, the same on every device — see the `seq` column. Distinct
+    /// from `id`, which is a local row number and differs per device.
+    public let seq: Int64
     /// Which app it's about. Optional because notes written before the tag existed have no answer,
     /// and guessing one from the device that wrote them would be wrong about half the time.
     public let platform: FeedbackPlatform?
@@ -53,13 +56,14 @@ public struct Feedback: Identifiable, Hashable, Sendable {
     public var isOpen: Bool { resolvedAt == nil }
 
     public init(id: Int64, text: String, createdAt: Date, deviceID: String?, resolvedAt: Date?,
-                platform: FeedbackPlatform? = nil) {
+                platform: FeedbackPlatform? = nil, seq: Int64 = 0) {
         self.id = id
         self.text = text
         self.createdAt = createdAt
         self.deviceID = deviceID
         self.resolvedAt = resolvedAt
         self.platform = platform
+        self.seq = seq == 0 ? id : seq
     }
 
     /// First line, for a one-line list row.

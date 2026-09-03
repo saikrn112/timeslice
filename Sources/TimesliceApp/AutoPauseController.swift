@@ -214,11 +214,15 @@ final class AutoPauseController: ObservableObject {
             checkpointReached()
             return
         }
-        if NudgePolicy.armsPausedNudge(settings.nudgeConfig, isPaused: engine.isPaused,
-                                       awaitingAnswer: awaitingResponse),
-           let since = engine.pausedSince,
-           Date().timeIntervalSince(since) >= settings.idleNudgeSeconds,
-           !idleNudgePending {
+        // The whole question, answered in Core so it's covered by tests: switched on, due, and not
+        // already asked about THIS pause. The last part is what the backstop was missing — answering
+        // "Leave paused" clears `idleNudgePending`, so a sweep testing only that asked again fifteen
+        // seconds later, and kept asking for as long as the task stayed paused.
+        if NudgePolicy.firesPausedNudge(settings.nudgeConfig, isPaused: engine.isPaused,
+                                        awaitingAnswer: awaitingResponse,
+                                        promptPending: idleNudgePending,
+                                        pausedSince: engine.pausedSince,
+                                        handledFor: idleNudgeHandledFor) {
             idleNudgeReached()
         }
     }
@@ -261,7 +265,11 @@ final class AutoPauseController: ObservableObject {
         guard NudgePolicy.armsPausedNudge(settings.nudgeConfig,
                                           isPaused: engine.isPaused,
                                           awaitingAnswer: awaitingResponse),
-              let since = engine.pausedSince else { return }
+              let since = engine.pausedSince,
+              // Already answered for this pause. `rearmIdleNudge` runs on every state change, and
+              // plenty of those (a rename, a sync merge) don't end the pause — re-arming on one
+              // would ask a question that's already been answered.
+              idleNudgeHandledFor != since else { return }
         let delay = Self.debugSeconds
             ?? NudgePolicy.delay(since: since, threshold: settings.idleNudgeSeconds)
         idleTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
@@ -282,6 +290,13 @@ final class AutoPauseController: ObservableObject {
     /// from a state change that should cancel it.
     private var idleNudgePending = false
 
+    /// The `pausedSince` of a pause that has already been asked about.
+    ///
+    /// "One nudge per pause" needs a memory of WHICH pause, not just "is a prompt up". Keyed on the
+    /// pause's start instant because that's what changes when a genuinely new pause begins — a fresh
+    /// pause gets a fresh timestamp, so it's nudgeable again without anything having to reset this.
+    private var idleNudgeHandledFor: Date?
+
     private func promptStillPaused(projectID: Int64, name: String) {
         let mins = Int(Date().timeIntervalSince(engine.pausedSince ?? Date()) / 60)
         let howLong = mins >= 1 ? "\(mins)m" : "a while"
@@ -293,6 +308,9 @@ final class AutoPauseController: ObservableObject {
         ) { [weak self] resume in
             guard let self else { return }
             self.idleNudgePending = false
+            // Answered — for THIS pause. Recorded before anything else, so both the timer path and
+            // the 15s backstop know not to ask again about it.
+            self.idleNudgeHandledFor = self.engine.pausedSince
             self.idleTimer?.invalidate(); self.idleTimer = nil
             if resume, self.appState.selectableProjects.contains(where: { $0.id == projectID }) {
                 self.engine.switchTo(projectID: projectID)

@@ -53,12 +53,17 @@ struct RootView: View {
             MetricsScreen()
                 .tabItem { Label("Metrics", systemImage: "chart.bar.xaxis") }
                 .tag(Tab.metrics)
-            FeedbackScreen()
-                .tabItem { Label("Feedback", systemImage: "note.text") }
-                .tag(Tab.feedback)
-                // Open notes as a tab badge: a note you haven't dealt with should be visible without
-                // opening the tab, which is the only thing that makes jotting one feel worthwhile.
-                .badge(model.openFeedbackCount)
+            // Developer tool (note 71): compiled out of a release build, so there's no tab to reach
+            // and no badge counting notes a user can't read. `#if`, not `if` — see `DeveloperTools`.
+            #if TIMESLICE_DEV || DEBUG
+                FeedbackScreen()
+                    .tabItem { Label("Feedback", systemImage: "note.text") }
+                    .tag(Tab.feedback)
+                    // Open notes as a tab badge: a note you haven't dealt with should be visible
+                    // without opening the tab, which is the only thing that makes jotting one feel
+                    // worthwhile.
+                    .badge(model.openFeedbackCount)
+            #endif
             SettingsScreen()
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(Tab.settings)
@@ -80,6 +85,11 @@ struct RootView: View {
         // was last open, and so Settings is reachable from either.
         .sheet(isPresented: $model.showingSwitcher) { SwitchWheelSheet() }
         .sheet(isPresented: $model.showingSettings) { SettingsScreen(showsDone: true) }
-        .sheet(isPresented: $model.showingDiagnostics) { DiagnosticsSheet() }
+        .sheet(isPresented: $model.showingDiagnostics) {
+            // Nothing should be able to present it in a release build, whatever asks.
+            #if TIMESLICE_DEV || DEBUG
+                DiagnosticsSheet()
+            #endif
+        }
     }
 }

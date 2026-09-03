@@ -8,21 +8,13 @@ import TimesliceCore
 /// that's when you notice things. This is where you sit down and go through them.
 struct FeedbackSheet: View {
     let store: IntervalStore
-    /// Half-written note, owned by the parent. This is presented as a popover so that clicking
-    /// away closes it, and a popover's dismissal destroys the view's own `@State` — typing two
-    /// sentences and losing them to a stray click would be a worse bug than the one that fixed.
-    @Binding var draft: String
-    /// Tag for the note being written. Defaults to the app you're in, since that's the likelier
-    /// subject — one click retags it, which is cheaper than making every note start untagged.
-    @Binding var draftPlatform: FeedbackPlatform?
+    /// Half-written note, owned by the window controller so closing the window doesn't discard it.
+    @ObservedObject var draft: FeedbackDraft
     var onClose: () -> Void
 
     @State private var notes: [Feedback] = []
     /// Show only notes about one app. nil is everything.
     @State private var filter: FeedbackPlatform?
-    /// Images pasted before the note itself has been saved. They can't be attached to a row that
-    /// doesn't exist yet, so they wait here and are written when Add is pressed.
-    @State private var pendingImages: [Data] = []
     @State private var attachments: [String: [FeedbackAttachment]] = [:]
     @State private var showResolved = false
     @State private var deviceLabels: [String: String] = [:]
@@ -62,16 +54,26 @@ struct FeedbackSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // No title and no Done button: the window has both. Repeating them inside cost a
+            // 16pt band of chrome that the list could use for another note.
             HStack {
-                Text("Feedback").font(.headline)
                 Text("\(notes.filter(\.isOpen).count) open")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Toggle("Show done", isOn: $showResolved)
                     .toggleStyle(.checkbox).font(.caption)
-                Button("Done") { onClose() }.keyboardShortcut(.defaultAction)
+                Button {
+                    // Pull, don't just re-read: if the note you're waiting for hasn't reached this
+                    // device yet, reloading the same rows tells you nothing.
+                    NotificationCenter.default.post(name: .syncNow, object: nil)
+                    reload()
+                } label: {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 10))
+                }
+                .buttonStyle(.borderless)
+                .help("Sync now and reload — for a note just written on another device")
             }
-            .padding(16)
+            .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 8)
 
             Divider()
 
@@ -79,24 +81,24 @@ struct FeedbackSheet: View {
             // of things you noticed is common enough that sending you elsewhere would be silly.
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
-                    TextField("What's wrong?", text: $draft, axis: .vertical)
+                    TextField("What's wrong?", text: $draft.text, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                         .lineLimit(1...4)
                         .onSubmit { add() }
                     Button("Add") { add() }
-                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 HStack(spacing: 8) {
                     // Who has to act on this. Set while writing, when you know — asking later means
                     // going back through a list of notes whose context you've lost.
-                    platformPicker(selection: $draftPlatform)
+                    platformPicker(selection: $draft.platform)
 
                     Spacer()
 
                     // ⌘V goes to the text field, so pasting a picture needs its own button. ⌘⇧V is
                     // the shortcut, and dropping an image file on this panel works too.
                     Button {
-                        if let png = ClipboardImage.png() { pendingImages.append(png) }
+                        if let png = ClipboardImage.png() { draft.pendingImages.append(png) }
                     } label: {
                         Label("Paste image", systemImage: "photo.on.rectangle")
                             .font(.system(size: 11))
@@ -106,10 +108,10 @@ struct FeedbackSheet: View {
                     .help("Paste a screenshot from the clipboard (⌘⇧V), or drop an image here")
                 }
 
-                if !pendingImages.isEmpty {
+                if !draft.pendingImages.isEmpty {
                     HStack(spacing: 6) {
-                        ForEach(Array(pendingImages.enumerated()), id: \.offset) { idx, data in
-                            thumbnail(data) { pendingImages.remove(at: idx) }
+                        ForEach(Array(draft.pendingImages.enumerated()), id: \.offset) { idx, data in
+                            thumbnail(data) { draft.pendingImages.remove(at: idx) }
                         }
                         Text("attached on Add").font(.system(size: 9)).foregroundStyle(.tertiary)
                     }
@@ -152,12 +154,12 @@ struct FeedbackSheet: View {
                 }
             }
         }
-        .frame(width: 560, height: 520)
+        .frame(minWidth: 460, minHeight: 380)
         .onAppear { reload() }
         // Dropping a screenshot from the desktop is the other half of pasting one.
         .onDrop(of: [.fileURL, .png, .tiff], isTargeted: nil) { providers in
             ClipboardImage.png(from: providers) { png in
-                if let png { pendingImages.append(png) }
+                if let png { draft.pendingImages.append(png) }
             }
             return true
         }
@@ -190,12 +192,11 @@ struct FeedbackSheet: View {
     }
 
     private func add() {
-        guard let id = (try? store.addFeedback(draft, platform: draftPlatform)) ?? nil else { return }
-        for png in pendingImages {
-            try? store.addAttachment(toFeedback: id, png: png)
-        }
-        draft = ""
-        pendingImages = []
+        guard let id = (try? store.addFeedback(draft.text, platform: draft.platform)) ?? nil
+        else { return }
+        for png in draft.pendingImages { try? store.addAttachment(toFeedback: id, png: png) }
+        draft.text = ""
+        draft.pendingImages = []
         reload()
     }
 
@@ -278,9 +279,10 @@ struct FeedbackSheet: View {
             .buttonStyle(.plain)
             .help(note.isOpen ? "Mark done" : "Reopen")
 
-            // The id, so a note can be referred to by number when handing work to an agent.
-            // Monospaced and fixed-width so the text column still lines up down the list.
-            Text("#\(note.id)")
+            // The SHARED number, not the row id: a note has to be called the same thing here and on
+            // the phone, or "issue 47" doesn't identify anything. Monospaced and fixed-width so the
+            // text column still lines up down the list.
+            Text("#\(note.seq)")
                 .font(.system(size: 10, design: .monospaced)).monospacedDigit()
                 .foregroundStyle(.tertiary)
                 .frame(width: 30, alignment: .trailing)

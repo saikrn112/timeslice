@@ -27,6 +27,8 @@ public struct SyncPayload: Codable, Equatable, Sendable {
     public var targets: [TargetRecord]?
     /// Notes. Optional for the same reason as the rest: an older build's payload must still decode.
     public var feedback: [FeedbackRecord]?
+    /// Preferences that decide what gets recorded, so every device applies the same thresholds.
+    public var settings: [SettingRecord]?
     /// The manifest of images attached to feedback. Just the manifest — the bytes travel as their
     /// own blobs, because this payload is rewritten in full on every publish.
     public var attachments: [AttachmentRecord]?
@@ -127,14 +129,19 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         /// Optional so a payload from a build without the done state still decodes; absent means live.
         public var createdAt: TimeInterval?
         public var completedAt: TimeInterval?
+        /// Weekday bitmask (Sunday = bit 0). Absent from an older peer, which means every day — the
+        /// behaviour those builds had.
+        public var weekdays: Int?
 
         public init(uid: String, subjectKind: String, subjectUID: String, seconds: TimeInterval,
                     direction: String, period: String, updatedAt: TimeInterval,
-                    createdAt: TimeInterval? = nil, completedAt: TimeInterval? = nil) {
+                    createdAt: TimeInterval? = nil, completedAt: TimeInterval? = nil,
+                    weekdays: Int? = nil) {
             self.uid = uid; self.subjectKind = subjectKind; self.subjectUID = subjectUID
             self.seconds = seconds; self.direction = direction; self.period = period
             self.updatedAt = updatedAt
             self.createdAt = createdAt; self.completedAt = completedAt
+            self.weekdays = weekdays
         }
     }
 
@@ -150,12 +157,29 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         /// "macos" | "ios" | "both", or absent. A raw string rather than the enum so a value from
         /// a newer peer decodes instead of failing the whole payload.
         public var platform: String?
+        /// The number the note is called. Travels so "issue 47" means one note everywhere; absent
+        /// from a build that predates it, in which case the receiver assigns one.
+        public var seq: Int64?
 
         public init(uid: String, text: String, deviceID: String?, createdAt: TimeInterval,
-                    resolvedAt: TimeInterval?, updatedAt: TimeInterval, platform: String? = nil) {
+                    resolvedAt: TimeInterval?, updatedAt: TimeInterval, platform: String? = nil,
+                    seq: Int64? = nil) {
             self.uid = uid; self.text = text; self.deviceID = deviceID
             self.createdAt = createdAt; self.resolvedAt = resolvedAt; self.updatedAt = updatedAt
             self.platform = platform
+            self.seq = seq
+        }
+    }
+
+    public struct SettingRecord: Codable, Equatable, Sendable {
+        public var key: String
+        /// Stringified, so one record type carries ints, bools and anything added later without the
+        /// payload schema needing to know which is which.
+        public var value: String
+        public var updatedAt: TimeInterval
+
+        public init(key: String, value: String, updatedAt: TimeInterval) {
+            self.key = key; self.value = value; self.updatedAt = updatedAt
         }
     }
 
@@ -189,6 +213,7 @@ public struct SyncPayload: Codable, Equatable, Sendable {
                 tags: [TagRecord]? = nil, tagLinks: [TagLinkRecord]? = nil,
                 targets: [TargetRecord]? = nil, feedback: [FeedbackRecord]? = nil,
                 attachments: [AttachmentRecord]? = nil,
+                settings: [SettingRecord]? = nil,
                 tasks: [TaskRecord], projects: [ProjectRecord], intervals: [IntervalRecord],
                 tombstones: [TombstoneRecord]) {
         self.deviceID = deviceID; self.deviceLabel = deviceLabel
@@ -197,6 +222,7 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         self.tags = tags; self.tagLinks = tagLinks; self.targets = targets
         self.feedback = feedback
         self.attachments = attachments
+        self.settings = settings
     }
 }
 
@@ -269,6 +295,8 @@ public struct MergeReport: Equatable, Sendable {
     public var targetsApplied = 0
     public var feedbackApplied = 0
     public var attachmentsApplied = 0
+    /// Settings adopted from a peer. Surfaced so the app knows to re-read them.
+    public var settingsApplied = 0
     public var deletionsApplied = 0
 
     public init() {}
@@ -280,6 +308,6 @@ public struct MergeReport: Equatable, Sendable {
             && intervalsReattributed == 0
             && tagsAdded == 0 && tagsMergedByName.isEmpty && tagEditsApplied == 0
             && tagLinksAdded == 0 && targetsApplied == 0 && feedbackApplied == 0
-            && attachmentsApplied == 0
+            && attachmentsApplied == 0 && settingsApplied == 0
     }
 }

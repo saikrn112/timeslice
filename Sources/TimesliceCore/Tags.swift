@@ -74,6 +74,73 @@ public struct TagTotal: Identifiable, Hashable, Sendable {
 }
 
 /// A time budget: spend at least (or at most) `seconds` on `subject` per `period`.
+/// The days of the week an allocation applies to.
+///
+/// A bitmask rather than a set of enum cases so it's one integer in the database and one integer in
+/// the sync payload — there's no sub-structure worth a table, and seven booleans in seven columns
+/// would be worse in every way.
+///
+/// Sunday is bit 0, matching `Calendar`'s 1-based `weekday` component minus one, so converting a
+/// date to a bit needs no lookup table and no off-by-one to get wrong twice.
+public struct Weekdays: Hashable, Sendable {
+    public var rawValue: Int
+
+    public init(rawValue: Int) {
+        // Anything outside the seven bits is discarded rather than kept: a stray high bit from a
+        // future format would otherwise count as an eighth day in `selectedCount`.
+        self.rawValue = rawValue & 0x7F
+    }
+
+    public static let all = Weekdays(rawValue: 0x7F)
+    public static let none = Weekdays(rawValue: 0)
+    /// Monday to Friday.
+    public static let weekdaysOnly = Weekdays(rawValue: 0b0111110)
+
+    /// `weekday` is `Calendar`'s 1...7, Sunday = 1.
+    public func contains(weekday: Int) -> Bool {
+        guard (1...7).contains(weekday) else { return false }
+        return rawValue & (1 << (weekday - 1)) != 0
+    }
+
+    public func toggling(weekday: Int) -> Weekdays {
+        guard (1...7).contains(weekday) else { return self }
+        return Weekdays(rawValue: rawValue ^ (1 << (weekday - 1)))
+    }
+
+    public var selectedCount: Int { (0..<7).reduce(0) { $0 + ((rawValue >> $1) & 1) } }
+    public var isAll: Bool { rawValue == Weekdays.all.rawValue }
+    /// An empty selection means the same thing as every day: there's no such allocation as one you
+    /// never work on, and dividing by zero days would make the pace infinite.
+    public var effective: Weekdays { rawValue == 0 ? .all : self }
+
+    /// Single letters for the bubbles, starting on Sunday to match the bit order.
+    public static let initials = ["S", "M", "T", "W", "T", "F", "S"]
+
+    /// How many of this allocation's days fall in `[start, end)` — the denominator for its pace.
+    ///
+    /// Counted by walking real calendar days rather than scaling 7ths, because a range doesn't have
+    /// to be a whole number of weeks: three of the four days you're viewing might be Mondays'
+    /// worth of nothing.
+    public func daysIn(start: Date, end: Date, calendar: Calendar = .current) -> Double {
+        let days = effective
+        guard end > start else { return 0 }
+        var count = 0.0
+        // Walks from `start` itself, NOT from `calendar.startOfDay(for: start)`. Normalising back to
+        // midnight silently pulls the cursor into the PREVIOUS day whenever the calendar here doesn't
+        // match the one that built the range — a week then counted as 8 days and every pace came out
+        // low. Since real ranges already begin at midnight, normalising bought nothing and cost that.
+        var cursor = start
+        // A partial day counts as a whole one: the question is "which days is this meant to happen
+        // on", and half of Tuesday is still Tuesday.
+        while cursor < end {
+            if days.contains(weekday: calendar.component(.weekday, from: cursor)) { count += 1 }
+            guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+        return count
+    }
+}
+
 public struct Target: Identifiable, Hashable, Sendable {
     public enum Direction: String, Sendable, CaseIterable {
         case atLeast, atMost
@@ -107,12 +174,20 @@ public struct Target: Identifiable, Hashable, Sendable {
     public let completedAt: Date?
     /// Manual position in the allocations list.
     public let sortOrder: Int
+    /// Which weekdays this allocation is meant to be worked on, as a bitmask: bit 0 = Sunday …
+    /// bit 6 = Saturday. `Weekdays.all` (every day) unless narrowed.
+    ///
+    /// It changes the DENOMINATOR, never the numerator: an hour recorded on an unselected day still
+    /// counts towards the total. Saying "I do this on weekdays" is a statement about how the hours
+    /// are meant to be spread, not a refusal to count Sunday's work.
+    public let weekdays: Weekdays
 
     public var isLive: Bool { completedAt == nil }
 
     public init(id: Int64, subject: TargetSubject, seconds: TimeInterval,
                 direction: Direction, period: Period,
-                createdAt: Date = Date(), completedAt: Date? = nil, sortOrder: Int = 0) {
+                createdAt: Date = Date(), completedAt: Date? = nil, sortOrder: Int = 0,
+                weekdays: Weekdays = .all) {
         self.id = id
         self.subject = subject
         self.seconds = seconds
@@ -121,6 +196,7 @@ public struct Target: Identifiable, Hashable, Sendable {
         self.createdAt = createdAt
         self.completedAt = completedAt
         self.sortOrder = sortOrder
+        self.weekdays = weekdays
     }
 }
 
@@ -198,6 +274,8 @@ public struct TargetProgress: Identifiable, Sendable {
     /// assumes an even spread across every day of the period, weekends included — a 40h/week budget
     /// becomes 5h43m/day rather than 8h across five days.
     public let rangeExpectedSeconds: TimeInterval
+    /// How many of the allocation's own weekdays fall in the period — the pace denominator.
+    public let workingDays: Double
 
     /// Progress against the pro-rated target. Can exceed 100, same as `percent`.
     public var rangePercent: Double {
@@ -213,7 +291,12 @@ public struct TargetProgress: Identifiable, Sendable {
     /// the page is filtered to. The trade-off is that early in a period it reads low, because it
     /// counts days you haven't lived yet.
     public var averagePerDaySeconds: TimeInterval {
-        periodDays > 0 ? actualSeconds / periodDays : 0
+        workingDays > 0 ? actualSeconds / workingDays : 0
+    }
+
+    /// The target expressed per working day — "2h a day, Monday to Friday".
+    public var targetPerDaySeconds: TimeInterval {
+        workingDays > 0 ? target.seconds / workingDays : 0
     }
 
     /// What a daily average would have to be over the remaining days to land on target. Nil once the
@@ -256,7 +339,8 @@ public struct TargetProgress: Identifiable, Sendable {
                 expectedSeconds: TimeInterval, elapsedFraction: Double, verdict: Verdict,
                 daysElapsed: Double = 1, periodDays: Double = 1,
                 todaySeconds: TimeInterval = 0,
-                rangeSeconds: TimeInterval = 0, rangeExpectedSeconds: TimeInterval = 0) {
+                rangeSeconds: TimeInterval = 0, rangeExpectedSeconds: TimeInterval = 0,
+                workingDays: Double = 0) {
         self.target = target
         self.name = name
         self.actualSeconds = actualSeconds
@@ -268,6 +352,9 @@ public struct TargetProgress: Identifiable, Sendable {
         self.todaySeconds = todaySeconds
         self.rangeSeconds = rangeSeconds
         self.rangeExpectedSeconds = rangeExpectedSeconds
+        // Falls back to the whole period, so a caller that doesn't know about weekdays still gets
+        // the old behaviour rather than a divide-by-zero.
+        self.workingDays = workingDays > 0 ? workingDays : max(1, periodDays)
     }
 }
 
@@ -314,7 +401,11 @@ public enum TargetMath {
         todaySeconds: TimeInterval = 0,
         rangeSeconds: TimeInterval = 0,
         /// Length of the range being VIEWED, in days — used to pro-rate the target onto it.
-        viewedRangeDays: Double = 0
+        viewedRangeDays: Double = 0,
+        /// The viewed range, needed to count how many of the allocation's OWN days fall inside it.
+        viewedRangeStart: Date? = nil,
+        viewedRangeEnd: Date? = nil,
+        calendar: Calendar = .current
     ) -> TargetProgress {
         let rangeDays = max(0, rangeEnd.timeIntervalSince(rangeStart)) / 86_400
         let scale = target.period.nominalDays > 0 ? rangeDays / target.period.nominalDays : 0
@@ -347,12 +438,30 @@ public enum TargetMath {
         // day still counts as a day you had.
         let daysElapsed = max(1, (rangeDays * elapsed).rounded(.up))
 
+        // Only the days this allocation is FOR. A 10h week worked Monday to Friday is 2h a day, not
+        // 1h26m — the pace you have to keep is what makes the number actionable, and spreading it
+        // over days you never work on quietly understates it.
+        let periodWorkingDays = target.weekdays.daysIn(start: rangeStart, end: rangeEnd,
+                                                       calendar: calendar)
+
+        // Pro-rating onto the VIEWED range counts its working days too, so a Saturday shows an
+        // expectation of zero for a weekdays-only allocation instead of a seventh of the week.
+        let viewedExpected: TimeInterval
+        if let vs = viewedRangeStart, let ve = viewedRangeEnd, !target.weekdays.effective.isAll {
+            let viewedWorkingDays = target.weekdays.daysIn(start: vs, end: ve, calendar: calendar)
+            let perWorkingDay = periodWorkingDays > 0 ? target.seconds / periodWorkingDays : 0
+            viewedExpected = perWorkingDay * viewedWorkingDays
+        } else {
+            viewedExpected = target.seconds * viewedRangeDays
+                / max(target.period.nominalDays, 0.0001)
+        }
+
         return TargetProgress(target: target, name: name, actualSeconds: actualSeconds,
                               expectedSeconds: expected, elapsedFraction: elapsed,
                               verdict: verdict, daysElapsed: daysElapsed,
                               periodDays: max(1, rangeDays), todaySeconds: todaySeconds,
                               rangeSeconds: rangeSeconds,
-                              rangeExpectedSeconds: target.seconds * viewedRangeDays
-                                  / max(target.period.nominalDays, 0.0001))
+                              rangeExpectedSeconds: viewedExpected,
+                              workingDays: periodWorkingDays)
     }
 }

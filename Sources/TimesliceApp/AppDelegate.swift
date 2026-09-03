@@ -31,6 +31,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Tooltips appear almost immediately instead of after AppKit's default ~2s wait.
+        //
+        // The delay is fine for "what does this button do", and wrong for the job tooltips do here:
+        // most of them exist to show the rest of a name the column had to clip, and waiting two
+        // seconds per name to read a list is slower than giving up. Milliseconds, and REGISTERED
+        // rather than set, so anyone who has chosen their own value keeps it.
+        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 250])
+
         do {
             if DemoData.isRequested {
                 // Screenshot mode: use a separate demo DB and populate it with sample history.
@@ -53,6 +61,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (with privacy on, windows use sharingType = .none and appear blank to any capture).
         if DemoData.isRequested { privacy.setWindowsAlwaysCapturable(true) }
         appState = AppState(store: store, engine: engine)
+        // Thresholds that decide where an interval ends now live in the database and travel with
+        // everything else, so this device stops being the only one that knows them.
+        settings.attach(store: store)
         // Restore the open interval FIRST, then reload — otherwise totals are computed while
         // nothing is running and the menu bar's first paint has no current task (it only
         // appeared after a manual pause/start nudged a refresh).
@@ -85,6 +96,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         NotificationCenter.default.publisher(for: .openMainWindow)
             .sink { [weak self] _ in self?.showMainWindow() }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .syncNow)
+            .sink { [weak self] _ in self?.sync?.syncNow() }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .openFeedbackWindow)
+            .sink { [weak self] _ in self?.showFeedbackWindow() }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: .openTaskPalette)
@@ -288,6 +307,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for (index, name) in starters.enumerated() {
             try store.createProject(name: name, colorHex: Palette.color(forIndex: index))
         }
+    }
+
+    /// Retained across closes so the window keeps its size, its position and any half-written note.
+    private var feedbackWindowController: FeedbackWindowController?
+
+    private func showFeedbackWindow() {
+        // Belt as well as braces: the notification can only be posted by UI that's already gated, but
+        // a window that opens in a release build because someone wired up a new caller is worse than
+        // a redundant check.
+        guard BuildFlags.developerToolsEnabled else { return }
+        if feedbackWindowController == nil {
+            feedbackWindowController = FeedbackWindowController(store: appState.storeForEditing,
+                                                               privacy: privacy)
+        }
+        feedbackWindowController?.show()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func showMainWindow() {

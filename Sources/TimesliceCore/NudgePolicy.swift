@@ -43,6 +43,27 @@ public enum NudgePolicy {
         !awaitingAnswer && c.pausedNudgeEnabled && isPaused
     }
 
+    /// Should the paused nudge fire RIGHT NOW?
+    ///
+    /// Separate from `armsPausedNudge`, which only answers "is this nudge switched on". The backstop
+    /// sweep needs the whole question — is it on, is it due, and has this particular pause already
+    /// been asked about — and getting that wrong is what turned "Leave paused" into a prompt every
+    /// fifteen seconds: the sweep tested only whether a prompt was currently up, and answering one
+    /// makes that false.
+    ///
+    /// `handledFor` is the `pausedSince` of a pause already answered. Comparing the instants, not a
+    /// boolean, is what makes "one nudge per pause" mean per PAUSE: a genuinely new pause carries a
+    /// new timestamp, so it becomes nudgeable again with nothing needing to be reset.
+    public static func firesPausedNudge(_ c: Config, isPaused: Bool, awaitingAnswer: Bool,
+                                       promptPending: Bool, pausedSince: Date?,
+                                       handledFor: Date?, now: Date = Date()) -> Bool {
+        guard armsPausedNudge(c, isPaused: isPaused, awaitingAnswer: awaitingAnswer),
+              !promptPending,
+              let pausedSince,
+              handledFor != pausedSince else { return false }
+        return now.timeIntervalSince(pausedSince) >= c.pausedSeconds
+    }
+
     /// Seconds until a nudge should fire for something that started at `since`, never negative
     /// (a threshold already passed fires on the next tick rather than never).
     public static func delay(since: Date, threshold: TimeInterval, now: Date = Date()) -> TimeInterval {

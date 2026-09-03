@@ -79,14 +79,18 @@ struct SettingsScreen: View {
                 }
 
 
-                Section {
-                    Button { showingDiagnostics = true } label: {
-                        Label("Diagnostics…", systemImage: "gauge.with.needle")
+                // Developer tool (note 71): the whole section goes in a release build, rather than
+                // leaving a heading over nothing.
+                #if TIMESLICE_DEV || DEBUG
+                    Section {
+                        Button { showingDiagnostics = true } label: {
+                            Label("Diagnostics…", systemImage: "gauge.with.needle")
+                        }
+                    } header: { header("Performance") } footer: {
+                        Text("Memory, CPU and per-path timings, plus MetricKit's daily report.")
+                            .font(Theme.captionSmall)
                     }
-                } header: { header("Performance") } footer: {
-                    Text("Memory, CPU and per-path timings, plus MetricKit's daily report.")
-                        .font(Theme.captionSmall)
-                }
+                #endif
 
                 syncSection
                 actionButtonSection
@@ -102,7 +106,11 @@ struct SettingsScreen: View {
             }
             .sheet(isPresented: $editingBudgets) { BudgetEditorSheet() }
             .sheet(isPresented: $editingTags) { TagEditorSheet() }
-            .sheet(isPresented: $showingDiagnostics) { DiagnosticsSheet() }
+            .sheet(isPresented: $showingDiagnostics) {
+                #if TIMESLICE_DEV || DEBUG
+                    DiagnosticsSheet()
+                #endif
+            }
             .onDisappear {
                 // Thresholds changed, so anything armed against the old ones is wrong.
                 model.rearmNudges()

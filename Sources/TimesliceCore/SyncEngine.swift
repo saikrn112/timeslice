@@ -74,13 +74,14 @@ public struct SyncEngine {
                                      subjectUID: $0.subjectUID, seconds: $0.seconds,
                                      direction: $0.direction, period: $0.period,
                                      updatedAt: $0.updatedAt, createdAt: $0.createdAt,
-                                     completedAt: $0.completedAt)
+                                     completedAt: $0.completedAt, weekdays: $0.weekdays)
         }
 
         let feedbackRecords = try store.feedbackForExport().map {
             SyncPayload.FeedbackRecord(uid: $0.uid, text: $0.text, deviceID: $0.deviceID,
                                        createdAt: $0.createdAt, resolvedAt: $0.resolvedAt,
-                                       updatedAt: $0.updatedAt, platform: $0.platform)
+                                       updatedAt: $0.updatedAt, platform: $0.platform,
+                                       seq: $0.seq)
         }
 
         let attachmentRecords = try store.attachmentsForExport().map {
@@ -89,11 +90,16 @@ public struct SyncEngine {
                                          createdAt: $0.createdAt, updatedAt: $0.updatedAt)
         }
 
+        let settingRecords = try store.settingsForExport().map {
+            SyncPayload.SettingRecord(key: $0.key, value: $0.value, updatedAt: $0.updatedAt)
+        }
+
         let tombs = try store.tombstoneRecords()
         return SyncPayload(deviceID: deviceID, deviceLabel: deviceLabel,
                            writtenAt: now.timeIntervalSince1970,
                            tags: tagRecords, tagLinks: linkRecords, targets: targetRecords,
                            feedback: feedbackRecords, attachments: attachmentRecords,
+                           settings: settingRecords,
                            tasks: taskRecords, projects: projectRecords,
                            intervals: intervalRecords, tombstones: tombs)
     }
@@ -271,7 +277,8 @@ public struct SyncEngine {
             if try store.applyRemoteTarget(uid: t.uid, subject: subject, seconds: t.seconds,
                                            direction: direction, period: period,
                                            remoteUpdatedAt: t.updatedAt,
-                                           createdAt: t.createdAt, completedAt: t.completedAt) {
+                                           createdAt: t.createdAt, completedAt: t.completedAt,
+                                           weekdays: t.weekdays) {
                 report.targetsApplied += 1
             }
         }
@@ -280,8 +287,19 @@ public struct SyncEngine {
             if try store.applyRemoteFeedback(uid: f.uid, text: f.text, deviceID: f.deviceID,
                                              createdAt: f.createdAt, resolvedAt: f.resolvedAt,
                                              remoteUpdatedAt: f.updatedAt,
-                                             platform: f.platform) {
+                                             platform: f.platform, seq: f.seq) {
                 report.feedbackApplied += 1
+            }
+        }
+        // Two devices offline at once can both hand a new note the same number. Settled here, over
+        // the merged set, by a rule that gives every device the same answer.
+        if report.feedbackApplied > 0 { _ = try store.normalizeFeedbackNumbers() }
+        // Shared thresholds. No dependency on anything else in the payload, and no tombstones —
+        // a key that stops being sent just keeps its last value.
+        for setting in (remote.settings ?? []) {
+            if try store.applyRemoteSetting(key: setting.key, value: setting.value,
+                                            remoteUpdatedAt: setting.updatedAt) {
+                report.settingsApplied += 1
             }
         }
         // Attachments after the notes they hang off: the manifest row references a note by uid, and
