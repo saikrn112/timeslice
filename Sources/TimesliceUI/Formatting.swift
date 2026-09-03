@@ -22,6 +22,21 @@ public enum Format {
 
     /// Live form with milliseconds — H:MM:SS.mmm — used for the running timer so it visibly
     /// ticks. Best paired with a monospaced font so the width stays stable.
+    /// `1:23.45` — HUNDREDTHS, the way the system Stopwatch reads.
+    ///
+    /// Two fractional digits, not three. Milliseconds give a digit that can never be read at any refresh
+    /// rate a battery-conscious app should use, and it churns the widest column in the row for no
+    /// information. Hundredths is what Apple's own stopwatch shows and it's legible.
+    public static func durationHundredths(_ seconds: TimeInterval) -> String {
+        let clamped = max(0, seconds)
+        let total = Int(clamped.rounded(.down))
+        // Truncated, not rounded: rounding can produce `.100`, which then renders as a jump.
+        let cs = min(99, Int((clamped - Double(total)) * 100))
+        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
+        if h > 0 { return String(format: "%d:%02d:%02d.%02d", h, m, s, cs) }
+        return String(format: "%d:%02d.%02d", m, s, cs)
+    }
+
     public static func durationMs(_ seconds: TimeInterval) -> String {
         let clamped = max(0, seconds)
         let total = Int(clamped.rounded(.down))

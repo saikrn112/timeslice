@@ -3515,6 +3515,33 @@ func testCrossDeviceTakeover() throws {
     }
 }
 
+// MARK: - The stopwatch-style clock format
+
+/// `durationHundredths` is what the in-app clock renders 30 times a second, so its edges matter: a format
+/// that can emit `.100`, or that rounds up to a whole second early, produces a visible jump on a digit the
+/// eye is already tracking.
+func testDurationHundredths() {
+    print("\nHundredths format:")
+    check(Format.durationHundredths(0) == "0:00.00", "zero")
+    check(Format.durationHundredths(1.5) == "0:01.50", "one and a half seconds")
+    check(Format.durationHundredths(83.45) == "1:23.45", "minutes and seconds, stopwatch style")
+    check(Format.durationHundredths(3600) == "1:00:00.00", "an hours field appears at an hour")
+    check(Format.durationHundredths(3661.07) == "1:01:01.07", "hours, minutes, seconds, hundredths")
+
+    // TRUNCATED, not rounded. 0.999 must read .99 and stay on second 0 — rounding gives ".100", which is
+    // three digits in a two-digit field, and rounding the whole value would tick the seconds early.
+    check(Format.durationHundredths(0.999) == "0:00.99", "0.999 truncates to .99 rather than rolling over")
+    check(Format.durationHundredths(59.999) == "0:59.99", "and doesn't roll the minute early")
+
+    // Negative elapsed is impossible but arrives if a clock is skewed; it must not render nonsense.
+    check(Format.durationHundredths(-5) == "0:00.00", "negative clamps to zero")
+
+    // Width is stable, which is what `monospacedDigit` plus a fixed format buys — a clock that changes
+    // width 30 times a second drags the whole row with it.
+    check(Format.durationHundredths(9.99).count == Format.durationHundredths(1.01).count,
+          "same width regardless of value, within a magnitude")
+}
+
 // MARK: - Footprint series bucketing
 
 /// The footprint chart's maths. Two things here are easy to get quietly wrong and would both produce a
@@ -3914,6 +3941,7 @@ do {
     testReversedClientID()
     try testDemoSeedInvariants()
     try testAllocationLifecycle()
+    testDurationHundredths()
     testFootprintSeries()
     try testWindowTotals()
     try testCrossDeviceTakeover()

@@ -295,7 +295,10 @@ struct TasksView: View {
                                               bottom: Self.taskRowGap / 2, trailing: 0))
                     .listRowBackground(
                         RoundedRectangle(cornerRadius: Theme.cardRadius)
-                            .fill(Theme.card)
+                            // The whole target project lights up, rows included, since any of them accepts
+                            // the drop — the destination is the area you're over, not a line to hit.
+                            .fill(dropTarget == (task.taskProjectID ?? -1)
+                                  ? Color.accentColor.opacity(0.18) : Theme.card)
                             .padding(.vertical, Self.taskRowGap / 2)
                     )
                     .contentShape(Rectangle())
@@ -320,6 +323,25 @@ struct TasksView: View {
                         .background(RoundedRectangle(cornerRadius: 8).fill(Theme.card))
                     }
                     .onTapGesture { model.toggle(taskID: task.id) }
+                    // EVERY ROW is a drop target, not just the project header.
+                    //
+                    // Aiming at a header meant one ~24pt strip per project, while dragging a card that's
+                    // 56pt tall — so the target was smaller than the thing being dragged and you had to
+                    // hunt for it. Dropping on any row means "put it where that task is", which is how you
+                    // already think about it: you drag towards the tasks you want it next to, not towards a
+                    // label.
+                    //
+                    // A drop onto a row of the SAME project is accepted and does nothing, rather than
+                    // rejected — a rejection animation reads as a failed gesture when the intent was
+                    // already satisfied.
+                    .dropDestination(for: TaskDragID.self) { items, _ in
+                        guard let first = items.first, first.id != task.id else { return false }
+                        model.setGroup(taskID: first.id, groupID: task.taskProjectID)
+                        Haptics.started()
+                        return true
+                    } isTargeted: { targeted in
+                        dropTarget = targeted ? (task.taskProjectID ?? -1) : nil
+                    }
                     .onLongPressGesture {
                         // Confirms the press landed BEFORE the sheet animates in. A long press with no
                         // feedback reads as "did that register?", which is the whole reason start/stop
@@ -476,22 +498,22 @@ struct TasksView: View {
 
 /// A project header's total, ticking only when that project owns the running task.
 ///
-/// Split out so the 10fps clock re-renders THIS label and nothing else — the whole point of the Mac's
-/// `TickClock` split, applied here. Shown to the minute, like the Mac's header, so the digits don't
-/// flicker at ten frames a second for a figure you glance at.
+/// Split out so only THIS label re-renders on a tick, not every group header on screen. Shown to the minute,
+/// like the Mac's header.
 private struct LiveGroupTotal: View {
     let committed: TimeInterval
     /// The running interval's start, or nil when this project isn't the one running.
     let runningOrigin: Date?
 
-    @ObservedObject private var clock = TickClock.shared
-
     var body: some View {
         if let runningOrigin {
-            let live = max(0, clock.now.timeIntervalSince(runningOrigin))
-            Text(Format.compact(committed + live))
-                .onAppear { clock.subscribe() }
-                .onDisappear { clock.unsubscribe() }
+            // ONCE A SECOND, not 30 Hz: this is shown to the minute, so a faster cadence would be pure
+            // wakeups for a figure that can't change. `TimelineView` pauses itself off screen, which the
+            // shared 10fps timer this replaced did not.
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                let live = max(0, context.date.timeIntervalSince(runningOrigin))
+                Text(Format.compact(committed + live))
+            }
         } else {
             Text(Format.compact(committed))
         }
