@@ -50,6 +50,8 @@ final class TimerModel: ObservableObject {
     /// The task palette. On the model rather than in `TasksView` so it can be opened from
     /// the root — which is what lets the headless `start-tab` hint screenshot it.
     @Published var showingAddTask = false
+    /// Diagnostics, presentable from the root so the `start-tab` hint can screenshot it.
+    @Published var showingDiagnostics = false
     /// Unresolved notes, for the Feedback tab's badge. Published (not computed per render) because a
     /// tab badge is evaluated on every layout pass and this is a sqlite query.
     @Published private(set) var openFeedbackCount = 0

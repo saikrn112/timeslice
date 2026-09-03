@@ -90,16 +90,13 @@ struct FeedbackScreen: View {
             }
             .navigationTitle("Feedback")
             .navigationBarTitleDisplayMode(.inline)
-            // The keyboard had no way down: this is a List, so there's nothing to tap that isn't a
-            // row, and the composer's field keeps focus until something takes it away. Dragging the
-            // list now dismisses it, and the toolbar above the keys has an explicit Done.
-            .scrollDismissesKeyboard(.interactively)
-            .toolbar {
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("Done") { focused = false; editFocused = false }
-                }
-            }
+            // Swiping the list down dismisses the keyboard, which is the gesture you'd reach for anyway.
+            //
+            // No Done bar above the keys: it was belt-and-braces added at the same time as the swipe, and
+            // once the swipe works it's a permanent row of chrome for something the gesture already does.
+            // `.immediately` rather than `.interactively` so a short flick dismisses instead of needing a
+            // deliberate drag — the interactive version keeps the keyboard half-up if you let go early.
+            .scrollDismissesKeyboard(.immediately)
             .onAppear(perform: reload)
             .photosPicker(isPresented: $showPicker, selection: $picking,
                           maxSelectionCount: 4, matching: .images)

@@ -3515,6 +3515,84 @@ func testCrossDeviceTakeover() throws {
     }
 }
 
+// MARK: - Footprint series bucketing
+
+/// The footprint chart's maths. Two things here are easy to get quietly wrong and would both produce a
+/// convincing-looking chart: pairing samples across a RESTART (cumulative CPU resets, so the delta is
+/// nonsense) and averaging away the spikes the chart exists to reveal.
+func testFootprintSeries() {
+    print("\nFootprint series:")
+    let t0: Double = 1_800_000_000   // an arbitrary fixed epoch, so buckets are deterministic
+
+    func sample(_ offset: Double, cpu: Double, mb: Double = 50, launch: Int = 1) -> FootprintSample {
+        FootprintSample(t: t0 + offset, r: UInt64(mb * 1_048_576), c: cpu, n: 4, l: launch)
+    }
+
+    do { // load is a slope, so one sample can produce nothing
+        check(FootprintSeries.bucket([sample(0, cpu: 0)], resolution: .tenMinutes).isEmpty,
+              "a single sample yields no buckets — load needs a pair")
+        check(FootprintSeries.bucket([], resolution: .hour).isEmpty, "no samples, no buckets")
+    }
+
+    do { // 60s apart, 6s of CPU consumed = 10% of one core
+        let b = FootprintSeries.bucket([sample(0, cpu: 10), sample(60, cpu: 16)],
+                                       resolution: .tenMinutes)
+        check(b.count == 1, "both samples land in one 10-minute bucket")
+        check(approx(b[0].peakCPULoad, 0.10, 0.001), "6s over 60s is 10% of a core")
+        check(approx(b[0].meanCPULoad, 0.10, 0.001), "a single pair means peak == mean")
+    }
+
+    do { // the PEAK survives, which is the whole point
+        let s = [sample(0, cpu: 0), sample(60, cpu: 0.6),      // 1%
+                 sample(120, cpu: 30.6),                       // 50% — the spike
+                 sample(180, cpu: 31.2)]                       // 1%
+        let b = FootprintSeries.bucket(s, resolution: .tenMinutes)
+        check(b.count == 1, "all within one bucket")
+        check(approx(b[0].peakCPULoad, 0.50, 0.01), "the spike is reported, not averaged away")
+        check(b[0].meanCPULoad < b[0].peakCPULoad, "and the mean is visibly lower, marking it as a burst")
+    }
+
+    do { // a RESTART must not fabricate a spike
+        // Launch 1 reaches 100s of CPU; launch 2 starts over at 0.5s. Pairing across that boundary would
+        // give a negative delta (discarded) — but pairing the other way round, which is what a naive
+        // implementation does when the new launch has already accrued more, invents an enormous spike.
+        let s = [sample(0, cpu: 99, launch: 1), sample(60, cpu: 100, launch: 1),
+                 sample(120, cpu: 0.5, launch: 2), sample(180, cpu: 1.0, launch: 2)]
+        let b = FootprintSeries.bucket(s, resolution: .tenMinutes)
+        check(b.count == 1, "one bucket")
+        // Only the two same-launch pairs count, both ~1s/60s.
+        check(b[0].peakCPULoad < 0.05,
+              "no spike is invented at the launch boundary (got \(b[0].peakCPULoad))")
+    }
+
+    do { // a long gap is not a flat reading
+        // Two samples an hour apart in a 10-minute chart: the gap exceeds twice the bucket width, so the
+        // pair is dropped rather than dividing a tiny delta across an hour and reporting a reassuring zero.
+        let b = FootprintSeries.bucket([sample(0, cpu: 0), sample(3600, cpu: 5)],
+                                       resolution: .tenMinutes)
+        check(b.allSatisfy { $0.peakCPULoad == 0 }, "a pair spanning a long sleep contributes no load")
+    }
+
+    do { // buckets align to absolute multiples, so the same data always charts the same
+        let b = FootprintSeries.bucket([sample(0, cpu: 0), sample(60, cpu: 1),
+                                        sample(1200, cpu: 2), sample(1260, cpu: 3)],
+                                       resolution: .tenMinutes)
+        check(b.count == 2, "samples 20 minutes apart fall in different 10-minute buckets")
+        check(b[0].start < b[1].start, "and come back in chronological order")
+        let width = FootprintResolution.tenMinutes.seconds
+        check(b.allSatisfy { $0.start.timeIntervalSince1970.truncatingRemainder(dividingBy: width) == 0 },
+              "bucket starts are aligned to the width, not to the first sample")
+    }
+
+    do { // trimming
+        let old = sample(-40 * 86_400, cpu: 1)
+        let recent = sample(-1 * 86_400, cpu: 1)
+        let kept = FootprintSeries.trimmed([old, recent], keepingDays: 30,
+                                           now: Date(timeIntervalSince1970: t0))
+        check(kept.count == 1 && kept[0].t == recent.t, "samples older than the window are dropped")
+    }
+}
+
 // MARK: - windowTotals agrees with summary, in one pass
 
 /// `windowTotals` exists purely for speed, so the only thing worth asserting is that it is IDENTICAL to the
@@ -3836,6 +3914,7 @@ do {
     testReversedClientID()
     try testDemoSeedInvariants()
     try testAllocationLifecycle()
+    testFootprintSeries()
     try testWindowTotals()
     try testCrossDeviceTakeover()
     try testRollOpenInterval()

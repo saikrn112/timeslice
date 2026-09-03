@@ -1,3 +1,4 @@
+import Charts
 import SwiftUI
 import TimesliceCore
 import TimesliceUI
@@ -16,6 +17,8 @@ struct DiagnosticsSheet: View {
     @State private var recentLoad: Double?
     @State private var paths: [(name: String, stat: Perf.Stat)] = []
     @State private var perfEnabled = Perf.shared.isEnabled
+    @State private var resolution: FootprintResolution = .tenMinutes
+    @State private var buckets: [FootprintBucket] = []
 
     var body: some View {
         NavigationStack {
@@ -28,6 +31,27 @@ struct DiagnosticsSheet: View {
                 } header: { Text("Footprint") } footer: {
                     Text("Resident memory is what the system judges for termination. CPU total is since "
                          + "launch — the slope matters, not the value.")
+                        .font(Theme.captionSmall)
+                }
+
+                Section {
+                    Picker("Resolution", selection: $resolution) {
+                        ForEach(FootprintResolution.allCases) { r in Text(r.rawValue).tag(r) }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: resolution) { _, _ in reloadChart() }
+
+                    if buckets.isEmpty {
+                        Text("Collecting — samples are taken once a minute.")
+                            .font(Theme.caption).foregroundStyle(.secondary)
+                    } else {
+                        cpuChart
+                        memoryChart
+                    }
+                } header: { Text("Over time") } footer: {
+                    Text("PEAK load per bucket, not average — a spike is the thing worth finding, and an "
+                         + "average is exactly what hides it. The faint line is the bucket mean: close to "
+                         + "the peak means steady load, far below means an occasional burst.")
                         .font(Theme.captionSmall)
                 }
 
@@ -80,6 +104,27 @@ struct DiagnosticsSheet: View {
                 }
 
                 Section {
+                    // The file is unreachable on a real phone without this: no container browsing, no
+                    // Xcode. Offline analysis is the whole point of writing JSONL rather than just showing
+                    // numbers on screen, so it needs a way out.
+                    let urls = DiagnosticsStore.shared.exportURLs
+                    if !urls.isEmpty {
+                        ShareLink(items: urls) {
+                            Label("Export logs", systemImage: "square.and.arrow.up")
+                        }
+                        Text(DiagnosticsStore.shared.fileSummary)
+                            .font(Theme.captionSmall).foregroundStyle(.tertiary)
+                    } else {
+                        Text("Nothing recorded yet").font(Theme.caption).foregroundStyle(.secondary)
+                    }
+                } header: { Text("Export") } footer: {
+                    Text("One JSON object per line: periodic footprint snapshots, plus MetricKit's daily "
+                         + "payload and any crash/hang diagnostics. Append-only, so a run never overwrites "
+                         + "an earlier one.")
+                        .font(Theme.captionSmall)
+                }
+
+                Section {
                     Button("Sample now") { refresh() }
                     Button("Write snapshot to disk") { DiagnosticsStore.shared.flushSnapshot() }
                     Button("Reset timings", role: .destructive) {
@@ -101,7 +146,43 @@ struct DiagnosticsSheet: View {
         }
     }
 
+    /// Peak vs mean CPU per bucket. Bars for the peak so spikes are unmissable, a line for the mean so a
+    /// tall bar can be told apart from sustained load.
+    private var cpuChart: some View {
+        Chart {
+            ForEach(buckets) { b in
+                BarMark(x: .value("When", b.start), y: .value("Peak CPU", b.peakCPULoad * 100))
+                    .foregroundStyle(Color.orange.opacity(0.75))
+            }
+            ForEach(buckets) { b in
+                LineMark(x: .value("When", b.start), y: .value("Mean CPU", b.meanCPULoad * 100))
+                    .foregroundStyle(Color.secondary)
+                    .lineStyle(StrokeStyle(lineWidth: 1))
+            }
+        }
+        .chartYAxisLabel("% of one core")
+        .frame(height: 130)
+    }
+
+    private var memoryChart: some View {
+        Chart(buckets) { b in
+            LineMark(x: .value("When", b.start), y: .value("Peak MB", b.peakResidentMB))
+                .foregroundStyle(Color.accentColor)
+            AreaMark(x: .value("When", b.start), y: .value("Peak MB", b.peakResidentMB))
+                .foregroundStyle(Color.accentColor.opacity(0.15))
+        }
+        .chartYAxisLabel("peak MB")
+        .frame(height: 100)
+    }
+
+    private func reloadChart() {
+        // Bucketing is `FootprintSeries`' job, not the view's — same reason every other number in this app
+        // comes out of Core.
+        buckets = FootprintSeries.bucket(DiagnosticsStore.shared.loadSeries(), resolution: resolution)
+    }
+
     private func refresh() {
+        reloadChart()
         DiagnosticsStore.shared.takeSample()
         footprint = DiagnosticsStore.shared.latest
         avgLoad = DiagnosticsStore.shared.averageCPULoad

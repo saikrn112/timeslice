@@ -71,7 +71,8 @@ struct RootView: View {
             if let hinted = Self.launchTab { tab = hinted }
             switch Self.launchHint {
             case "switcher": model.requestSwitcher()
-            case "add": model.showingAddTask = true   // focuses the Tasks search field
+            case "add": model.showingAddTask = true
+            case "diagnostics": tab = .settings; model.showingDiagnostics = true   // focuses the Tasks search field
             default: break
             }
         }
@@ -79,5 +80,6 @@ struct RootView: View {
         // was last open, and so Settings is reachable from either.
         .sheet(isPresented: $model.showingSwitcher) { SwitchWheelSheet() }
         .sheet(isPresented: $model.showingSettings) { SettingsScreen(showsDone: true) }
+        .sheet(isPresented: $model.showingDiagnostics) { DiagnosticsSheet() }
     }
 }

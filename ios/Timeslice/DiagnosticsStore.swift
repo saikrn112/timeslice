@@ -27,6 +27,18 @@ final class DiagnosticsStore: NSObject, MXMetricManagerSubscriber {
 
     /// One line per record, appended. Newline-delimited JSON so a truncated write costs one line rather than
     /// the file, and so it can be read with `tail` without parsing the whole thing.
+    /// The log, if it exists — `nil` keeps the export button out of the UI rather than sharing nothing.
+    var exportURL: URL? {
+        FileManager.default.fileExists(atPath: fileURL.path) ? fileURL : nil
+    }
+
+    /// Size and line count, so you can tell whether a run actually recorded anything before exporting.
+    var fileSummary: String {
+        guard let data = try? Data(contentsOf: fileURL) else { return "empty" }
+        let lines = data.split(separator: UInt8(ascii: "\n")).count
+        return String(format: "%d records · %.1f KB", lines, Double(data.count) / 1024)
+    }
+
     private var fileURL: URL {
         TimeslicePaths.defaultSupportDirectoryURL().appendingPathComponent("diagnostics.jsonl")
     }
@@ -38,12 +50,22 @@ final class DiagnosticsStore: NSObject, MXMetricManagerSubscriber {
 
     private var sampleTimer: Timer?
 
+    /// Distinguishes this process's samples from a previous launch's. `cpuSeconds` is cumulative per launch,
+    /// so without this a restart looks like negative CPU or, worse, a fabricated spike.
+    private let launchID = Int(Date().timeIntervalSince1970)
+
+    /// The persisted series, for the chart.
+    private var seriesURL: URL {
+        TimeslicePaths.defaultSupportDirectoryURL().appendingPathComponent("footprint.jsonl")
+    }
+
     func start() {
         MXMetricManager.shared.add(self)
-        // Sample on a slow cadence: the thing being measured is idle cost, so a fast sampler would be its
-        // own answer. 30s gives a usable slope while contributing nothing measurable itself.
+        // 60s. The measurement must not become the overhead: one `task_info` call is microseconds, so the
+        // real cost is the wakeup, and a minute is frequent enough to place a spike within a 10-minute
+        // bucket while adding one wakeup per minute to an app that already polls sync every 10-15s.
         takeSample()
-        sampleTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        sampleTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.takeSample() }
         }
     }
@@ -77,7 +99,54 @@ final class DiagnosticsStore: NSObject, MXMetricManagerSubscriber {
         guard let f = Footprint.sample() else { return nil }
         samples.append(f)
         if samples.count > maxSamples { samples.removeFirst(samples.count - maxSamples) }
+        // Persist too, so the chart survives a relaunch — the in-memory ring only covers this session, and a
+        // spike you care about is usually one you noticed after the fact.
+        appendSeries(FootprintSample(t: f.at.timeIntervalSince1970, r: f.residentBytes,
+                                     c: f.cpuSeconds, n: f.threads, l: launchID))
         return f
+    }
+
+    /// Read the persisted series back, trimmed to the last 30 days.
+    ///
+    /// Trimming happens HERE and rewrites the file, rather than on append: rewriting once a minute would make
+    /// the recorder cost more than what it records.
+    func loadSeries(keepingDays: Int = 30) -> [FootprintSample] {
+        guard let text = try? String(contentsOf: seriesURL, encoding: .utf8) else { return [] }
+        let decoder = JSONDecoder()
+        let all: [FootprintSample] = text.split(separator: "\n").compactMap { line in
+            guard let data = line.data(using: .utf8) else { return nil }
+            return try? decoder.decode(FootprintSample.self, from: data)
+        }
+        let kept = FootprintSeries.trimmed(all, keepingDays: keepingDays)
+        if kept.count < all.count { rewriteSeries(kept) }
+        return kept
+    }
+
+    private func appendSeries(_ sample: FootprintSample) {
+        guard let data = try? JSONEncoder().encode(sample),
+              var line = String(data: data, encoding: .utf8) else { return }
+        line += "\n"
+        if let handle = try? FileHandle(forWritingTo: seriesURL) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data(line.utf8))
+        } else {
+            try? Data(line.utf8).write(to: seriesURL)
+        }
+    }
+
+    private func rewriteSeries(_ samples: [FootprintSample]) {
+        let encoder = JSONEncoder()
+        let text = samples.compactMap { sample -> String? in
+            guard let data = try? encoder.encode(sample) else { return nil }
+            return String(data: data, encoding: .utf8)
+        }.joined(separator: "\n")
+        try? Data((text + "\n").utf8).write(to: seriesURL)
+    }
+
+    /// Both files, for the share sheet — the series is the one worth processing offline.
+    var exportURLs: [URL] {
+        [seriesURL, fileURL].filter { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     // MARK: - MetricKit

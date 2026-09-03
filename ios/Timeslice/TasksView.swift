@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import TimesliceCore
 import TimesliceUI
 
@@ -21,6 +22,8 @@ struct TasksView: View {
     /// recency view the Mac gets from its switcher, but the default now agrees.
     @State private var grouped = true
     @FocusState private var searchFocused: Bool
+    /// Section id currently under a drag, so only that header highlights.
+    @State private var dropTarget: Int64?
 
     var body: some View {
         NavigationStack {
@@ -296,8 +299,34 @@ struct TasksView: View {
                             .padding(.vertical, Self.taskRowGap / 2)
                     )
                     .contentShape(Rectangle())
+                    // DRAG to refile. The Mac has a grip and drop targets; the phone had no way at all to
+                    // move a task between projects short of the detail sheet's picker.
+                    //
+                    // No visible grip: a handle costs permanent width in every row, and on a touch screen
+                    // long-press-to-lift IS the system's grip — `.draggable` gives the lift, the shadow and
+                    // the drop animation for free. The drop targets highlight, which is what tells you the
+                    // gesture is live.
+                    //
+                    // Carries the row id rather than the uid: this drag starts and ends inside one process,
+                    // so there's no cross-device hop for an id to be wrong across.
+                    .draggable(TaskDragID(id: task.id)) {
+                        // Drag preview — the name alone, since the row's controls aren't meaningful mid-air.
+                        HStack(spacing: 6) {
+                            Circle().fill(Color(hex: model.colorHex(for: task)))
+                                .frame(width: Theme.dot, height: Theme.dot)
+                            Text(task.name).font(Theme.rowTitle)
+                        }
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.card))
+                    }
                     .onTapGesture { model.toggle(taskID: task.id) }
-                    .onLongPressGesture { editing = task }
+                    .onLongPressGesture {
+                        // Confirms the press landed BEFORE the sheet animates in. A long press with no
+                        // feedback reads as "did that register?", which is the whole reason start/stop
+                        // already buzz.
+                        Haptics.switched()
+                        editing = task
+                    }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button {
                             model.setArchived(taskID: task.id, true)
@@ -345,6 +374,25 @@ struct TasksView: View {
     }
 
     private func groupHeader(_ section: TimerModel.Section) -> some View {
+        groupHeaderBody(section)
+            // Drop target for a dragged task. The header is the project, so dropping onto it means
+            // "belongs here" without inventing a separate well to aim at.
+            .dropDestination(for: TaskDragID.self) { items, _ in
+                guard let first = items.first else { return false }
+                model.setGroup(taskID: first.id, groupID: section.group?.id)
+                Haptics.started()
+                return true
+            } isTargeted: { targeted in
+                dropTarget = targeted ? section.id : nil
+            }
+            // Only the header being aimed at lights up, so it's unambiguous where the task will land.
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(dropTarget == section.id ? Color.accentColor.opacity(0.18) : .clear)
+            )
+    }
+
+    private func groupHeaderBody(_ section: TimerModel.Section) -> some View {
         HStack(spacing: 6) {
             Circle().fill(Color(hex: section.colorHex)).frame(width: 6, height: 6)
             Text(section.name).font(Theme.sectionHeader)
@@ -634,4 +682,22 @@ struct NowCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 16).fill(Theme.card))
     }
+}
+
+/// A task being dragged, as a transferable payload.
+///
+/// A tiny wrapper rather than dragging a bare `Int64`: `Transferable` needs a concrete content type, and a
+/// custom one means the drop destination can only ever receive a Timeslice task — dropping a number or a
+/// string from another app can't accidentally match and refile something.
+struct TaskDragID: Codable, Transferable {
+    let id: Int64
+
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .timesliceTask)
+    }
+}
+
+extension UTType {
+    /// Declared in code only — this type never leaves the app, so it needs no Info.plist entry.
+    static let timesliceTask = UTType(exportedAs: "com.timeslice.ios.task")
 }
