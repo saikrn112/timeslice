@@ -197,7 +197,7 @@ final class MetricsModel: ObservableObject {
         }
     }
 
-    /// Allocation verdicts, counted — what the summary row shows without listing them.
+    /// Allocation verdicts, counted.
     var allocationCounts: (onTrack: Int, behind: Int) {
         var onTrack = 0, behind = 0
         for row in data.budgets {
@@ -208,4 +208,48 @@ final class MetricsModel: ObservableObject {
         }
         return (onTrack, behind)
     }
+
+    /// The allocations WORTH NAMING on the summary, worst first.
+    ///
+    /// A row of verdict dots was too abstract to act on: five coloured circles say "something is behind"
+    /// without saying which, so the row's only use was as a button. Naming the ones that need attention makes
+    /// the summary answer the question instead of advertising that an answer exists elsewhere.
+    ///
+    /// Worst first by how far past its own pace it is, not by raw size — a 20-minute-a-day habit missed
+    /// entirely matters more than a 60-hour month a little behind.
+    var allocationsNeedingAttention: [BudgetRows.Row] {
+        data.budgets
+            .filter { row in
+                switch row.progress.verdict {
+                case .behind, .over: return true
+                case .met, .onPace: return false
+                }
+            }
+            .sorted { lhs, rhs in
+                shortfallFraction(lhs.progress) > shortfallFraction(rhs.progress)
+            }
+    }
+
+    /// How far behind pace, as a fraction of what was expected by now. Comparable across periods and sizes.
+    private func shortfallFraction(_ p: TargetProgress) -> Double {
+        guard p.expectedSeconds > 0 else { return 0 }
+        return abs(p.expectedSeconds - p.actualSeconds) / p.expectedSeconds
+    }
+
+    /// When everything is fine, the one closest to trouble — so the row still names something rather than
+    /// just asserting that all is well.
+    var closestAllocation: BudgetRows.Row? {
+        data.budgets.min { lhs, rhs in
+            headroomFraction(lhs.progress) < headroomFraction(rhs.progress)
+        }
+    }
+
+    private func headroomFraction(_ p: TargetProgress) -> Double {
+        guard p.target.seconds > 0 else { return 1 }
+        return p.remainingSeconds / p.target.seconds
+    }
+
+    /// True when the range genuinely has nothing in it, so the UI can say that once instead of printing a
+    /// grid of zeros.
+    var isEmpty: Bool { data.summary.totalSeconds <= 0 }
 }

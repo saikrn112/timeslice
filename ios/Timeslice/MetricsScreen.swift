@@ -131,7 +131,34 @@ struct MetricsScreen: View {
 
     // MARK: - Hero
 
+    @ViewBuilder
     private var heroCard: some View {
+        if metrics.isEmpty { emptyHero } else { filledHero }
+    }
+
+    /// One line, not a card-sized void.
+    ///
+    /// The filled layout rendered as a big dash, a label and a sentence — about 130pt of card to say
+    /// "nothing", which reads as a screen that failed to load rather than a period with no time in it.
+    private var emptyHero: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "clock.badge.questionmark")
+                .font(.system(size: 20))
+                .foregroundStyle(.tertiary)
+            Text(metrics.range.isCurrent()
+                 ? "Nothing tracked yet \(metrics.range.label().lowercased())"
+                 : "Nothing tracked \(metrics.range.label().lowercased())")
+                .font(Theme.metricLabel)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 16).fill(Theme.card))
+    }
+
+    private var filledHero: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -179,39 +206,86 @@ struct MetricsScreen: View {
 
     // MARK: - Section rows
 
+    /// Names the allocations that need attention, with their figures.
+    ///
+    /// This was a row of verdict dots. Five coloured circles said "something is behind" without saying WHICH,
+    /// so the row's only function was to be a button — the summary advertised that an answer existed elsewhere
+    /// instead of giving it. Now it names up to two, worst first, with the gap and the pace that closes it.
     private var allocationsRow: some View {
         NavigationLink { AllocationsDetail(metrics: metrics) } label: {
             SummaryRow(title: "Allocations", detail: allocationSummary) {
                 if metrics.data.budgets.isEmpty {
-                    Text("None set").font(Theme.metricCaption).foregroundStyle(.secondary)
+                    Text("None set — add them in Settings.")
+                        .font(Theme.metricCaption).foregroundStyle(.secondary)
                 } else {
-                    AllocationDots(rows: metrics.data.budgets)
+                    VStack(spacing: 10) {
+                        // Worst two. Beyond that the summary becomes the detail screen, which is what the
+                        // drill-down is for.
+                        ForEach(highlighted) { row in
+                            AllocationLine(row: row)
+                        }
+                    }
                 }
             }
         }
         .buttonStyle(.plain)
+    }
+
+    /// The ones worth showing: what's behind, or — when nothing is — the one closest to its limit, so the row
+    /// still names something concrete rather than only asserting that all is well.
+    private var highlighted: [BudgetRows.Row] {
+        let needing = metrics.allocationsNeedingAttention
+        if !needing.isEmpty { return Array(needing.prefix(2)) }
+        return metrics.closestAllocation.map { [$0] } ?? []
     }
 
     private var allocationSummary: String {
         guard !metrics.data.budgets.isEmpty else { return "" }
         let counts = metrics.allocationCounts
         if counts.behind == 0 { return "all \(counts.onTrack) on track" }
-        return "\(counts.onTrack) on track, \(counts.behind) behind"
+        return "\(counts.behind) of \(metrics.data.budgets.count) need attention"
     }
 
+    /// The actual day timeline, at a height you can read.
+    ///
+    /// This was a 20pt sliver with no axis — decorative, and it made the row a button rather than information.
+    /// The day timeline is the one chart genuinely worth having on a phone, because its SHAPE is the thing you
+    /// read: whether the day was fragmented, where the gaps were, which block looks wrong. So it gets real
+    /// height and the hour axis, and the drill-down adds device attribution and the deletable session list.
     private var timelineRow: some View {
         NavigationLink { TimelineDetail(metrics: metrics) } label: {
-            SummaryRow(title: "Timeline",
-                       detail: metrics.data.segments.isEmpty
-                           ? "" : "\(metrics.data.sessions.count) blocks") {
+            SummaryRow(title: "Timeline", detail: timelineDetail) {
                 if metrics.data.segments.isEmpty {
-                    Text("Nothing tracked").font(Theme.metricCaption).foregroundStyle(.secondary)
+                    Text(metrics.range.unit == .day
+                         ? "Nothing tracked — start a timer on the Tasks tab."
+                         : "Pick a single day to see its timeline.")
+                        .font(Theme.metricCaption).foregroundStyle(.secondary)
                 } else {
-                    MiniTimeline(segments: metrics.data.segments, colorHex: metrics.colorHexForTask)
+                    VStack(alignment: .leading, spacing: 6) {
+                        TimelineStrip(segments: metrics.data.segments,
+                                      lanes: max(1, Aggregations.laneCount(metrics.data.segments)),
+                                      colorHex: metrics.colorHexForTask,
+                                      onTap: { _ in })
+                        HourAxis()
+                    }
                 }
             }
         }
         .buttonStyle(.plain)
+    }
+
+    private var timelineDetail: String {
+        guard !metrics.data.segments.isEmpty else { return "" }
+        let blocks = metrics.data.sessions.count
+        // "first at" is the concrete fact a shape can't give you.
+        let firstHour = metrics.data.segments.map(\.startHour).min() ?? 0
+        return "\(blocks) blocks from \(clockLabel(firstHour))"
+    }
+
+    private func clockLabel(_ hour: Double) -> String {
+        let h = Int(hour)
+        let m = Int((hour - Double(h)) * 60)
+        return String(format: "%d:%02d", h, m)
     }
 
     private var breakdownRow: some View {
@@ -277,19 +351,43 @@ struct SummaryRow<Content: View>: View {
     }
 }
 
-/// One dot per allocation in its verdict colour — the set's health at a glance, with no list to read.
-struct AllocationDots: View {
-    let rows: [BudgetRows.Row]
+/// One allocation, named, with its gap and the pace that closes it.
+///
+/// The concrete form of what verdict dots were gesturing at. A dot could only ever say "amber"; this says
+/// which allocation, how far off, and what would fix it — which is the difference between a status light and
+/// something you can act on.
+struct AllocationLine: View {
+    let row: BudgetRows.Row
+
+    private var p: TargetProgress { row.progress }
+    private var tint: Color { Theme.verdict(verdictKind(p.verdict)) }
 
     var body: some View {
-        HStack(spacing: 7) {
-            ForEach(rows) { row in
-                Circle()
-                    .fill(Theme.verdict(verdictKind(row.progress.verdict)))
-                    .frame(width: 12, height: 12)
+        HStack(spacing: 10) {
+            Circle().fill(Color(hex: row.colorHex)).frame(width: 10, height: 10)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(p.name).font(Theme.metricLabel).lineLimit(1)
+                Text(standing).font(Theme.metricCaption).foregroundStyle(.secondary).lineLimit(1)
             }
-            Spacer()
+            Spacer(minLength: 8)
+            Text("\(Int(p.percent.rounded()))%")
+                .font(Theme.metricTime)
+                .foregroundStyle(tint)
         }
+    }
+
+    /// The actionable sentence, not the verdict word. "behind" tells you the colour; "5h 39m left, 1h 53m/day"
+    /// tells you what to do about it.
+    private var standing: String {
+        if p.target.direction == .atLeast {
+            if p.remainingSeconds <= 0 { return "met · +\(BudgetRows.duration(p.overSeconds))" }
+            if let need = p.requiredPerDaySeconds {
+                return "\(BudgetRows.duration(p.remainingSeconds)) left · \(BudgetRows.duration(need))/day"
+            }
+            return "\(BudgetRows.duration(p.remainingSeconds)) short · period over"
+        }
+        if p.overSeconds > 0 { return "\(BudgetRows.duration(p.overSeconds)) over the limit" }
+        return "\(BudgetRows.duration(p.remainingSeconds)) of headroom"
     }
 }
 
