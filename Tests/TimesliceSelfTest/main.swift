@@ -3964,6 +3964,179 @@ func testCrossDeviceTakeover() throws {
     }
 }
 
+// MARK: - Day canvas: merging and layout
+
+/// The two things that made the vertical day canvas unreadable on real data. Both are properties, so they get
+/// asserted rather than re-checked by screenshot every time the view changes.
+func testDayCanvasLayout() {
+    print("\nDay canvas layout:")
+
+    func seg(_ id: Int64, _ task: Int64, _ from: Double, _ to: Double,
+             lane: Int = 0, device: String? = "mac") -> DaySegment {
+        DaySegment(id: id, projectID: task, startHour: from, endHour: to, lane: lane, deviceID: device)
+    }
+
+    do { // chunked runs merge — the case `rollOpenInterval` creates by design
+        let chunks = [seg(1, 7, 9.0, 9.5), seg(2, 7, 9.5, 10.0), seg(3, 7, 10.0, 10.25)]
+        let merged = Aggregations.mergeAdjacent(chunks)
+        check(merged.count == 1, "three consecutive chunks of one task become one block")
+        check(merged[0].chunkCount == 3, "and the block remembers it was three")
+        check(approx(merged[0].seconds, 75 * 60, 1), "spanning the whole run")
+        check(merged[0].intervalIDs == [1, 2, 3],
+              "keeping every source id, so the block can still be deleted as a unit")
+    }
+
+    do { // a real break must NOT merge
+        let split = [seg(1, 7, 9.0, 9.5), seg(2, 7, 11.0, 11.5)]
+        check(Aggregations.mergeAdjacent(split).count == 2,
+              "a 90-minute gap between same-task blocks is two blocks, not one")
+    }
+
+    do { // different tasks, devices and lanes never merge
+        check(Aggregations.mergeAdjacent([seg(1, 7, 9, 10), seg(2, 8, 10, 11)]).count == 2,
+              "different tasks stay separate")
+        check(Aggregations.mergeAdjacent([seg(1, 7, 9, 10, device: "mac"),
+                                          seg(2, 7, 10, 11, device: "phone")]).count == 2,
+              "same task on two devices stays separate — attribution is information")
+        check(Aggregations.mergeAdjacent([seg(1, 7, 9, 10, lane: 0),
+                                          seg(2, 7, 10, 11, lane: 1)]).count == 2,
+              "different lanes stay separate, or an overlap would be merged away")
+    }
+
+    do { // THE BUG: short blocks must not overlap once given a minimum height
+        // A cluster of 2-6 minute blocks, which at 44pt/hour are 1.5-4.4pt tall.
+        // Broken into steps: the one-liner form defeated the type checker.
+        var tiny: [DaySegment] = []
+        for i in 0..<8 {
+            let id = Int64(i + 1)
+            let start: Double = 9.0 + Double(i) * 0.05
+            let end: Double = start + 0.033
+            tiny.append(seg(id, id, start, end))
+        }
+        let placements = Aggregations.layout(Aggregations.mergeAdjacent(tiny),
+                                             hourHeight: 44, minHeight: 26)
+        check(placements.count == 8, "every block is placed")
+        check(placements.allSatisfy { $0.height >= 26 }, "none is shorter than the legible minimum")
+        // The property that actually failed on screen.
+        var overlaps = 0
+        for (a, b) in zip(placements, placements.dropFirst()) where b.y < a.y + a.height {
+            overlaps += 1
+        }
+        check(overlaps == 0, "no two placements overlap (was \(overlaps) before the flow layout)")
+        check(placements.allSatisfy { $0.isCompressed },
+              "and each is flagged as compressed, so the UI needn't imply it lasted that long")
+    }
+
+    do { // long blocks keep their TRUE position — compression is a fallback, not the rule
+        let long = [seg(1, 7, 9, 11), seg(2, 8, 13, 15)]
+        let placements = Aggregations.layout(Aggregations.mergeAdjacent(long),
+                                             hourHeight: 44, minHeight: 26)
+        check(approx(placements[0].y, 9 * 44, 0.5), "a long block sits at its real time offset")
+        check(approx(placements[1].y, 13 * 44, 0.5), "and so does the one after a gap")
+        check(placements.allSatisfy { !$0.isCompressed }, "neither is compressed")
+    }
+
+    do { // overlapping blocks sit side by side, so they must not push each other down
+        let overlapping = [seg(1, 7, 9, 11, lane: 0), seg(2, 8, 9.5, 10.5, lane: 1)]
+        let placements = Aggregations.layout(Aggregations.mergeAdjacent(overlapping),
+                                             hourHeight: 44, minHeight: 26)
+        check(approx(placements[1].y, 9.5 * 44, 0.5),
+              "a block in another lane keeps its time offset rather than being flowed below")
+    }
+
+    check(Aggregations.layout([], hourHeight: 44, minHeight: 26).isEmpty, "no blocks, no placements")
+}
+
+// MARK: - Per-day digests
+
+/// `dayDigests` exists for speed, so the test that matters is that it AGREES with the functions it replaces —
+/// `summary` for the total, and a per-day `rangeTotals` for the top task. A faster function that quietly
+/// disagrees is worse than three slow ones.
+func testDayDigests() throws {
+    print("\nDay digests:")
+    let (store, url) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let a = try store.createProject(name: "alpha", colorHex: "#4E79A7")
+    let b = try store.createProject(name: "beta", colorHex: "#F28E2B")
+
+    // `cal` (America/New_York), NOT `Calendar.current`, threaded through every call.
+    //
+    // The helper `date()` builds its instants in `cal`, so an assertion about "hour 9" only holds if the
+    // aggregation splits days and hours in the SAME zone. Defaulting to `Calendar.current` shifts everything
+    // by the machine's offset and the failure looks like broken bucketing. This has now caught me twice; the
+    // fix is to pass the calendar, not to loosen the assertion.
+    let now = date(2026, 3, 11, 23, 59)
+    let week = DateRange.resolve(unit: .week, anchor: now, calendar: cal)
+    let deep: TimeInterval = 25 * 60
+
+    // A midnight crossing, an overlap, and an empty day — the three cases a per-day roll-up gets wrong.
+    try store.insertClosedInterval(projectID: a, start: date(2026, 3, 9, 22, 30),
+                                   end: date(2026, 3, 10, 1, 15))
+    try store.insertClosedInterval(projectID: b, start: date(2026, 3, 10, 9, 0),
+                                   end: date(2026, 3, 10, 12, 0))
+    try store.insertClosedInterval(projectID: a, start: date(2026, 3, 11, 9, 0),
+                                   end: date(2026, 3, 11, 11, 0))
+    try store.insertClosedInterval(projectID: b, start: date(2026, 3, 11, 10, 30),
+                                   end: date(2026, 3, 11, 11, 30))
+    let intervals = try store.intervals()
+
+    let digests = Aggregations.dayDigests(intervals: intervals, range: week,
+                                          deepThreshold: deep, now: now, calendar: cal)
+
+    var expectedDays = 0
+    var cursor = cal.startOfDay(for: week.start)
+    while cursor < week.end {
+        expectedDays += 1
+        cursor = cal.date(byAdding: .day, value: 1, to: cursor)!
+    }
+    check(digests.count == expectedDays, "one row per calendar day in the range")
+    check(digests.contains { $0.totalSeconds == 0 }, "empty days are present, not omitted")
+
+    // Agreement with `summary`, day by day — the contract that matters, since this exists only for speed.
+    for digest in digests {
+        let day = DateRange.resolve(unit: .day, anchor: digest.day, calendar: cal)
+        let slow = Aggregations.summary(intervals: intervals, range: day,
+                                        deepThreshold: deep, now: now, calendar: cal)
+        check(approx(digest.totalSeconds, slow.totalSeconds, 0.5),
+              "total matches summary for \(cal.component(.day, from: digest.day))")
+        check(approx(digest.deepSeconds, slow.deepSeconds, 0.5),
+              "deep matches summary for \(cal.component(.day, from: digest.day))")
+    }
+
+    // Agreement with `rangeTotals` on which task owned each day.
+    let tasks = try store.listProjects()
+    for digest in digests where digest.topTaskID != nil {
+        let day = DateRange.resolve(unit: .day, anchor: digest.day, calendar: cal)
+        // No `calendar:` here, and none needed: `rangeTotals` clips by INSTANTS, which is
+        // timezone-agnostic. The day range it's given was already resolved in `cal`.
+        let totals = Aggregations.rangeTotals(projects: tasks, intervals: intervals,
+                                              range: day, now: now)
+        let expected = totals.max { $0.seconds < $1.seconds }?.project.id
+        check(digest.topTaskID == expected,
+              "top task matches rangeTotals for \(cal.component(.day, from: digest.day))")
+    }
+
+    if let overlapDay = digests.first(where: { cal.component(.day, from: $0.day) == 11 }) {
+        // 09:00-11:00 unioned with 10:30-11:30 is 2h30m, not the 3h a sum would give.
+        check(approx(overlapDay.totalSeconds, 150 * 60, 1),
+              "overlapping intervals are unioned on the day total")
+        // The top task is by SUMMED per-task seconds — no task overlaps itself — so alpha's 2h beats beta's
+        // 1h even though together they exceed the unioned day total.
+        check(overlapDay.topTaskID == a, "top task is the one with the most of its own time")
+    }
+
+    check(digests.allSatisfy { $0.hourFill.count == 24 }, "24 hour buckets per day")
+    check(digests.allSatisfy { $0.hourFill.allSatisfy { $0 >= 0 && $0 <= 1 } },
+          "hour fill stays within 0...1 even where intervals overlap")
+
+    if let d10 = digests.first(where: { cal.component(.day, from: $0.day) == 10 }) {
+        check(d10.hourFill[9] > 0.99, "a fully worked hour reads as full")
+        check(d10.hourFill[10] > 0.99 && d10.hourFill[11] > 0.99, "and so do the hours after it")
+        check(d10.hourFill[5] == 0, "an untouched hour reads as empty")
+        check(d10.hourFill[0] > 0.99, "the midnight-crossing tail fills the first hour of the day")
+    }
+}
+
 // MARK: - The stopwatch-style clock format
 
 /// `durationHundredths` is what the in-app clock renders 30 times a second, so its edges matter: a format
@@ -4396,6 +4569,8 @@ do {
     testReversedClientID()
     try testDemoSeedInvariants()
     try testAllocationLifecycle()
+    testDayCanvasLayout()
+    try testDayDigests()
     testDurationHundredths()
     testFootprintSeries()
     try testWindowTotals()

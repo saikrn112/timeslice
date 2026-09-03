@@ -13,7 +13,31 @@ import TimesliceCore
 @MainActor
 final class MetricsModel: ObservableObject {
     /// The period being viewed.
-    @Published var range = DateRange.resolve(unit: .day, anchor: Date())
+    ///
+    /// Seeded from a dev launch hint when one is present, so a populated day or the week view can be
+    /// screenshotted headlessly. `simctl` can't tap a day row, and the alternative — writing intervals into the
+    /// simulator's database to make today non-empty — would publish them to the real Drive account this
+    /// simulator is signed into. Read-only navigation is the only safe way to see a full canvas.
+    @Published var range = MetricsModel.initialRange()
+
+    static func initialRange(now: Date = Date()) -> DateRange {
+        #if TIMESLICE_DEV || DEBUG
+        let url = TimeslicePaths.defaultSupportDirectoryURL().appendingPathComponent("start-range")
+        let hint = (try? String(contentsOf: url, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        switch hint {
+        case "week": return DateRange.resolve(unit: .week, anchor: now)
+        case "month": return DateRange.resolve(unit: .month, anchor: now)
+        case .some(let value) where value.hasPrefix("day-"):
+            // `day-1` is yesterday, `day-3` three days back — whichever has data to look at.
+            let back = Int(value.dropFirst(4)) ?? 0
+            let day = Calendar.current.date(byAdding: .day, value: -back, to: now) ?? now
+            return DateRange.resolve(unit: .day, anchor: day)
+        default: break
+        }
+        #endif
+        return DateRange.resolve(unit: .day, anchor: now)
+    }
 
     /// The subject the page is FILTERED to, or nil for everything.
     ///
@@ -44,6 +68,8 @@ final class MetricsModel: ObservableObject {
         var sessions: [Interval] = []
         var budgets: [BudgetRows.Row] = []
         var buckets: [Bucket] = []
+        /// One row per day, for the week/month list.
+        var days: [DayDigest] = []
     }
 
     /// Only Day, Week and Month on the phone.
@@ -116,6 +142,10 @@ final class MetricsModel: ObservableObject {
             targets: (try? store.listTargets()) ?? [], tasks: model.allTasks,
             groups: model.groups, tags: model.allTags, tagIDsByTask: tagIDsByTask,
             intervals: everything, viewedRange: range, now: now)
+        // Only for multi-day ranges — a single day's list would be one row restating the canvas above it.
+        if range.unit != .day {
+            d.days = Aggregations.dayDigests(intervals: all, range: range, deepThreshold: deep, now: now)
+        }
         data = d
 
         rebuildStripIfNeeded(intervals: everything, deep: deep, now: now)
@@ -181,6 +211,12 @@ final class MetricsModel: ObservableObject {
         rebuild()
     }
 
+    /// Drop into one day from the week/month list. Only the zoom changes.
+    func selectDay(_ day: Date) {
+        range = DateRange.resolve(unit: .day, anchor: day, earliest: earliest)
+        rebuild()
+    }
+
     func select(unit: RangeUnit) {
         // Keep your position in time when changing granularity: the week containing the day you were on.
         let anchor = range.isCurrent() ? Date() : min(range.start, Date())
@@ -189,6 +225,31 @@ final class MetricsModel: ObservableObject {
     }
 
     // MARK: - Derived, for the summary rows
+
+    var nameForTask: (Int64) -> String {
+        { [weak self] id in self?.model.task(id: id)?.name ?? "(deleted task)" }
+    }
+
+    var labelForDevice: (String?) -> String? {
+        { [weak self] id in
+            guard let self, self.model.knownDevices.count > 1, let id else { return nil }
+            return self.model.deviceLabels[id]
+        }
+    }
+
+    /// Delete a displayed block — which may be SEVERAL intervals.
+    ///
+    /// A merged block is one thing on screen and one-or-more rows in the database, because `rollOpenInterval`
+    /// chunks a long run. Deleting the block deletes every chunk it was built from; the sheet says how many
+    /// first, since the whole point of chunking was that a forgotten timer can be trimmed deliberately.
+    func deleteBlock(_ block: MergedBlock) {
+        guard let store = model.storeIfLoaded else { return }
+        for id in block.intervalIDs { try? store.deleteInterval(id: id) }
+        model.reload()
+        invalidateStrip()
+        rebuild()
+        SyncController.shared.publishSoon()
+    }
 
     var colorHexForTask: (Int64) -> String {
         { [weak self] id in

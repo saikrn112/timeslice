@@ -265,3 +265,84 @@ public enum TimesliceError: Error, LocalizedError {
         }
     }
 }
+
+/// One day's worth of everything a compact day row needs.
+///
+/// Built by `Aggregations.dayDigests` in a single pass. `hourFill` is 24 values in 0…1 — the fraction of each
+/// clock hour that was tracked — which is enough to draw the day's shape as a small bar without shipping every
+/// interval to the view.
+public struct DayDigest: Identifiable, Sendable, Equatable {
+    public let day: Date
+    /// Unioned, so overlapping devices can't push a day past 24 hours.
+    public let totalSeconds: TimeInterval
+    public let deepSeconds: TimeInterval
+    /// 24 entries, one per clock hour, 0…1.
+    public let hourFill: [Double]
+    /// The task this day went mostly into, by summed seconds. Nil on an empty day.
+    public let topTaskID: Int64?
+    public let topTaskSeconds: TimeInterval
+
+    public var id: Date { day }
+
+    public init(day: Date, totalSeconds: TimeInterval, deepSeconds: TimeInterval,
+                hourFill: [Double], topTaskID: Int64?, topTaskSeconds: TimeInterval) {
+        self.day = day
+        self.totalSeconds = totalSeconds
+        self.deepSeconds = deepSeconds
+        self.hourFill = hourFill
+        self.topTaskID = topTaskID
+        self.topTaskSeconds = topTaskSeconds
+    }
+}
+
+
+/// Consecutive same-task segments, merged for display.
+///
+/// Chunked storage is right for the database — it's what lets a forgotten timer be trimmed — and wrong for a
+/// reader, who sees one activity. This is the reader's view of it, and it keeps every source interval id so the
+/// block can still be deleted as a unit.
+public struct MergedBlock: Identifiable, Sendable, Equatable {
+    public let projectID: Int64
+    public let startHour: Double
+    public let endHour: Double
+    public let lane: Int
+    public let deviceID: String?
+    /// Every interval this block was built from, oldest first. Length > 1 means it was chunked or resumed.
+    public let intervalIDs: [Int64]
+
+    /// The first source interval — stable across rebuilds, unlike a positional index.
+    public var id: Int64 { intervalIDs.first ?? 0 }
+    public var seconds: TimeInterval { (endHour - startHour) * 3600 }
+    public var chunkCount: Int { intervalIDs.count }
+
+    public init(projectID: Int64, startHour: Double, endHour: Double, lane: Int,
+                deviceID: String?, intervalIDs: [Int64]) {
+        self.projectID = projectID
+        self.startHour = startHour
+        self.endHour = endHour
+        self.lane = lane
+        self.deviceID = deviceID
+        self.intervalIDs = intervalIDs
+    }
+}
+
+
+/// A block plus where to draw it. See `Aggregations.layout`.
+public struct BlockPlacement: Identifiable, Sendable, Equatable {
+    public let block: MergedBlock
+    /// Points from the top of the canvas.
+    public let y: Double
+    public let height: Double
+    /// True when the block was given more height than its duration earns, so the UI can avoid implying that a
+    /// 2-minute block lasted as long as it looks.
+    public let isCompressed: Bool
+
+    public var id: Int64 { block.id }
+
+    public init(block: MergedBlock, y: Double, height: Double, isCompressed: Bool) {
+        self.block = block
+        self.y = y
+        self.height = height
+        self.isCompressed = isCompressed
+    }
+}

@@ -310,6 +310,69 @@ public enum Aggregations {
     /// (two devices, or older imports) would otherwise inflate a day past what physically elapsed
     /// and falsely clear the goal line. `deepSeconds` still sums, since "focused time" is about
     /// individual session lengths.
+    /// Everything the week/month day-list needs, per day, in ONE pass.
+    ///
+    /// The list shows a row per day: the total, the day's SHAPE as a small bar, and the task it went mostly
+    /// into. Getting those separately would mean `windowTotals` for the totals, `daySegments` per day for the
+    /// shapes and `rangeTotals` per day for the top task — three traversals, two of them per-day. On a month
+    /// that's ~60 passes over the whole history, which is exactly the cost that made the period strip take
+    /// 190 ms.
+    ///
+    /// Union, not sum, for the total: two devices overlapping during a handoff must not inflate a day past
+    /// the time that physically elapsed. `topTask` is by summed seconds rather than unioned, because "which
+    /// task got most of this day" is a per-task question and no task overlaps itself.
+    public static func dayDigests(
+        intervals: [Interval], range: DateRange, deepThreshold: TimeInterval,
+        now: Date = Date(), calendar: Calendar = .current
+    ) -> [DayDigest] {
+        // Seed every day in the range, so a day with nothing tracked still gets a row — a gap in the week is
+        // information, and omitting it would silently renumber the list.
+        var days: [Date] = []
+        var cursor = calendar.startOfDay(for: range.start)
+        while cursor < range.end {
+            days.append(cursor)
+            guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+        guard !days.isEmpty else { return [] }
+        let index = Dictionary(uniqueKeysWithValues: days.enumerated().map { ($1, $0) })
+
+        var spans = [[(start: Date, end: Date)]](repeating: [], count: days.count)
+        var deepSpans = spans
+        var perTask = [[Int64: TimeInterval]](repeating: [:], count: days.count)
+        // 24 buckets of covered seconds per day, turned into fractions at the end.
+        var hourSeconds = [[Double]](repeating: [Double](repeating: 0, count: 24), count: days.count)
+
+        for interval in intervals {
+            let end = interval.end ?? now
+            guard end > range.start, interval.start < range.end else { continue }
+            let isDeep = end.timeIntervalSince(interval.start) >= deepThreshold
+            forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
+                guard segEnd > segStart, let i = index[dayStart] else { return }
+                spans[i].append((segStart, segEnd))
+                if isDeep { deepSpans[i].append((segStart, segEnd)) }
+                perTask[i][interval.projectID, default: 0] += segEnd.timeIntervalSince(segStart)
+                forEachHourSegment(start: segStart, end: segEnd, calendar: calendar) { hStart, hEnd in
+                    let hour = calendar.component(.hour, from: hStart)
+                    guard hour >= 0, hour < 24 else { return }
+                    hourSeconds[i][hour] += hEnd.timeIntervalSince(hStart)
+                }
+            }
+        }
+
+        return days.enumerated().map { i, day in
+            let total = SpanUnion.coveredSeconds(spans[i])
+            let deep = SpanUnion.coveredSeconds(deepSpans[i])
+            let top = perTask[i].max { $0.value < $1.value }
+            return DayDigest(day: day,
+                             totalSeconds: total,
+                             deepSeconds: min(deep, total),
+                             hourFill: hourSeconds[i].map { min(1, $0 / 3600) },
+                             topTaskID: top?.key,
+                             topTaskSeconds: top?.value ?? 0)
+        }
+    }
+
     /// Totals for MANY windows in ONE pass over the intervals.
     ///
     /// Exists because the obvious thing — call `summary` once per window — is O(windows x intervals), and
@@ -543,6 +606,77 @@ public enum Aggregations {
 
     /// Devices in order of first appearance — a stable, caller-visible row order.
     /// nil (unattributed) sorts last so named devices keep the top rows.
+    /// Where each block should be DRAWN, given that a short block still needs a legible height.
+    ///
+    /// A calendar layout positions purely by time, which silently assumes blocks are long. Real days aren't: a
+    /// 2-minute block at 44pt/hour is 1.5pt tall, so its label collides with its neighbours and a busy day
+    /// renders as mush. Observed on real data — 35 blocks, many under 15 minutes.
+    ///
+    /// So placement FLOWS: each block wants its true time offset, but is pushed down if the previous one's
+    /// minimum height would overlap it. Time position is preserved wherever there's room and sacrificed only
+    /// where legibility requires it, which is the right way round — an unreadable block at the correct y is
+    /// worth less than a readable one slightly low.
+    ///
+    /// Pure and in Core so it's testable: "do any two placements overlap" is exactly the property that broke,
+    /// and it should not be re-provable only by screenshot.
+    public static func layout(_ blocks: [MergedBlock], hourHeight: Double,
+                              minHeight: Double, spacing: Double = 2) -> [BlockPlacement] {
+        let sorted = blocks.sorted { $0.startHour < $1.startHour }
+        // One cursor per lane: overlapping blocks sit side by side, so they must not push each other down.
+        var laneBottom: [Int: Double] = [:]
+        var out: [BlockPlacement] = []
+        for block in sorted {
+            let height = max(minHeight, (block.endHour - block.startHour) * hourHeight)
+            let wanted = block.startHour * hourHeight
+            let y = max(wanted, (laneBottom[block.lane] ?? -.infinity))
+            laneBottom[block.lane] = y + height + spacing
+            out.append(BlockPlacement(block: block, y: y, height: height,
+                                      isCompressed: height > (block.endHour - block.startHour) * hourHeight))
+        }
+        return out
+    }
+
+    /// Merge CONSECUTIVE segments of the same task into one visual block.
+    ///
+    /// Necessary because `rollOpenInterval` deliberately splits a long run into focus-length chunks, and a task
+    /// switched back to repeatedly produces a run of neighbours. Rendering each separately means a day of real
+    /// work becomes thirty slivers — which is accurate about the storage and wrong about the activity. Working
+    /// on one thing from 9 until 11, chunked four times, is one block to a reader.
+    ///
+    /// `tolerance` is how much dead time between two same-task segments still counts as continuous. Zero would
+    /// refuse to merge chunks that abut to the microsecond, and anything large would swallow a genuine break.
+    ///
+    /// Returns `MergedBlock`s rather than `DaySegment`s so the count is carried: a block that represents four
+    /// chunks has to be able to say so, and it can no longer be deleted by a single interval id.
+    public static func mergeAdjacent(_ segments: [DaySegment],
+                                     toleranceHours: Double = 1.0 / 60) -> [MergedBlock] {
+        let sorted = segments.sorted { ($0.startHour, $0.lane) < ($1.startHour, $1.lane) }
+        var out: [MergedBlock] = []
+        for seg in sorted {
+            if let last = out.last,
+               last.projectID == seg.projectID,
+               last.lane == seg.lane,
+               last.deviceID == seg.deviceID,
+               seg.startHour - last.endHour <= toleranceHours {
+                out[out.count - 1] = MergedBlock(
+                    projectID: last.projectID,
+                    startHour: last.startHour,
+                    endHour: max(last.endHour, seg.endHour),
+                    lane: last.lane,
+                    deviceID: last.deviceID,
+                    intervalIDs: last.intervalIDs + [seg.id])
+            } else {
+                out.append(MergedBlock(projectID: seg.projectID,
+                                       startHour: seg.startHour,
+                                       endHour: seg.endHour,
+                                       lane: seg.lane,
+                                       deviceID: seg.deviceID,
+                                       intervalIDs: [seg.id]))
+            }
+        }
+        return out
+    }
+
     public static func orderedDevices(_ segments: [DaySegment],
                                       deviceOrder: [String] = []) -> [String?] {
         // Sorted by id, NOT by first appearance. First-appearance order changed as soon as an
