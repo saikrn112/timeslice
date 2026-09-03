@@ -22,7 +22,8 @@ struct ProjectListView: View {
     @State private var creatingEmptyProject = false
 
     /// Project awaiting a brand-new tag, and the name being typed.
-    @State private var taggingProjectID: Int64?
+    /// Subject the "New tag…" sheet will attach to — a task or a project.
+    @State private var taggingSubject: TargetSubject?
     @State private var newTagName = ""
 
     /// WhatsApp-forward-style selection mode: tick boxes appear, and an action bar slides in to
@@ -125,8 +126,8 @@ struct ProjectListView: View {
         }
         // Naming a brand-new project for a task. A sheet (not a dialog) because it takes input.
         .sheet(isPresented: Binding(
-            get: { taggingProjectID != nil },
-            set: { if !$0 { taggingProjectID = nil; newTagName = "" } }
+            get: { taggingSubject != nil },
+            set: { if !$0 { taggingSubject = nil; newTagName = "" } }
         )) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("New tag").font(.headline)
@@ -135,7 +136,7 @@ struct ProjectListView: View {
                     .onSubmit { commitNewTag() }
                 HStack {
                     Spacer()
-                    Button("Cancel") { taggingProjectID = nil; newTagName = "" }
+                    Button("Cancel") { taggingSubject = nil; newTagName = "" }
                     Button("Create") { commitNewTag() }
                         .keyboardShortcut(.defaultAction)
                         .disabled(newTagName.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -362,7 +363,7 @@ struct ProjectListView: View {
         .contextMenu {
             if section.id != -1 {
                 Button("Rename…") { beginGroupRename(section) }
-                tagMenu(for: section.id)
+                tagMenu(for: .project(section.id))
                 Divider()
                 Button("Delete project", role: .destructive) {
                     // Tasks fall back to Inbox — never destroys tracked time.
@@ -562,7 +563,10 @@ struct ProjectListView: View {
             }
         }
         .onHover { hoveredRowID = $0 ? project.id : (hoveredRowID == project.id ? nil : hoveredRowID) }
-        .contextMenu { projectMenu(for: project) }
+        .contextMenu {
+            projectMenu(for: project)
+            tagMenu(for: .task(project.id))
+        }
         // The whole section is a drop zone, not just its header: dropping onto ANY task row
         // moves the dragged cards into that row's project.
         .onDrop(of: [.text], isTargeted: Binding(
@@ -822,31 +826,51 @@ struct ProjectListView: View {
     /// Tag assignment lives in a context menu rather than on the row: the project header is
     /// deliberately tiny, and tags are set once in a while, not per glance.
     ///
-    /// Only projects can be tagged from the UI for now. Tasks can carry tags too — the store and
-    /// schema already support it — so exposing that later needs no migration.
+    /// Works on a TASK as well as a project. The store and schema always allowed both —
+    /// `effectiveTagIDsByTask` unions a task's own tags with the ones inherited from its project —
+    /// only the menu was project-only, which meant a one-off task could be tagged solely by inventing
+    /// a project to hold it.
+    ///
+    /// A task's own tag ADDS to whatever it inherits rather than replacing it: tags overlap by
+    /// design, and "this task is also research" is the normal reason to reach for this.
     @ViewBuilder
-    private func tagMenu(for projectID: Int64) -> some View {
-        let assigned = Set((try? store.tagIDs(for: .project(projectID))) ?? [])
+    private func tagMenu(for subject: TargetSubject) -> some View {
+        let assigned = Set((try? store.tagIDs(for: subject)) ?? [])
+        // Shown but not toggleable: an inherited tag belongs to the project, and offering to
+        // "untick" it here would either lie or silently retag the whole project.
+        let inherited = inheritedTagIDs(for: subject).subtracting(assigned)
         Menu("Tags") {
             ForEach(allTags) { tag in
-                Button {
-                    if assigned.contains(tag.id) {
-                        try? store.removeTag(tag.id, from: .project(projectID))
-                    } else {
-                        try? store.addTag(tag.id, to: .project(projectID))
+                if inherited.contains(tag.id) {
+                    Text("↳ \(tag.name) (from project)")
+                } else {
+                    Button {
+                        if assigned.contains(tag.id) {
+                            try? store.removeTag(tag.id, from: subject)
+                        } else {
+                            try? store.addTag(tag.id, to: subject)
+                        }
+                        appState.reload()
+                    } label: {
+                        // A leading tick stands in for a checkbox; Menu doesn't offer a real one.
+                        Text(assigned.contains(tag.id) ? "✓ \(tag.name)" : "   \(tag.name)")
                     }
-                    appState.reload()
-                } label: {
-                    // A leading tick stands in for a checkbox; Menu doesn't offer a real one.
-                    Text(assigned.contains(tag.id) ? "✓ \(tag.name)" : "   \(tag.name)")
                 }
             }
             if !allTags.isEmpty { Divider() }
             Button("New tag…") {
                 newTagName = ""
-                taggingProjectID = projectID
+                taggingSubject = subject
             }
         }
+    }
+
+    /// Tags a task gets from its project, which it can't turn off from here.
+    private func inheritedTagIDs(for subject: TargetSubject) -> Set<Int64> {
+        guard case .task(let id) = subject,
+              let groupID = appState.projects.first(where: { $0.id == id })?.taskProjectID
+        else { return [] }
+        return Set((try? store.tagIDs(for: .project(groupID))) ?? [])
     }
 
     /// Read straight from the store rather than cached: the menu is built on demand, so a stale
@@ -855,14 +879,14 @@ struct ProjectListView: View {
 
     private func commitNewTag() {
         let name = newTagName.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty, let projectID = taggingProjectID else { return }
+        guard !name.isEmpty, let subject = taggingSubject else { return }
         // upsertTag reuses an existing name, so typing one you already have attaches it rather
         // than creating a second tag that would split its totals.
         if let tagID = try? store.upsertTag(name: name,
                                            colorHex: Palette.color(forIndex: allTags.count)) {
-            try? store.addTag(tagID, to: .project(projectID))
+            try? store.addTag(tagID, to: subject)
         }
-        taggingProjectID = nil
+        taggingSubject = nil
         newTagName = ""
         appState.reload()
     }

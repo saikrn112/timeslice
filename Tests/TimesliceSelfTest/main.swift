@@ -1678,6 +1678,55 @@ func testFeedbackPlatform() {
     }
 }
 
+// MARK: - Tagging a task directly
+
+func testTaskTags() {
+    print("Task tags:")
+    do {
+        let (store, url) = try! makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let group = try! store.upsertTaskProject(name: "office", colorHex: "#00f")
+        let task = try! store.createProject(name: "recon paper", colorHex: "#f00", inGroup: group)
+        let loose = try! store.createProject(name: "tax return", colorHex: "#0f0")
+
+        let work = try! store.upsertTag(name: "work", colorHex: "#111")
+        let research = try! store.upsertTag(name: "research", colorHex: "#222")
+
+        // A tag on the PROJECT is inherited by its tasks — the behaviour that already existed.
+        try! store.addTag(work, to: .project(group))
+        check(try! store.effectiveTagIDsByTask()[task] == [work],
+              "a task inherits its project's tag")
+
+        // A tag on the TASK adds to what it inherits rather than replacing it: tags overlap by
+        // design, and "this task is also research" is the whole reason to reach for it.
+        try! store.addTag(research, to: .task(task))
+        check(try! store.effectiveTagIDsByTask()[task] == [work, research],
+              "and its own tag adds to that rather than replacing it")
+
+        // A task in no project can be tagged on its own, which is what made this necessary: it was
+        // taggable only by inventing a project to hold it.
+        try! store.addTag(research, to: .task(loose))
+        check(try! store.effectiveTagIDsByTask()[loose] == [research],
+              "a task with no project carries its own tags")
+
+        // Removing the task's own tag leaves the inherited one alone.
+        try! store.removeTag(research, from: .task(task))
+        check(try! store.effectiveTagIDsByTask()[task] == [work],
+              "removing a task's own tag doesn't touch what it inherits")
+
+        // And the task's time reaches the tag through its OWN link, with no project involved.
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        try! store.insertClosedInterval(projectID: loose, start: t0, end: t0.addingTimeInterval(3600))
+        let range = DateRange(unit: .day, start: t0.addingTimeInterval(-86_400),
+                             end: t0.addingTimeInterval(86_400))
+        let totals = Aggregations.tagTotals(tags: try! store.listTags(),
+                                            intervals: try! store.intervals(),
+                                            tagIDsByTask: try! store.effectiveTagIDsByTask(),
+                                            range: range)
+        check(totals.first { $0.tag?.id == research }?.seconds == 3600,
+              "a directly-tagged task's time shows up under that tag")
+    }
+}
+
 // MARK: - Allocation weekdays
 
 func testAllocationWeekdays() {
@@ -3262,6 +3311,7 @@ do {
     try testDeviceAttribution()
     testDeviceLanes()
     testFeedbackPlatform()
+    testTaskTags()
     testAllocationWeekdays()
     testWeekdaysSync()
     testFeedbackNumbering()
