@@ -67,6 +67,13 @@ final class AppState: ObservableObject {
     @Published private(set) var tagsByProject: [Int64: [Tag]] = [:]
     @Published private(set) var allTags: [Tag] = []
 
+    /// A task's OWN tags — not the ones it inherits from its project.
+    ///
+    /// Only the direct ones, because the inherited ones are already on the section header the task
+    /// sits under: repeating "office" on all nine of that project's tasks would be nine copies of one
+    /// fact. What a task row can't otherwise tell you is the tag it carries on top of that.
+    @Published private(set) var ownTagsByTask: [Int64: [Tag]] = [:]
+
     private func reloadTags() {
         allTags = (try? store.listTags()) ?? []
         let byID = Dictionary(uniqueKeysWithValues: allTags.map { ($0.id, $0) })
@@ -77,6 +84,15 @@ final class AppState: ObservableObject {
             if !tags.isEmpty { map[group.id] = tags.sorted { $0.sortOrder < $1.sortOrder } }
         }
         tagsByProject = map
+
+        // ONE query for every task, not one per row: a per-row lookup is the trap the comment above
+        // warns about, and there are two orders of magnitude more tasks than projects.
+        var byTask: [Int64: [Tag]] = [:]
+        for (taskID, ids) in (try? store.directTagIDsByTask()) ?? [:] {
+            let tags = ids.compactMap { byID[$0] }
+            if !tags.isEmpty { byTask[taskID] = tags.sorted { $0.sortOrder < $1.sortOrder } }
+        }
+        ownTagsByTask = byTask
     }
 
     private func recomputeTotals() {

@@ -1350,6 +1350,20 @@ public final class IntervalStore {
     ///
     /// One query rather than per-task lookups: this feeds the metrics breakdown, which would
     /// otherwise issue a query per task on every recompute.
+    /// Tags attached to each task ITSELF, without the ones it inherits from its project.
+    ///
+    /// The inherited ones are `effectiveTagIDsByTask`'s job. This exists for the UI, which shows a
+    /// task's own tags on its row and leaves the inherited ones to the project header above it.
+    public func directTagIDsByTask() throws -> [Int64: Set<Int64>] {
+        let stmt = try prepare("SELECT subject_id, tag_id FROM tag_links WHERE subject_kind = 'task'")
+        defer { sqlite3_finalize(stmt) }
+        var out: [Int64: Set<Int64>] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out[sqlite3_column_int64(stmt, 0), default: []].insert(sqlite3_column_int64(stmt, 1))
+        }
+        return out
+    }
+
     public func effectiveTagIDsByTask() throws -> [Int64: Set<Int64>] {
         var out: [Int64: Set<Int64>] = [:]
         // Directly tagged tasks.

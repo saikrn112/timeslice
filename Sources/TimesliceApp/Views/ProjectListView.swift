@@ -516,6 +516,22 @@ struct ProjectListView: View {
                     .foregroundStyle(isFinished ? .secondary : .primary)
                     .lineLimit(1)
                     .onTapGesture(count: 2) { beginRename(project) }   // double-click to rename in place
+
+                // The task's OWN tags. Not the inherited ones: those are on the section header this
+                // row sits under, and repeating "office" on all nine of that project's tasks would
+                // be nine copies of one fact. What the row can't otherwise tell you is the tag it
+                // carries in ADDITION to its project's.
+                if let tags = appState.ownTagsByTask[project.id] {
+                    ForEach(tags) { tag in
+                        Text(tag.name)
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color(hex: tag.colorHex).opacity(0.9))
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(Capsule().fill(Color(hex: tag.colorHex).opacity(0.14)))
+                            .help("Tag on this task, on top of anything it inherits from its "
+                                  + "project — right-click to change")
+                    }
+                }
             }
 
             Spacer(minLength: 6)

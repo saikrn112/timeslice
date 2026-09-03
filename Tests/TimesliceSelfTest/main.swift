@@ -1713,6 +1713,19 @@ func testTaskTags() {
         check(try! store.effectiveTagIDsByTask()[task] == [work],
               "removing a task's own tag doesn't touch what it inherits")
 
+        // What the UI shows on a task row: its own tags only, since the inherited ones are already
+        // on the project header above it.
+        try! store.addTag(research, to: .task(task))
+        let direct = try! store.directTagIDsByTask()
+        check(direct[task] == [research],
+              "a task's own tags exclude what it inherits — the row shows the addition, not the copy")
+        // Keyed by TASK only. Not asserted per-id: `task_projects` and `projects` are separate
+        // autoincrement namespaces, so a project id can equal a task id and `direct[group]` would be
+        // some unrelated task's entry. The key SET is the honest check.
+        check(Set(direct.keys) == Set([task, loose]),
+              "only directly-tagged tasks appear — project links don't leak into this map")
+        try! store.removeTag(research, from: .task(task))
+
         // And the task's time reaches the tag through its OWN link, with no project involved.
         let t0 = Date(timeIntervalSince1970: 1_700_000_000)
         try! store.insertClosedInterval(projectID: loose, start: t0, end: t0.addingTimeInterval(3600))
