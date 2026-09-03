@@ -1533,11 +1533,24 @@ struct MetricsView: View {
         @ViewBuilder accessory: () -> Accessory,
         @ViewBuilder _ content: () -> Content
     ) -> some View {
+        section(title, accessory: accessory, subtitle: {
+            if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
+        }, content)
+    }
+
+    /// Same again, but the subtitle is a VIEW — so a line that would otherwise read
+    /// "12.4h of 41.0h (30%)" can show the 30% as a bar instead of spelling it out.
+    private func section<Content: View, Accessory: View, Subtitle: View>(
+        _ title: String,
+        @ViewBuilder accessory: () -> Accessory,
+        @ViewBuilder subtitle: () -> Subtitle,
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title).font(.headline)
-                    if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
+                    subtitle()
                 }
                 Spacer()
                 accessory()
@@ -1558,8 +1571,8 @@ struct MetricsView: View {
             // As its own row it appeared and vanished as you clicked, moving the chart and everything
             // below it up and down — and a page that jumps while you're comparing two numbers is
             // worse than one that says less.
-            section("Allocations", subtitle: selectionSubtitleText,
-                    accessory: { allocationsAccessory }) {
+            section("Allocations", accessory: { allocationsAccessory },
+                    subtitle: { allocationsSubtitle }) {
                 VStack(spacing: 2) {
                     budgetHeaderRow
                     ForEach(rows) { row in targetRow(row) }
@@ -1582,22 +1595,42 @@ struct MetricsView: View {
     /// this". Summed per TASK rather than per allocation, so two allocations covering the same work
     /// — a project and a tag that contains it — count that work once. Follows the range filter, so
     /// the same selection answers it for a day, a week, a month or six.
-    private var selectionSubtitleText: String? {
-        // Never nil: a subtitle that appears from nothing adds a line to the header, which pushes
-        // the chart and everything under it down — the jump this was meant to stop. When nothing is
-        // pinned it says what clicking does, which the section needed anyway.
-        guard !pinnedFocuses.isEmpty else {
-            return "click one to see its share, or several to combine them"
+    @ViewBuilder
+    private var allocationsSubtitle: some View {
+        // Always a line, never nothing: a subtitle that appears from nowhere adds a row to the
+        // header, which pushes the chart and everything under it down — the jump this was meant to
+        // stop. Both branches are pinned to the same height for the same reason.
+        if pinnedFocuses.isEmpty {
+            Text("click one to see its share, or several to combine them")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(height: Self.subtitleHeight)
+        } else {
+            let ids = focusedTaskIDs ?? []
+            let selected = rankedTotals.filter { ids.contains($0.project.id) }
+                .reduce(0.0) { $0 + $1.seconds }
+            let total = rankedTotals.reduce(0.0) { $0 + $1.seconds }
+            let share = total > 0 ? selected / total * 100 : 0
+            HStack(spacing: 5) {
+                Text(pinnedFocuses.count == 1 ? "1 selected" : "\(pinnedFocuses.count) selected")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(budgetDuration(selected))
+                    .font(.system(size: 10, design: .monospaced)).monospacedDigit()
+                // The share as a bar rather than a number in brackets — the same control the rows
+                // below use, so the proportion reads at a glance instead of being computed.
+                InlineBar(fraction: min(max(share / 100, 0), 1),
+                          label: String(format: "%.0f%%", share),
+                          fill: Self.selectionOverlay,
+                          height: Self.subtitleHeight)
+                    .frame(width: 92)
+                Text("\(budgetDuration(total)) this \(rangeLabelForSelection)")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .frame(height: Self.subtitleHeight)
         }
-        let ids = focusedTaskIDs ?? []
-        let selected = rankedTotals.filter { ids.contains($0.project.id) }
-            .reduce(0.0) { $0 + $1.seconds }
-        let total = rankedTotals.reduce(0.0) { $0 + $1.seconds }
-        let share = total > 0 ? selected / total * 100 : 0
-        let count = pinnedFocuses.count
-        return "\(count) selected · \(budgetDuration(selected)) of \(budgetDuration(total)) "
-             + "this \(rangeLabelForSelection) (\(String(format: "%.0f%%", share)))"
     }
+
+    /// One caption line. Both subtitle states use it so the header can't change height.
+    private static let subtitleHeight: CGFloat = 13
 
     /// Edit, plus a way out of a selection. Both live in the accessory slot the section already has.
     @ViewBuilder

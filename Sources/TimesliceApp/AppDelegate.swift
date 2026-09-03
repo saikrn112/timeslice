@@ -31,6 +31,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Tooltips appear almost immediately instead of after AppKit's default ~2s wait.
+        //
+        // The delay is fine for "what does this button do", and wrong for the job tooltips do here:
+        // most of them exist to show the rest of a name the column had to clip, and waiting two
+        // seconds per name to read a list is slower than giving up. Milliseconds, and REGISTERED
+        // rather than set, so anyone who has chosen their own value keeps it.
+        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 250])
+
         do {
             if DemoData.isRequested {
                 // Screenshot mode: use a separate demo DB and populate it with sample history.

@@ -281,7 +281,7 @@ struct TargetsSheet: View {
     private var historySection: some View {
         if !history.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                Text("PAST ALLOCATIONS")
+                Text("ARCHIVED ALLOCATIONS")
                     .font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
                 Text("Allocated is the amount × the time it was live for. Editing an amount while an "
                      + "allocation is running changes its history too — the figure isn't versioned.")
@@ -398,16 +398,16 @@ struct TargetsSheet: View {
                 // history, which is the whole reason for the state.
                 //
                 // Named after WHERE it goes, not after being finished. It was a tick, which read as
-                // "confirm this number"; then "Done", which read as "done editing" — the one thing
-                // a button in a sheet is most likely to mean. "Move to past" can't be either, and it
-                // names the section the allocation lands in.
-                Button("Move to past") {
+                // "confirm this number"; then "Done", which read as "done editing" — the one thing a
+                // button in a sheet is most likely to mean. "Archive" can be neither, and it's the
+                // word the section below uses.
+                Button("Archive") {
                     try? store.setTargetCompleted(id: existing.id, completed: true)
                     reload()
                 }
                 .buttonStyle(.link).font(.system(size: 11))
                 .help("Finished with this allocation — keeps it, and its history, under "
-                      + "PAST ALLOCATIONS")
+                      + "ARCHIVED ALLOCATIONS")
 
                 Button {
                     try? store.deleteTarget(id: existing.id)
