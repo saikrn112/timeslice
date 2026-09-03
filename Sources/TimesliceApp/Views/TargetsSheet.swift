@@ -239,6 +239,12 @@ struct TargetsSheet: View {
                 // A scrollbar that appears once the content overflows reflows the rows under it. On
                 // permanently, so the gutter is always the same width.
                 .scrollIndicators(.visible)
+                // Corner ticks rather than a box. The list reads best blended into the sheet, but
+                // then nothing says it scrolls — and a half-visible row at the bottom edge is a
+                // weak hint that only appears when you happen to have the right number of tasks.
+                // Four short brackets mark the region's extent without drawing a container.
+                .overlay(ScrollCorners().stroke(Color.secondary.opacity(0.35), lineWidth: 1))
+                .padding(.vertical, 2)
             }
         }
     }
@@ -495,5 +501,30 @@ private struct HoursField: View {
     private func format(_ s: TimeInterval) -> String {
         let h = s / 3600
         return h == h.rounded() ? "\(Int(h))" : String(format: "%.1f", h)
+    }
+}
+
+/// Four L-shaped corner ticks, marking out a scrollable region without boxing it in.
+///
+/// A full border would make the list a container and lose the blended-into-the-sheet look that's
+/// worth keeping; nothing at all leaves the fact that it scrolls to be discovered by accident.
+struct ScrollCorners: Shape {
+    /// Length of each arm. Long enough to read as a deliberate mark, short enough not to imply a box.
+    var arm: CGFloat = 9
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        // Each corner is two arms from the corner point, so the stroke joins cleanly instead of
+        // drawing two overlapping segments with a doubled-opacity pixel where they meet.
+        for corner in [(rect.minX, rect.minY, 1.0, 1.0),
+                       (rect.maxX, rect.minY, -1.0, 1.0),
+                       (rect.minX, rect.maxY, 1.0, -1.0),
+                       (rect.maxX, rect.maxY, -1.0, -1.0)] {
+            let (x, y, dx, dy) = corner
+            path.move(to: CGPoint(x: x + arm * dx, y: y))
+            path.addLine(to: CGPoint(x: x, y: y))
+            path.addLine(to: CGPoint(x: x, y: y + arm * dy))
+        }
+        return path
     }
 }
