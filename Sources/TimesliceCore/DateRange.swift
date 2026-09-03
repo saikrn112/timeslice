@@ -91,6 +91,28 @@ public struct DateRange: Equatable, Sendable {
         contains(now)
     }
 
+    /// Which instant to anchor on when changing GRANULARITY, so a round trip returns where it started.
+    ///
+    /// The naive rule — "today if the current range contains today, otherwise the range's start" — loses your
+    /// position on the way back. Day(1 Sep) → Week gives the week containing 1 Sep, correctly; but that week
+    /// contains today, so Week → Day anchors on TODAY and the day you were reading is gone. If today happens to
+    /// be empty, the screen reads as broken rather than as navigated-away.
+    ///
+    /// So a remembered day wins whenever it still falls inside the range being left. Today is the fallback when
+    /// the range contains it (that's the common case and what you'd expect from a fresh switch), and the range's
+    /// own start otherwise.
+    ///
+    /// - Parameters:
+    ///   - preferredDay: the day last viewed, if any. Used only when it lies within `from`.
+    ///   - from: the range being left.
+    public static func anchorForSwitch(from: DateRange, preferredDay: Date?,
+                                       now: Date = Date()) -> Date {
+        if let preferredDay, from.contains(preferredDay) { return preferredDay }
+        if from.contains(now) { return now }
+        // Never the exclusive end: for a week that's the following Sunday, which resolves to the wrong week.
+        return from.start
+    }
+
     /// How many periods a horizontal swipe of `(dx, dy)` should move, or nil to ignore it.
     ///
     /// Pure and in Core so the convention is covered by `TimesliceSelfTest`, because the gesture itself

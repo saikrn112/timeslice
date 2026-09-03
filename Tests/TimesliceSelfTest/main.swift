@@ -3964,6 +3964,64 @@ func testCrossDeviceTakeover() throws {
     }
 }
 
+// MARK: - Granularity round trip
+
+/// Day → Week → Day must come back to the SAME day.
+///
+/// The reported symptom was "I don't see the day view's data any more after coming back from week/month". It
+/// wasn't missing data: switching back anchored on TODAY, because the week you'd switched to contains today, so
+/// the day being read was silently replaced by an empty one. Pure date reasoning, so it's asserted here rather
+/// than re-checked by tapping.
+func testAnchorForSwitch() {
+    print("\nGranularity round trip:")
+    let now = date(2026, 9, 3, 12, 0)          // a Thursday
+    let sep1 = date(2026, 9, 1, 10, 0)         // the Tuesday of the same week
+
+    let day = DateRange.resolve(unit: .day, anchor: sep1, calendar: cal)
+    // Day → Week keeps the day as the anchor, so you get the week CONTAINING it.
+    let weekAnchor = DateRange.anchorForSwitch(from: day, preferredDay: day.start, now: now)
+    let week = DateRange.resolve(unit: .week, anchor: weekAnchor, calendar: cal)
+    check(week.contains(sep1), "Day → Week lands on the week containing that day")
+    check(week.contains(now), "which also happens to contain today — the condition that caused the bug")
+
+    // Week → Day must return to 1 Sep, NOT to today, even though the week contains both.
+    let backAnchor = DateRange.anchorForSwitch(from: week, preferredDay: day.start, now: now)
+    let back = DateRange.resolve(unit: .day, anchor: backAnchor, calendar: cal)
+    check(back == day, "Week → Day returns to the day you came from, not to today")
+
+    do { // with nothing remembered, today is the sensible default when the range contains it
+        let anchor = DateRange.anchorForSwitch(from: week, preferredDay: nil, now: now)
+        check(cal.isDate(anchor, inSameDayAs: now), "no remembered day falls back to today")
+    }
+
+    do { // a remembered day OUTSIDE the range is ignored — it would jump you somewhere unrelated
+        let lastMonth = date(2026, 8, 3, 9, 0)
+        let anchor = DateRange.anchorForSwitch(from: week, preferredDay: lastMonth, now: now)
+        check(cal.isDate(anchor, inSameDayAs: now),
+              "a remembered day outside the range is discarded rather than teleporting you")
+    }
+
+    do { // a PAST range that contains neither today nor the remembered day anchors on its own start
+        let pastWeek = DateRange.resolve(unit: .week, anchor: date(2026, 6, 10, 9, 0), calendar: cal)
+        let anchor = DateRange.anchorForSwitch(from: pastWeek, preferredDay: nil, now: now)
+        check(pastWeek.contains(anchor), "a past range anchors inside itself")
+        check(anchor == pastWeek.start, "specifically at its start, never its exclusive end")
+    }
+
+    do { // and the round trip works for a past week too
+        let pastDay = DateRange.resolve(unit: .day, anchor: date(2026, 6, 10, 9, 0), calendar: cal)
+        let pastWeek = DateRange.resolve(
+            unit: .week,
+            anchor: DateRange.anchorForSwitch(from: pastDay, preferredDay: pastDay.start, now: now),
+            calendar: cal)
+        let returned = DateRange.resolve(
+            unit: .day,
+            anchor: DateRange.anchorForSwitch(from: pastWeek, preferredDay: pastDay.start, now: now),
+            calendar: cal)
+        check(returned == pastDay, "the round trip holds for a range that doesn't contain today")
+    }
+}
+
 // MARK: - Day canvas: merging and layout
 
 /// The two things that made the vertical day canvas unreadable on real data. Both are properties, so they get
@@ -4569,6 +4627,7 @@ do {
     testReversedClientID()
     try testDemoSeedInvariants()
     try testAllocationLifecycle()
+    testAnchorForSwitch()
     testDayCanvasLayout()
     try testDayDigests()
     testDurationHundredths()

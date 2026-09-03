@@ -202,26 +202,41 @@ final class MetricsModel: ObservableObject {
         let next = range.stepped(by: delta, earliest: earliest)
         guard next.start <= Date(), next != range else { return false }
         range = next
+        rememberDay()
         rebuild()
         return true
     }
 
     func select(_ newRange: DateRange) {
         range = newRange
+        rememberDay()
         rebuild()
     }
 
     /// Drop into one day from the week/month list. Only the zoom changes.
     func selectDay(_ day: Date) {
         range = DateRange.resolve(unit: .day, anchor: day, earliest: earliest)
+        rememberDay()
         rebuild()
     }
 
+    /// The day last viewed, so Day → Week → Day returns where it started.
+    ///
+    /// Without it the round trip silently jumped to today: the week you switched to CONTAINS today, so switching
+    /// back anchored there and the day you were reading was gone — which, on an empty today, reads as the screen
+    /// having lost its data.
+    private var lastViewedDay: Date?
+
     func select(unit: RangeUnit) {
-        // Keep your position in time when changing granularity: the week containing the day you were on.
-        let anchor = range.isCurrent() ? Date() : min(range.start, Date())
+        let anchor = DateRange.anchorForSwitch(from: range, preferredDay: lastViewedDay)
         range = DateRange.resolve(unit: unit, anchor: anchor, earliest: earliest)
+        rememberDay()
         rebuild()
+    }
+
+    /// Called from every navigation path, so the memory can't be updated in one and missed in another.
+    private func rememberDay() {
+        if range.unit == .day { lastViewedDay = range.start }
     }
 
     // MARK: - Derived, for the summary rows
