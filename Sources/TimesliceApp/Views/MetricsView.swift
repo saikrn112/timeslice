@@ -197,7 +197,10 @@ struct MetricsView: View {
     // MARK: - Tiles
 
     private var tiles: some View {
-        let s = effectiveSummary
+        // Deliberately the WHOLE range, never narrowed to a pinned allocation. These are the day's
+        // headline numbers and they stay comparable across clicks; the selection's own figures live
+        // in the timeline readout, which is the section that was actually meant.
+        let s = summary
         return HStack(spacing: 12) {
             goalTile
             tile("Focus", value: percent(s?.focusRatio ?? 0),
@@ -211,41 +214,14 @@ struct MetricsView: View {
                      caption: "active days only", tint: .teal)
                 tile("Best day", value: hours(s?.bestDaySeconds ?? 0), caption: "in range", tint: .blue)
             }
-            // What these numbers are ABOUT, when it isn't everything. Without it the tiles look like
-            // the range's totals and quietly aren't — and a filter you can't see is worse than none.
-            if !pinnedFocuses.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    Image(systemName: "line.3.horizontal.decrease.circle.fill")
-                        .font(.system(size: 11)).foregroundStyle(Self.selectionOverlay)
-                    Text(pinnedFocuses.count == 1 ? "selected\nallocation"
-                                                  : "\(pinnedFocuses.count) selected\nallocations")
-                        .font(.system(size: 9)).foregroundStyle(.secondary)
-                        .fixedSize()
-                }
-            }
         }
-    }
-
-    /// The tiles' numbers, narrowed to the pinned allocations when there are any.
-    ///
-    /// Selecting an allocation and then a range asked "how did THIS go over that period"; the tiles
-    /// answered a different question — everything tracked in the range — sitting right above the
-    /// bars that had already narrowed. Recomputed from the intervals already in hand, filtered by
-    /// task, so it costs a pass over an array rather than another query.
-    private var effectiveSummary: RangeSummary? {
-        guard let ids = focusedTaskIDs, !ids.isEmpty else { return summary }
-        return Aggregations.summary(
-            intervals: rangeIntervals.filter { ids.contains($0.projectID) },
-            range: range,
-            deepThreshold: settings.deepBlockSeconds
-        )
     }
 
     private var goalTile: some View {
         // Measured against the hours you're AWAKE, not a work target. Now that everything gets
         // tracked, "4.0h / 8.0h" said nothing about the remaining twelve hours — and the gap is the
         // number that actually answers "did I use today or lose it".
-        let total = (effectiveSummary?.totalSeconds ?? 0) + liveExtra
+        let total = (summary?.totalSeconds ?? 0) + liveExtra
         // Every CALENDAR day in the range counts, including ones with nothing tracked: a day you
         // recorded nothing is exactly when the gap should be widest. Counting only active days would
         // hide that by shrinking the denominator to match.
@@ -295,14 +271,7 @@ struct MetricsView: View {
 
     /// Live seconds for a running task, but only when the range covers now.
     private var liveExtra: TimeInterval {
-        guard range.isCurrent() else { return 0 }
-        // While the tiles are narrowed to a selection, the running timer only belongs in them if the
-        // task it's on is part of that selection — otherwise the Tracked figure ticks upwards on time
-        // that the number explicitly excludes.
-        if let ids = focusedTaskIDs, !ids.isEmpty {
-            guard let running = engine.runningProjectID, ids.contains(running) else { return 0 }
-        }
-        return engine.clock.elapsed
+        range.isCurrent() ? engine.clock.elapsed : 0
     }
 
     private func tile(_ label: String, value: String, caption: String, tint: Color) -> some View {
@@ -684,6 +653,18 @@ struct MetricsView: View {
                                           from: r.lowerBound, to: r.upperBound)
     }
 
+    /// The same window, but only the pinned allocations' blocks.
+    ///
+    /// Selecting an allocation and then dragging out a stretch of the day asks "how much of THAT was
+    /// this" — and the readout was answering "how much of that was anything at all", which is a
+    /// different question sitting under a timeline that had already dimmed everything else.
+    private var focusedWindowSummary: WindowSummary? {
+        guard let r = selectedRange, r.upperBound > r.lowerBound,
+              let ids = focusedTaskIDs, !ids.isEmpty else { return nil }
+        return Aggregations.windowSummary(segments: daySegments.filter { ids.contains($0.projectID) },
+                                          from: r.lowerBound, to: r.upperBound)
+    }
+
     private func clearSelection() {
         selectionAnchor = nil
         selectionEdge = nil
@@ -728,6 +709,16 @@ struct MetricsView: View {
 
     /// Tracked vs untracked for the selected stretch. The day-level "Tracked" tile can't answer
     /// this — you weren't working the whole day, so a day figure says nothing about one stretch.
+    /// The allocation's own name when there's one, so the figure is self-explanatory rather than
+    /// needing the Allocations list above to interpret.
+    private var selectionStatLabel: String {
+        if pinnedFocuses.count == 1,
+           let row = targetProgress.first(where: { focusFor($0.target.subject) == pinnedFocuses[0] }) {
+            return row.name
+        }
+        return "\(pinnedFocuses.count) selected"
+    }
+
     private func selectionReadout(_ s: WindowSummary) -> some View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 1) {
@@ -739,8 +730,19 @@ struct MetricsView: View {
 
             Divider().frame(height: 22)
 
-            statPair("Working", Format.compact(s.trackedSeconds),
-                     detail: "\(Int((s.trackedRatio * 100).rounded()))%", tint: .accentColor)
+            if let mine = focusedWindowSummary {
+                // Three figures, not two. Narrowing "Working" to the selection without splitting the
+                // rest would fold other tasks' time into "Idle", which would then read as hours of
+                // doing nothing that were in fact hours of doing something else.
+                statPair(selectionStatLabel, Format.compact(mine.trackedSeconds),
+                         detail: "\(Int((mine.trackedRatio * 100).rounded()))%",
+                         tint: Self.selectionOverlay)
+                statPair("Other work", Format.compact(max(0, s.trackedSeconds - mine.trackedSeconds)),
+                         detail: nil, tint: .accentColor)
+            } else {
+                statPair("Working", Format.compact(s.trackedSeconds),
+                         detail: "\(Int((s.trackedRatio * 100).rounded()))%", tint: .accentColor)
+            }
             statPair("Idle", Format.compact(s.idleSeconds),
                      detail: nil, tint: .secondary)
 
