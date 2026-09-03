@@ -155,7 +155,7 @@ struct SyncSettingsSection: View {
         // Diagnostics: a developer tool. The self-test writes a probe file and reports transport
         // internals, and the storage path is an implementation detail — neither is anyone's business
         // in a shipped build, where "is sync working" is answered by the last-synced line above.
-        if BuildFlags.developerToolsEnabled {
+        #if TIMESLICE_DEV || DEBUG
             HStack(spacing: 6) {
                 Text("Google Drive (app data)")
                     .font(.system(size: 9, design: .monospaced))
@@ -173,7 +173,7 @@ struct SyncSettingsSection: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
-        }
+        #endif
     }
 
     private func deviceRow(_ peer: SyncController.Peer) -> some View {

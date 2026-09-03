@@ -258,10 +258,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             .target = self
         // Reachable with the main window closed: feedback is its own window now, so it doesn't
         // depend on that toolbar being on screen. Developer tool, so it isn't in a release build.
-        if BuildFlags.developerToolsEnabled {
-            menu.addItem(withTitle: "Feedback…", action: #selector(openFeedback), keyEquivalent: "")
-                .target = self
-        }
+        #if TIMESLICE_DEV || DEBUG
+        menu.addItem(withTitle: "Feedback…", action: #selector(openFeedback), keyEquivalent: "")
+            .target = self
+        #endif
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu

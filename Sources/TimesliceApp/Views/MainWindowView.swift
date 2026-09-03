@@ -48,8 +48,11 @@ struct MainWindowView: View {
 
             Spacer()
 
-            // Developer tool: absent from a release build entirely, not merely disabled.
-            if BuildFlags.developerToolsEnabled { notesButton }
+            // Developer tool: `#if`, not `if`. A runtime branch would leave the window, its list and
+            // its editor compiled into a release build and reachable by anything that called them.
+            #if TIMESLICE_DEV || DEBUG
+            notesButton
+            #endif
             settingsButton
             privacyIndicator
         }
