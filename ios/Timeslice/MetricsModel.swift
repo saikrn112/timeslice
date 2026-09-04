@@ -68,8 +68,10 @@ final class MetricsModel: ObservableObject {
         var sessions: [Interval] = []
         var budgets: [BudgetRows.Row] = []
         var buckets: [Bucket] = []
-        /// One row per day, for the week/month list.
-        var days: [DayDigest] = []
+        /// One row per day of the WEEK containing the selected day — the week card's context.
+        var weekDays: [DayDigest] = []
+        /// Median of recent tracked days, for the Tracked gauge. Nil until there's enough history.
+        var typicalDay: TimeInterval?
     }
 
     /// Only Day, Week and Month on the phone.
@@ -142,10 +144,13 @@ final class MetricsModel: ObservableObject {
             targets: (try? store.listTargets()) ?? [], tasks: model.allTasks,
             groups: model.groups, tags: model.allTags, tagIDsByTask: tagIDsByTask,
             intervals: everything, viewedRange: range, now: now)
-        // Only for multi-day ranges — a single day's list would be one row restating the canvas above it.
-        if range.unit != .day {
-            d.days = Aggregations.dayDigests(intervals: all, range: range, deepThreshold: deep, now: now)
-        }
+        // The week containing the selected day, always — the week card gives the day CONTEXT rather than
+        // replacing it, so it's present whichever day you're on.
+        let week = DateRange.resolve(unit: .week, anchor: range.start, earliest: earliest)
+        d.weekDays = Aggregations.dayDigests(intervals: all, range: week, deepThreshold: deep, now: now)
+        // Unfiltered on purpose: a baseline that narrowed with the filter would compare one project's day
+        // against one project's typical day, which is a different and much less useful question.
+        d.typicalDay = Aggregations.typicalDaySeconds(intervals: everything, now: now)
         data = d
 
         rebuildStripIfNeeded(intervals: everything, deep: deep, now: now)
@@ -250,20 +255,6 @@ final class MetricsModel: ObservableObject {
             guard let self, self.model.knownDevices.count > 1, let id else { return nil }
             return self.model.deviceLabels[id]
         }
-    }
-
-    /// Delete a displayed block — which may be SEVERAL intervals.
-    ///
-    /// A merged block is one thing on screen and one-or-more rows in the database, because `rollOpenInterval`
-    /// chunks a long run. Deleting the block deletes every chunk it was built from; the sheet says how many
-    /// first, since the whole point of chunking was that a forgotten timer can be trimmed deliberately.
-    func deleteBlock(_ block: MergedBlock) {
-        guard let store = model.storeIfLoaded else { return }
-        for id in block.intervalIDs { try? store.deleteInterval(id: id) }
-        model.reload()
-        invalidateStrip()
-        rebuild()
-        SyncController.shared.publishSoon()
     }
 
     var colorHexForTask: (Int64) -> String {

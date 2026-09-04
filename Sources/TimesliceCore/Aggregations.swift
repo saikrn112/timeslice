@@ -310,6 +310,44 @@ public enum Aggregations {
     /// (two devices, or older imports) would otherwise inflate a day past what physically elapsed
     /// and falsely clear the goal line. `deepSeconds` still sums, since "focused time" is about
     /// individual session lengths.
+    /// A typical recent day, as the MEDIAN of days that had any tracking.
+    ///
+    /// The dashboard's gauge needs something to be a fraction of, and this app has no daily hours target —
+    /// budgets are per project/tag/task. Rather than invent one or ask for it, compare today against your own
+    /// recent behaviour, which is what Whoop's baselines do and needs no setup.
+    ///
+    /// **Median, not mean.** One 14-hour day would drag a mean up for a fortnight and make every ordinary day
+    /// afterwards look like a failure. The median is unmoved by a couple of outliers either way.
+    ///
+    /// **Empty days are excluded.** Including them answers "how often do I track" when the question is "how much
+    /// do I track on a day I'm working" — a fortnight containing two weekends would sit ~30% low and flatter
+    /// every weekday against it. Weekend patterns are real, but they belong in the week chart, not in the
+    /// denominator of today's gauge.
+    ///
+    /// **Today is excluded**, or the gauge would compare today against a baseline containing itself and drift
+    /// toward 100% as the day went on — erasing exactly the signal wanted.
+    ///
+    /// Returns nil below `minimumDays`: a baseline from two days is noise, and a gauge with no honest denominator
+    /// should be absent rather than wrong.
+    public static func typicalDaySeconds(
+        intervals: [Interval], lookbackDays: Int = 14, minimumDays: Int = 3,
+        now: Date = Date(), calendar: Calendar = .current
+    ) -> TimeInterval? {
+        let today = calendar.startOfDay(for: now)
+        guard let from = calendar.date(byAdding: .day, value: -lookbackDays, to: today) else { return nil }
+        let window = DateRange(unit: .day, start: from, end: today)
+        // `deepThreshold` is irrelevant here — only totals are read — so it's passed as infinity to make that
+        // explicit rather than borrowing a settings value that has nothing to do with this.
+        let totals = dayDigests(intervals: intervals, range: window, deepThreshold: .infinity,
+                                now: now, calendar: calendar)
+            .map(\.totalSeconds)
+            .filter { $0 > 0 }
+            .sorted()
+        guard totals.count >= minimumDays else { return nil }
+        let mid = totals.count / 2
+        return totals.count.isMultiple(of: 2) ? (totals[mid - 1] + totals[mid]) / 2 : totals[mid]
+    }
+
     /// Everything the week/month day-list needs, per day, in ONE pass.
     ///
     /// The list shows a row per day: the total, the day's SHAPE as a small bar, and the task it went mostly
@@ -602,79 +640,6 @@ public enum Aggregations {
     public static func assignLanesByOverlap(_ segments: [DaySegment]) -> [DaySegment] {
         packByOverlap(segments.sorted { $0.startHour < $1.startHour }, baseLane: 0)
             .sorted { $0.startHour < $1.startHour }
-    }
-
-    /// Devices in order of first appearance — a stable, caller-visible row order.
-    /// nil (unattributed) sorts last so named devices keep the top rows.
-    /// Where each block should be DRAWN, given that a short block still needs a legible height.
-    ///
-    /// A calendar layout positions purely by time, which silently assumes blocks are long. Real days aren't: a
-    /// 2-minute block at 44pt/hour is 1.5pt tall, so its label collides with its neighbours and a busy day
-    /// renders as mush. Observed on real data — 35 blocks, many under 15 minutes.
-    ///
-    /// So placement FLOWS: each block wants its true time offset, but is pushed down if the previous one's
-    /// minimum height would overlap it. Time position is preserved wherever there's room and sacrificed only
-    /// where legibility requires it, which is the right way round — an unreadable block at the correct y is
-    /// worth less than a readable one slightly low.
-    ///
-    /// Pure and in Core so it's testable: "do any two placements overlap" is exactly the property that broke,
-    /// and it should not be re-provable only by screenshot.
-    public static func layout(_ blocks: [MergedBlock], hourHeight: Double,
-                              minHeight: Double, spacing: Double = 2) -> [BlockPlacement] {
-        let sorted = blocks.sorted { $0.startHour < $1.startHour }
-        // One cursor per lane: overlapping blocks sit side by side, so they must not push each other down.
-        var laneBottom: [Int: Double] = [:]
-        var out: [BlockPlacement] = []
-        for block in sorted {
-            let height = max(minHeight, (block.endHour - block.startHour) * hourHeight)
-            let wanted = block.startHour * hourHeight
-            let y = max(wanted, (laneBottom[block.lane] ?? -.infinity))
-            laneBottom[block.lane] = y + height + spacing
-            out.append(BlockPlacement(block: block, y: y, height: height,
-                                      isCompressed: height > (block.endHour - block.startHour) * hourHeight))
-        }
-        return out
-    }
-
-    /// Merge CONSECUTIVE segments of the same task into one visual block.
-    ///
-    /// Necessary because `rollOpenInterval` deliberately splits a long run into focus-length chunks, and a task
-    /// switched back to repeatedly produces a run of neighbours. Rendering each separately means a day of real
-    /// work becomes thirty slivers — which is accurate about the storage and wrong about the activity. Working
-    /// on one thing from 9 until 11, chunked four times, is one block to a reader.
-    ///
-    /// `tolerance` is how much dead time between two same-task segments still counts as continuous. Zero would
-    /// refuse to merge chunks that abut to the microsecond, and anything large would swallow a genuine break.
-    ///
-    /// Returns `MergedBlock`s rather than `DaySegment`s so the count is carried: a block that represents four
-    /// chunks has to be able to say so, and it can no longer be deleted by a single interval id.
-    public static func mergeAdjacent(_ segments: [DaySegment],
-                                     toleranceHours: Double = 1.0 / 60) -> [MergedBlock] {
-        let sorted = segments.sorted { ($0.startHour, $0.lane) < ($1.startHour, $1.lane) }
-        var out: [MergedBlock] = []
-        for seg in sorted {
-            if let last = out.last,
-               last.projectID == seg.projectID,
-               last.lane == seg.lane,
-               last.deviceID == seg.deviceID,
-               seg.startHour - last.endHour <= toleranceHours {
-                out[out.count - 1] = MergedBlock(
-                    projectID: last.projectID,
-                    startHour: last.startHour,
-                    endHour: max(last.endHour, seg.endHour),
-                    lane: last.lane,
-                    deviceID: last.deviceID,
-                    intervalIDs: last.intervalIDs + [seg.id])
-            } else {
-                out.append(MergedBlock(projectID: seg.projectID,
-                                       startHour: seg.startHour,
-                                       endHour: seg.endHour,
-                                       lane: seg.lane,
-                                       deviceID: seg.deviceID,
-                                       intervalIDs: [seg.id]))
-            }
-        }
-        return out
     }
 
     public static func orderedDevices(_ segments: [DaySegment],

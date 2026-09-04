@@ -152,6 +152,30 @@ public enum Theme {
     /// A neutral filled bar, where the thing measured has no colour of its own.
     public static let metricNeutralFill = Color.secondary.opacity(0.55)
 
+    // MARK: - Dashboard
+    //
+    // Whoop's discipline, which the earlier attempts kept missing: FEW things, one dominant number each, and a
+    // lot of empty space. The failure mode was never the wrong chart — it was nine tidy things where there should
+    // have been three loud ones.
+
+    /// The number a card exists to show. Deliberately enormous: on Whoop the figure is the card, and the labels
+    /// are almost incidental.
+    public static let dashHero = Font.system(size: 64, weight: .semibold, design: .rounded)
+    /// A card's secondary figure — the count, the average.
+    public static let dashValue = Font.system(size: 30, weight: .semibold, design: .rounded)
+    /// The small-caps label above a card's figure.
+    public static let dashLabel = Font.system(size: 12, weight: .semibold)
+    /// The qualifier under it ("of a typical 7h 41m").
+    public static let dashCaption = Font.system(size: 14)
+    /// Row labels inside a card.
+    public static let dashRow = Font.system(size: 15)
+
+    /// Space between cards. Generous on purpose — the whitespace IS the design, and every previous attempt spent
+    /// it on another section.
+    public static let dashCardSpacing: CGFloat = 28
+    public static let dashCardPadding: CGFloat = 22
+    public static let dashCardRadius: CGFloat = 20
+
     // MARK: - Devices
 
     /// Colour for the Nth device on a timeline.
