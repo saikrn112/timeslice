@@ -1257,7 +1257,7 @@ struct MetricsView: View {
                 // Gridline on every bucket, but only label every Nth so a month's worth of ticks
                 // stays legible instead of colliding into mush.
                 .chartXAxis {
-                    AxisMarks(values: buckets.map(\.start)) { value in
+                    AxisMarks(values: axisBucketValues) { value in
                         AxisGridLine(centered: true)
                         if let d = value.as(Date.self),
                            let idx = buckets.firstIndex(where: { $0.start == d }),
@@ -1548,6 +1548,19 @@ struct MetricsView: View {
         case .sixMonths: return .fixed(14)
         case .year, .all: return .fixed(22)
         }
+    }
+
+    /// Bucket starts plus ONE sentinel a step past the last.
+    ///
+    /// `AxisValueLabel(centered: true)` centres a label between its own mark and the NEXT one, so the
+    /// final bucket — having no next mark — got no label: a seven-day week labelled six days and left
+    /// its last bar anonymous. The sentinel gives that label something to centre against. It isn't in
+    /// `buckets`, so the label lookup below finds no index for it and draws nothing there; it only
+    /// contributes a gridline, which matches the one every other bucket already has.
+    private var axisBucketValues: [Date] {
+        let starts = buckets.map(\.start)
+        guard let last = starts.last else { return starts }
+        return starts + [paddedBucketDomain.upperBound == last ? last : paddedBucketDomain.upperBound]
     }
 
     /// The bucket range, extended by ONE bucket at the end and not at all at the start.
