@@ -168,12 +168,16 @@ struct MetricsView: View {
         // Changing day/range invalidates any timeline selection — the hours it referred to
         // belong to a different day's data.
         .onChange(of: range) { _, _ in
-            // The pin points at a task/tag in the range being left; carrying it over is what left
-            // every row dimmed with nothing highlighted.
-            pinnedFocuses = []
+            // The PINS survive. Comparing an allocation across weeks means clicking it once and then
+            // moving, and re-picking it on every step made that unusable. They were cleared because
+            // a pin matching nothing in the new range left every row dimmed with no highlight to
+            // show for it — but `focusMatchesAnything` handles that now by treating a highlight that
+            // matches nothing as no highlight at all.
+            //
+            // The timeline SELECTION still goes: it names hours of a specific day, and those hours
+            // belong to different data once the day changes.
             clearSelection(); recompute()
         }
-        .onChange(of: scope) { _, _ in pinnedFocuses = [] }
         .onReceive(NotificationCenter.default.publisher(for: TimesliceNotifications.dataDidChange)) { _ in recompute() }
         .onReceive(settings.objectWillChange) { _ in DispatchQueue.main.async { recompute() } }
         // The app can run for days; re-anchor to the real "today" on wake so the range never
@@ -1546,18 +1550,27 @@ struct MetricsView: View {
         }
     }
 
-    /// The bucket range with half a bucket of margin at each end, so the first and last bars are
-    /// drawn whole instead of being clipped by the plot's edge.
+    /// The bucket range, extended by ONE bucket at the end and not at all at the start.
+    ///
+    /// A unit-based `BarMark` is positioned at the MIDPOINT of its bucket's interval, so bucket `d`
+    /// draws at `d + step/2` and needs the domain to cover `[d, d + step]` to be whole. Half a step
+    /// at each end — what this did first — put the last bar's midpoint exactly on the domain's edge,
+    /// so it was sliced in half and its axis label disappeared with it: a seven-day week showed six
+    /// labels. The same half-step at the start was pure empty margin, which is what made the chart
+    /// look shoved to the left.
+    ///
+    /// With `[first, last + step]` the first and last midpoints each sit half a step inside their
+    /// edge — symmetric, and nothing clipped.
     private var paddedBucketDomain: ClosedRange<Date> {
         guard let first = buckets.first?.start, let last = buckets.last?.start else {
             return range.start...range.end
         }
         let cal = Calendar.current
-        // Half of ONE bucket, measured from the data rather than assumed: a 6M range buckets by
-        // week and a year by month, so a fixed number of seconds would be wrong for most ranges.
-        let step = cal.date(byAdding: bucketComponent, value: 1, to: first)?
-            .timeIntervalSince(first) ?? 86_400
-        return first.addingTimeInterval(-step / 2)...last.addingTimeInterval(step / 2)
+        // ONE bucket, measured from the data rather than assumed: a 6M range buckets by week and a
+        // year by month, so a fixed number of seconds would be wrong for most ranges.
+        let step = cal.date(byAdding: bucketComponent, value: 1, to: last)?
+            .timeIntervalSince(last) ?? 86_400
+        return first...last.addingTimeInterval(step)
     }
 
     // MARK: - Building blocks
