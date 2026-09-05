@@ -166,6 +166,11 @@ final class TimerModel: ObservableObject {
                 let store = try IntervalStore()
                 try store.migrateIfNeeded()
                 self.store = store
+                // Thresholds that decide what gets recorded — and what "focused" means — live in the
+                // database and travel with everything else. Without this the phone would relay other
+                // devices' values without reading them, and never publish its own: a config that
+                // syncs everywhere except here.
+                settings.attach(store: store)
             }
             reload()
             // Recover a run left open by a previous launch. Elapsed is recomputed from the

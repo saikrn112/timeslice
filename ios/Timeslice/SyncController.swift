@@ -211,7 +211,13 @@ final class SyncController {
             try await settleTakeover(transport: transport, deviceID: deviceID)
             try await publishMarker(transport: transport, deviceID: deviceID)
 
-            await MainActor.run { TimerModel.shared.reload() }
+            await MainActor.run {
+                TimerModel.shared.reload()
+                // A peer's newer threshold has to reach the live objects, not just the table: the
+                // auto-pause timer and the focus-block maths read `AppSettings`, so a value sitting
+                // unread in the database would change nothing about how this device behaves.
+                TimerModel.shared.settings.adoptSyncedSettings()
+            }
             return true
         } catch {
             NSLog("[timeslice] sync failed: \(error.localizedDescription)")
