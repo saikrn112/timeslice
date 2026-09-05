@@ -1,4 +1,5 @@
 import AppKit
+import TimesliceUI
 import SwiftUI
 import TimesliceCore
 
@@ -9,6 +10,11 @@ struct ProjectListView: View {
     @ObservedObject var appState: AppState
     @ObservedObject var engine: TimerEngine
 
+    /// Needed because a tag's own colour is painted as TEXT on the group header, and which direction
+    /// that colour has to be pushed to stay readable depends on the appearance.
+    @Environment(\.colorScheme) private var colorScheme
+
+    @State private var newTaskName: String = ""
     @State private var editingID: Int64?
     @State private var editingName: String = ""
     @State private var showArchived: Bool = false
@@ -302,15 +308,25 @@ struct ProjectListView: View {
 
             // Tags, in their own colour but small and unweighted — the header is deliberately tiny,
             // so these have to read as an annotation rather than another control.
+            //
+            // The LABEL goes through `Theme.legibleText`; the capsule keeps the true colour. A tag's
+            // own hex was previously painted straight onto a 14%-opacity capsule of itself, which over
+            // a white window is essentially white text-on-white for most of the palette — measured,
+            // 47 of 60 task/tag colours fail 4.5:1 there, the worst at 1.20:1. At 10pt that is not a
+            // subtle deficiency, it's an invisible tag. Fill and label have genuinely different
+            // requirements and now get different colours.
             if let tags = appState.tagsByProject[section.id], !tags.isEmpty {
                 HStack(spacing: 4) {
                     ForEach(tags) { tag in
                         Text(tag.name)
-                            .font(.system(size: 9))
-                            .foregroundStyle(Color(hex: tag.colorHex).opacity(0.9))
-                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            // 10pt, not 9: this is the smallest text in the app and the tag name is
+                            // information, not texture.
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Theme.legibleText(tag.colorHex,
+                                                               dark: colorScheme == .dark))
+                            .padding(.horizontal, 5).padding(.vertical, 1)
                             .background(
-                                Capsule().fill(Color(hex: tag.colorHex).opacity(0.14))
+                                Capsule().fill(Color(hex: tag.colorHex).opacity(0.16))
                             )
                     }
                 }

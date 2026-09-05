@@ -1,10 +1,20 @@
 import Foundation
 
 public enum TimeslicePaths {
+    /// Asking the system for Application Support rather than building it from the home directory:
+    /// `homeDirectoryForCurrentUser` is a Mac-shaped assumption, and on iOS the equivalent lives
+    /// inside the app's sandbox container. The search-path API returns the right answer on both, and
+    /// on an unsandboxed Mac it resolves to exactly `~/Library/Application Support`, so existing
+    /// databases are found unchanged.
     public static func defaultSupportDirectoryURL(appName: String = "Timeslice") -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support", isDirectory: true)
-            .appendingPathComponent(appName, isDirectory: true)
+        // The fallback uses `NSHomeDirectory()`, not `homeDirectoryForCurrentUser`: the latter is
+        // marked *unavailable* on iOS, so it fails to compile even sitting in a branch that can
+        // never run there. `NSHomeDirectory()` exists on both and means the right thing on both —
+        // the user's home on an unsandboxed Mac, the container root on iOS.
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return base.appendingPathComponent(appName, isDirectory: true)
     }
 
     public static func defaultDatabaseURL(appName: String = "Timeslice") -> URL {
@@ -46,15 +56,21 @@ public enum TimeslicePaths {
         return id
     }
 
-    /// A human-recognisable name for this machine, so "which device took over?" is answerable.
+    /// A human-recognisable name for this device, so "which device took over?" is answerable.
     ///
-    /// `Host.current().localizedName` is often just a MAC address or DHCP-assigned string — on this
-    /// developer's Macs it returns the same hex for both, which made two devices indistinguishable
-    /// in the UI. So prefer the hardware model (`MacBookAir`, `MacBookPro`, `Macmini`), which is
-    /// both meaningful and different for different machines, and fall back to the hostname only
-    /// when it looks like a real name.
+    /// The hostname is often just a MAC address or DHCP-assigned string — on this developer's Macs
+    /// it returns the same hex for both, which made two devices indistinguishable in the UI. So
+    /// prefer the hardware model (`MacBookAir`, `MacBookPro`, `Macmini`, `iPhone`), which is both
+    /// meaningful and different for different devices, and fall back to the hostname only when it
+    /// looks like a real name.
+    ///
+    /// `ProcessInfo.hostName` rather than `Host.current().localizedName`: `Host` does not exist on
+    /// iOS. This only affects *newly minted* ids — an existing device reads its persisted
+    /// `device-id` file, so no device changes identity (which would fork its sync history).
     private static func deviceNameSlug() -> String {
-        let host = (Host.current().localizedName ?? "").lowercased()
+        var host = ProcessInfo.processInfo.hostName.lowercased()
+        // Bonjour hands back "somename.local"; the suffix is noise in a device label.
+        if host.hasSuffix(".local") { host = String(host.dropLast(6)) }
         let hostSlug = slugify(host)
         // A bare hex string (MAC address) or empty name isn't useful; prefer the model.
         let looksLikeHex = !hostSlug.isEmpty
@@ -63,18 +79,29 @@ public enum TimeslicePaths {
         if !hostSlug.isEmpty && !looksLikeHex { return String(hostSlug.prefix(16)) }
 
         if let model = hardwareModel() {
-            // "Mac15,6" → "mac15-6"; "MacBookAir10,1" → "macbookair10-1"
+            // "Mac15,6" → "mac15-6"; "MacBookAir10,1" → "macbookair10-1"; "iPhone16,2" → "iphone16-2"
             return String(slugify(model.lowercased()).prefix(16))
         }
-        return "mac"
+        return "device"
     }
 
+    /// The model identifier, e.g. `MacBookAir10,1` or `iPhone16,2`.
+    ///
+    /// The sysctl key differs by platform and is genuinely counterintuitive: macOS puts the model in
+    /// `hw.model` (`hw.machine` is just `arm64`), whereas on iOS `hw.model` is the internal board id
+    /// (`D84AP`) and the model lives in `hw.machine`. Reading the wrong one yields a label no human
+    /// recognises.
     private static func hardwareModel() -> String? {
+        #if os(macOS)
+        let key = "hw.model"
+        #else
+        let key = "hw.machine"
+        #endif
         var size = 0
-        sysctlbyname("hw.model", nil, &size, nil, 0)
+        sysctlbyname(key, nil, &size, nil, 0)
         guard size > 0 else { return nil }
         var chars = [CChar](repeating: 0, count: size)
-        sysctlbyname("hw.model", &chars, &size, nil, 0)
+        sysctlbyname(key, &chars, &size, nil, 0)
         let value = String(cString: chars)
         return value.isEmpty ? nil : value
     }

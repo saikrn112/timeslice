@@ -8,7 +8,7 @@ import TimesliceCore
 /// plain `var`s meant SwiftUI never saw their `@Published` changes — sign-in succeeded but the
 /// panel kept rendering "Sign in with Google", which looked exactly like a failed login.
 struct SyncSettingsSection: View {
-    @ObservedObject var settings: Settings
+    @ObservedObject var settings: AppSettings
     @ObservedObject var sync: SyncController
     @ObservedObject var auth: GoogleAuth
 

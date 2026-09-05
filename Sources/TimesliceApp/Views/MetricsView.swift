@@ -1,4 +1,5 @@
 import SwiftUI
+import TimesliceUI
 import Charts
 import TimesliceCore
 
@@ -7,7 +8,7 @@ import TimesliceCore
 struct MetricsView: View {
     @ObservedObject var appState: AppState
     @ObservedObject var engine: TimerEngine
-    @ObservedObject var settings: Settings
+    @ObservedObject var settings: AppSettings
 
     // Screenshot runs open on last month so the ranged charts (hours-per-day, weekday pattern)
     // are in frame over a fully-seeded month; the day view is the useful default otherwise.
@@ -2133,16 +2134,10 @@ struct MetricsView: View {
     ///
     /// `Format.compact` rolls over to "1d 16h" past 24 hours, which is unreadable as a *budget* —
     /// a 40h weekly target rendered as "1d 16h". Budgets are always talked about in hours.
+    /// Shared with the phone via `BudgetRows.duration` — budgets are always talked about in hours,
+    /// never rolling into days.
     private func budgetDuration(_ seconds: TimeInterval) -> String {
-        let total = Int(seconds.rounded())
-        if total <= 0 { return "0" }
-        if total < 60 { return "\(total)s" }
-        let h = total / 3600, m = (total % 3600) / 60
-        if h == 0 { return "\(m)m" }
-        // Past 100h the minutes are noise, and they overflowed the column — a year view showed
-        // "107h 2…" and "2085h…".
-        if h >= 100 || m == 0 { return "\(h)h" }
-        return "\(h)h \(m)m"
+        BudgetRows.duration(seconds)
     }
 
     /// Hours, dropping the decimal once the number is big enough not to need it.
@@ -2278,97 +2273,6 @@ struct FlowLayout: Layout {
     }
 }
 
-/// A progress bar with its percentage centred INSIDE it, legible at every fill level.
-///
-/// The label is drawn twice — once in a colour that reads on the fill, once in a colour that reads
-/// on the empty track — each masked to its own side of the fill boundary. That is the whole trick:
-/// a centred label is crossed by the boundary at ~50% fill, which is the common case, and a single
-/// text colour disappears there against one side or the other.
-///
-/// The on-fill colour comes from the fill's luminance, so this works for any tag colour as well as
-/// the green/orange/red verdict states without a per-colour table.
-struct InlineBar: View {
-    let fraction: Double          // 0…1, already clamped by the caller if it can exceed
-    let label: String
-    let fill: Color
-    var height: CGFloat = 13
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            let fw = min(max(fraction, 0), 1) * w
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.secondary.opacity(0.14))
-                // No sliver at zero: a minimum-width stub reads as "started" when nothing has been.
-                if fw > 0 { Capsule().fill(fill).frame(width: max(3, fw)) }
-
-                text(color: onTrack)
-                    .frame(width: w)
-                    .mask(alignment: .leading) {
-                        // Only the part of the glyphs sitting over empty track.
-                        HStack(spacing: 0) { Color.clear.frame(width: fw); Rectangle() }
-                    }
-                text(color: onFill)
-                    .frame(width: w)
-                    .mask(alignment: .leading) {
-                        HStack(spacing: 0) { Rectangle().frame(width: fw); Color.clear }
-                    }
-            }
-        }
-        .frame(height: height)
-    }
-
-    private func text(color: Color) -> some View {
-        Text(label)
-            .font(.system(size: 9, weight: .semibold, design: .monospaced))
-            .monospacedDigit()
-            .foregroundStyle(color)
-            .lineLimit(1)
-            .frame(maxWidth: .infinity, alignment: .center)
-    }
-
-    /// Readable against the empty track (which is a faint grey over the window background).
-    private var onTrack: Color { .secondary }
-
-    /// Readable against the fill. Perceptual luminance, not plain brightness — a saturated yellow is
-    /// far lighter to the eye than its RGB max suggests.
-    private var onFill: Color {
-        guard let c = NSColor(fill).usingColorSpace(.deviceRGB) else { return .white }
-        let l = 0.299 * c.redComponent + 0.587 * c.greenComponent + 0.114 * c.blueComponent
-        return l > 0.6 ? .black : .white
-    }
-}
-
-/// A minimal per-bucket bar chart: shape at a glance, no axes or labels.
-///
-/// One shared scale (the range's own maximum), so heights within a row compare honestly. Empty
-/// buckets draw a faint baseline rather than nothing, so a gap reads as a gap instead of the chart
-/// silently compressing it.
-struct Sparkline: View {
-    let values: [TimeInterval]
-    let tint: Color
-
-    var body: some View {
-        GeometryReader { geo in
-            let maxV = values.max() ?? 0
-            // Downsample: a year of days would otherwise be 365 sub-pixel bars.
-            let step = max(1, values.count / 60)
-            let shown = stride(from: 0, to: values.count, by: step).map { values[$0] }
-            let gap: CGFloat = shown.count > 30 ? 0.5 : 1
-            let w = max(1, (geo.size.width - CGFloat(max(0, shown.count - 1)) * gap)
-                        / CGFloat(max(1, shown.count)))
-            HStack(alignment: .bottom, spacing: gap) {
-                ForEach(Array(shown.enumerated()), id: \.offset) { _, v in
-                    Rectangle()
-                        .fill(v > 0 ? tint : Color.secondary.opacity(0.25))
-                        .frame(width: w, height: maxV > 0 ? max(1, geo.size.height * CGFloat(v / maxV)) : 1)
-                }
-            }
-            .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomLeading)
-        }
-    }
-}
-
 /// Width of the day-timeline hover card, reported up so the card can be flipped to the cursor's
 /// other side rather than being clipped by the plot's edge.
 struct TooltipWidth: PreferenceKey {
@@ -2377,3 +2281,4 @@ struct TooltipWidth: PreferenceKey {
         value = max(value, nextValue())
     }
 }
+

@@ -1,4 +1,5 @@
 import SwiftUI
+import TimesliceUI
 import TimesliceCore
 
 /// The popover content: a keyboard-navigable list of tasks with today's time. ↑/↓ move

@@ -43,6 +43,23 @@ public enum Aggregations {
         }
     }
 
+    /// Seconds per project clipped to an arbitrary range — the general form of `todayTotals`.
+    ///
+    /// Added because "Where time went" needs per-task totals for whatever range is selected, and
+    /// without it every caller hand-rolls its own interval trimming. That trimming is exactly the
+    /// midnight/DST-sensitive part, so a second copy of it is how the phone's totals would start
+    /// disagreeing with the Mac's.
+    public static func rangeTotals(
+        projects: [Project],
+        intervals: [Interval],
+        range: DateRange,
+        now: Date = Date()
+    ) -> [ProjectTotal] {
+        totals(projects: projects, intervals: intervals) {
+            clip($0, windowStart: range.start, windowEnd: range.end, now: now)
+        }
+    }
+
     private static func totals(
         projects: [Project],
         intervals: [Interval],
@@ -293,6 +310,55 @@ public enum Aggregations {
     /// (two devices, or older imports) would otherwise inflate a day past what physically elapsed
     /// and falsely clear the goal line. `deepSeconds` still sums, since "focused time" is about
     /// individual session lengths.
+    /// Totals for MANY windows in ONE pass over the intervals.
+    ///
+    /// Exists because the obvious thing — call `summary` once per window — is O(windows x intervals), and
+    /// that showed up as a measured 190 ms hitch building a 60-card period strip. Same arithmetic, one
+    /// traversal: each interval is split by local day (so DST and midnight stay correct), each slice is
+    /// filed into the window containing it, and each window's spans are UNIONED at the end.
+    ///
+    /// Union, not sum, for the same reason `summary` unions: two devices overlapping during a handoff would
+    /// otherwise inflate a period past the time that physically elapsed.
+    ///
+    /// `windows` must be sorted ascending and non-overlapping — which is what stepping a `DateRange`
+    /// produces. Returns one entry per window, in the same order, so callers can zip.
+    public static func windowTotals(
+        intervals: [Interval], windows: [DateRange], deepThreshold: TimeInterval,
+        now: Date = Date(), calendar: Calendar = .current
+    ) -> [(total: TimeInterval, deep: TimeInterval)] {
+        guard !windows.isEmpty else { return [] }
+        var spans = [[(start: Date, end: Date)]](repeating: [], count: windows.count)
+        var deepSpans = spans
+        let starts = windows.map(\.start)
+        let overallStart = starts[0]
+        let overallEnd = windows[windows.count - 1].end
+
+        for interval in intervals {
+            let end = interval.end ?? now
+            guard end > overallStart, interval.start < overallEnd else { continue }
+            let isDeep = end.timeIntervalSince(interval.start) >= deepThreshold
+            forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
+                guard segEnd > segStart, dayStart >= overallStart, dayStart < overallEnd else { return }
+                // Rightmost window whose start is <= this day. Binary search rather than a linear scan:
+                // with 60 windows the scan is what the single pass was meant to remove.
+                var lo = 0, hi = starts.count - 1, found = -1
+                while lo <= hi {
+                    let mid = (lo + hi) / 2
+                    if starts[mid] <= dayStart { found = mid; lo = mid + 1 } else { hi = mid - 1 }
+                }
+                guard found >= 0, dayStart < windows[found].end else { return }
+                spans[found].append((segStart, segEnd))
+                if isDeep { deepSpans[found].append((segStart, segEnd)) }
+            }
+        }
+
+        return (0..<windows.count).map { i in
+            let t = SpanUnion.coveredSeconds(spans[i])
+            let d = SpanUnion.coveredSeconds(deepSpans[i])
+            return (total: t, deep: min(d, t))
+        }
+    }
+
     public static func summary(
         intervals: [Interval], range: DateRange, deepThreshold: TimeInterval,
         now: Date = Date(), calendar: Calendar = .current
@@ -458,6 +524,21 @@ public enum Aggregations {
             out.append(contentsOf: packed)
         }
         return out.sorted { $0.startHour < $1.startHour }
+    }
+
+    /// Lanes packed purely by TIME OVERLAP, ignoring which device recorded what.
+    ///
+    /// `assignLanes` gives every device its own lane whenever more than one contributed, so three
+    /// devices produce three rows even when their blocks never overlap in time. That reads as
+    /// "these ran concurrently" when they didn't, and on a phone it costs three rows to say what one
+    /// row says. Device attribution is still available — the per-device totals under the strip and
+    /// the tap inspector both name it — so nothing is lost by collapsing rows that don't collide.
+    ///
+    /// The Mac keeps `assignLanes`; this exists for surfaces where vertical space is the scarce
+    /// resource and only genuine overlap deserves a second row.
+    public static func assignLanesByOverlap(_ segments: [DaySegment]) -> [DaySegment] {
+        packByOverlap(segments.sorted { $0.startHour < $1.startHour }, baseLane: 0)
+            .sorted { $0.startHour < $1.startHour }
     }
 
     /// Devices in order of first appearance — a stable, caller-visible row order.

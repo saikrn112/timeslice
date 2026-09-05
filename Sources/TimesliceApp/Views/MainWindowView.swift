@@ -5,7 +5,7 @@ struct MainWindowView: View {
     @ObservedObject var appState: AppState
     @ObservedObject var engine: TimerEngine
     @ObservedObject var privacy: PrivacyController
-    @ObservedObject var settings: Settings
+    @ObservedObject var settings: AppSettings
     var sync: SyncController? = nil
     var auth: GoogleAuth? = nil
 

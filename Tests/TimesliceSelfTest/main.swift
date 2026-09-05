@@ -1,6 +1,8 @@
 import Foundation
 import ImageIO
 import TimesliceCore
+import TimesliceUI
+import SwiftUI
 
 // Minimal assertion harness (no XCTest/swift-testing under Command Line Tools).
 var failures = 0
@@ -294,7 +296,8 @@ func testOAuthPKCE() {
     }
 
     do { // the consent URL carries what Google needs
-        let url = GoogleOAuth.authorizationURL(pkce: GoogleOAuth.PKCE(), port: 51789, state: "st")
+        let url = GoogleOAuth.authorizationURL(
+            pkce: GoogleOAuth.PKCE(), redirect: .loopback(port: 51789), state: "st")
         let s = url.absoluteString
         check(s.hasPrefix(GoogleOAuth.authEndpoint), "points at Google's auth endpoint")
         check(s.contains("code_challenge_method=S256"), "declares S256")
@@ -316,32 +319,57 @@ func testOAuthPKCE() {
         check(denied.code == nil, "...with no code")
     }
 
-    do { // token bodies must carry BOTH the verifier and the secret.
+    do { // token bodies must carry the verifier, and the secret whenever there is one.
         // Google rejects the exchange with "client_secret is missing." even for a Desktop client
-        // using PKCE. Omitting it made sign-in fail silently, so pin both here.
+        // using PKCE. Omitting it made sign-in fail silently, so pin it here.
         let body = String(decoding: GoogleOAuth.tokenRequestBody(
-            code: "c", pkce: GoogleOAuth.PKCE(), port: 1), as: UTF8.self)
+            code: "c", pkce: GoogleOAuth.PKCE(), redirect: .loopback(port: 1)), as: UTF8.self)
         check(body.contains("code_verifier="), "exchange sends the PKCE verifier")
-        check(body.contains("client_secret="), "exchange sends client_secret (Google requires it)")
         check(body.contains("grant_type=authorization_code"), "correct grant for the exchange")
 
         let refresh = String(decoding: GoogleOAuth.refreshRequestBody(refreshToken: "r"),
                             as: UTF8.self)
         check(refresh.contains("grant_type=refresh_token"), "refresh uses the right grant")
-        check(refresh.contains("client_secret="), "refresh also needs client_secret")
 
         // The AUTH url must never carry the secret — that would leak it into browser history.
-        let authURL = GoogleOAuth.authorizationURL(pkce: GoogleOAuth.PKCE(), port: 1, state: "s")
+        let authURL = GoogleOAuth.authorizationURL(
+            pkce: GoogleOAuth.PKCE(), redirect: .loopback(port: 1), state: "s")
         check(!authURL.absoluteString.contains("client_secret"),
               "secret stays out of the authorization URL")
+
         // Credentials are supplied at runtime (env or ~/.config/timeslice/env), never committed,
         // so a bare checkout legitimately has none. Assert the plumbing, not the value.
+        //
+        // Empty fields are now DROPPED rather than sent blank, because an iOS client has no secret
+        // and `client_secret=` is an error there rather than a no-op. So the presence of the field
+        // tracks whether a secret exists — which is the property worth pinning either way.
         if GoogleOAuth.isConfigured {
             check(!GoogleOAuth.clientSecret.isEmpty, "configured secret is non-empty")
             check(body.contains("client_secret="), "configured secret reaches the exchange")
+            check(refresh.contains("client_secret="), "refresh also carries the secret")
         } else {
             check(GoogleOAuth.clientID.isEmpty, "unconfigured build reports no client id")
+            check(!body.contains("client_secret="), "no secret means the field is omitted, not blank")
         }
+    }
+
+    do { // the redirect URI must be identical in both legs, or Google refuses the exchange
+        let scheme = GoogleOAuth.Redirect.customScheme("com.googleusercontent.apps.123-abc:/oauth")
+        check(scheme.uriString == "com.googleusercontent.apps.123-abc:/oauth",
+              "custom scheme is passed through verbatim")
+        check(GoogleOAuth.Redirect.loopback(port: 8080).uriString == "http://127.0.0.1:8080",
+              "loopback builds the Desktop-client redirect")
+
+        let authURL = GoogleOAuth.authorizationURL(
+            pkce: GoogleOAuth.PKCE(), redirect: scheme, state: "s").absoluteString
+        let exchange = String(decoding: GoogleOAuth.tokenRequestBody(
+            code: "c", pkce: GoogleOAuth.PKCE(), redirect: scheme), as: UTF8.self)
+        // Both legs must agree. This is the failure the Redirect type exists to make impossible:
+        // building the string twice let the consent and exchange drift apart.
+        check(authURL.contains("com.googleusercontent.apps.123-abc"),
+              "consent URL carries the custom-scheme redirect")
+        check(exchange.contains("redirect_uri=com.googleusercontent.apps.123-abc"),
+              "token exchange carries the SAME redirect")
     }
 }
 
@@ -3099,6 +3127,623 @@ func testTagSync() throws {
     }
 }
 
+// MARK: - Palette / shared colour derivation
+
+/// Colour derivation moved from `AppState` into Core so the iOS app and the Live Activity widget
+/// (a separate process that can't link the Mac app) render a task in the SAME colour. These checks
+/// are the thing that makes that guarantee real rather than aspirational.
+func testPalette() {
+    print("\nPalette:")
+
+    do { // base palette, then generated hues — never a repeat
+        check(Palette.color(forIndex: 0) == "#4E79A7", "index 0 is the first base colour")
+        check(Palette.color(forIndex: 9) == "#BAB0AC", "index 9 is the last base colour")
+        let generated = (0..<40).map { Palette.color(forIndex: $0) }
+        check(Set(generated).count == 40, "40 tasks get 40 distinct colours")
+        check(generated.allSatisfy { $0.count == 7 && $0.hasPrefix("#") }, "all are #RRGGBB")
+    }
+
+    do { // shade(index: 0) must be identity, or the first task stops matching its project swatch
+        check(Palette.shade(ofHex: "#4E79A7", index: 0) == "#4E79A7", "shade 0 is the base colour")
+        let shades = (0..<6).map { Palette.shade(ofHex: "#4E79A7", index: $0) }
+        check(Set(shades).count == 6, "siblings get distinct shades")
+        // Same hue family: a shade must stay recognisably the project's colour.
+        let baseHue = Palette.hsv(fromHex: "#4E79A7")!.h
+        check(shades.allSatisfy { abs(Palette.hsv(fromHex: $0)!.h - baseHue) < 0.02 },
+              "shades preserve the project hue")
+    }
+
+    do { // malformed input degrades instead of crashing
+        check(Palette.shade(ofHex: "nonsense", index: 3) == "nonsense", "bad hex passes through")
+        check(Palette.hsv(fromHex: "#fff") == nil, "3-digit hex is rejected")
+    }
+
+    do { // Inbox (no group) keeps the task's own colour
+        let task = Project(id: 1, name: "t", colorHex: "#123456", sortOrder: 0, archived: false)
+        check(Palette.displayColorHex(for: task, groups: [], allTasks: [task]) == "#123456",
+              "ungrouped task keeps its own colour")
+    }
+
+    do { // grouped tasks take shades of the GROUP colour, positionally by id
+        let group = TaskProject(id: 7, name: "g", colorHex: "#59A14F")
+        func t(_ id: Int64) -> Project {
+            Project(id: id, name: "t\(id)", colorHex: "#000000", sortOrder: 0, archived: false,
+                    taskProjectID: 7)
+        }
+        let all = [t(3), t(11), t(42)]
+        let hexes = all.map { Palette.displayColorHex(for: $0, groups: [group], allTasks: all) }
+        check(hexes[0] == "#59A14F", "first task in a group matches the group swatch")
+        check(Set(hexes).count == 3, "three grouped tasks get three shades")
+
+        // Input order must not matter — sorting is by id, so a reordered list is the same colours.
+        let shuffled = [t(42), t(3), t(11)]
+        check(Palette.displayColorHex(for: t(11), groups: [group], allTasks: shuffled) == hexes[1],
+              "shade is independent of input order")
+
+        // Archived siblings MUST still count: dropping one renumbers the rest and silently
+        // recolours them, which is the bug the `allTasks` parameter exists to prevent.
+        let withoutMiddle = [t(3), t(42)]
+        check(Palette.displayColorHex(for: t(42), groups: [group], allTasks: withoutMiddle) != hexes[2],
+              "omitting a sibling shifts later shades (so archived tasks must be included)")
+
+        // A task pointing at a group that no longer exists falls back rather than vanishing.
+        check(Palette.displayColorHex(for: t(3), groups: [], allTasks: all) == "#000000",
+              "missing group falls back to the task's colour")
+    }
+
+    // MARK: colour used as TEXT
+    //
+    // The palette is chosen for FILLS. Used as text it is mostly unreadable: 47 of these 60 colours
+    // fail 4.5:1 on a white window, worst at 1.20:1. These checks pin the repair, because an invisible
+    // label is exactly the kind of bug that ships — nothing crashes and no compiler complains.
+    do {
+        // Known anchors, so a broken luminance implementation can't pass the sweep by accident.
+        check(Palette.relativeLuminance(ofHex: "#FFFFFF").map { abs($0 - 1) < 0.001 } == true,
+              "white has luminance 1")
+        check(Palette.relativeLuminance(ofHex: "#000000").map { $0 < 0.001 } == true,
+              "black has luminance 0")
+        check(Palette.contrastRatio("#FFFFFF", "#000000").map { abs($0 - 21) < 0.01 } == true,
+              "black on white is 21:1")
+        check(Palette.relativeLuminance(ofHex: "#fff") == nil, "3-digit hex is rejected")
+        check(Palette.legibleHex("nonsense", onBackground: "#FFFFFF") == "nonsense",
+              "bad hex passes through untouched")
+
+        // The sweep: every base colour AND every shade a project's tasks can take, on both
+        // appearances. `shade` reaches brightness 0.97, which is where the invisible cases come from,
+        // so testing only `Palette.colors` would miss the worst of them.
+        let surfaces = [("light", "#FFFFFF"), ("dark", "#2E2E2E")]
+        var subjects: [String] = []
+        for base in Palette.colors {
+            for i in 0..<6 { subjects.append(Palette.shade(ofHex: base, index: i)) }
+        }
+        for (name, bg) in surfaces {
+            let repaired = subjects.map { Palette.legibleHex($0, onBackground: bg) }
+            let worst = repaired.compactMap { Palette.contrastRatio($0, bg) }.min() ?? 0
+            check(worst >= 4.5, "every task colour clears 4.5:1 as text on \(name) (worst \(worst))")
+
+            // Hue is preserved, so a repaired colour still reads as "the blue one". Greys are exempt:
+            // their hue is meaningless and HSV reports it as 0 regardless.
+            let hueDrift = zip(subjects, repaired).compactMap { original, fixed -> Double? in
+                guard let a = Palette.hsv(fromHex: original), let b = Palette.hsv(fromHex: fixed),
+                      a.s > 0.15 else { return nil }
+                // Circular distance — a red at 0.99 and one at 0.01 are neighbours, not opposites.
+                let raw = abs(a.h - b.h)
+                return min(raw, 1 - raw)
+            }.max() ?? 0
+            check(hueDrift < 0.02, "repair keeps the hue on \(name) (drift \(hueDrift))")
+        }
+
+        // Idempotent: a colour that already passes is returned unchanged, so this can be applied
+        // without compounding.
+        check(Palette.legibleHex("#000000", onBackground: "#FFFFFF") == "#000000",
+              "already-legible colour is untouched")
+        let once = Palette.legibleHex("#EDC948", onBackground: "#FFFFFF")
+        check(Palette.legibleHex(once, onBackground: "#FFFFFF") == once, "repair is idempotent")
+
+        // Direction: darker on a light page, lighter on a dark one.
+        let onLight = Palette.hsv(fromHex: Palette.legibleHex("#EDC948", onBackground: "#FFFFFF"))!
+        let onDark = Palette.hsv(fromHex: Palette.legibleHex("#4E79A7", onBackground: "#2E2E2E"))!
+        check(onLight.v < Palette.hsv(fromHex: "#EDC948")!.v, "yellow darkens on a light page")
+        check(onDark.v > Palette.hsv(fromHex: "#4E79A7")!.v, "blue lightens on a dark page")
+    }
+}
+
+
+// MARK: - Shared bar components (TimesliceUI)
+
+/// `InlineBar` draws its percentage INSIDE the bar, so the label colour has to flip based on the
+/// fill. Getting that wrong makes the label invisible — a silent bug no compiler catches, and the
+/// reason this threshold is pinned here rather than left to inspection.
+///
+/// Also guards the platform branch: a macOS build cannot typecheck the `#if canImport(UIKit)` arm at
+/// all, so these run on the macOS arm and the iOS arm is verified separately by compiling for the
+/// iOS SDK. Keeping them in step is manual.
+func testInlineBarContrast() {
+    print("\nInlineBar contrast:")
+
+    // Perceptual, NOT max(r,g,b): a saturated yellow is far lighter to the eye than its RGB
+    // suggests, and plain brightness would put white text on it.
+    let yellow = InlineBar.perceptualLuminance(of: Color(red: 1, green: 1, blue: 0))
+    let blue = InlineBar.perceptualLuminance(of: Color(red: 0, green: 0, blue: 1))
+    check(yellow != nil && blue != nil, "luminance is readable for plain colours")
+    if let yellow, let blue {
+        check(yellow > 0.85, "yellow is perceptually light (\(yellow))")
+        check(blue < 0.2, "pure blue is perceptually dark (\(blue))")
+        check(yellow > blue, "yellow reads lighter than blue despite equal RGB maxima")
+    }
+
+    // The decisions that actually matter for legibility.
+    check(InlineBar.readableTextColor(on: Color(red: 1, green: 1, blue: 0)) == .black,
+          "black label on a light fill")
+    check(InlineBar.readableTextColor(on: Color(red: 0, green: 0, blue: 1)) == .white,
+          "white label on a dark fill")
+    check(InlineBar.readableTextColor(on: .white) == .black, "black on white")
+    check(InlineBar.readableTextColor(on: .black) == .white, "white on black")
+
+    // Every palette colour must produce a legible label — these are the fills real budget rows use.
+    for hex in Palette.colors {
+        let picked = InlineBar.readableTextColor(on: Color(hex: hex))
+        check(picked == .black || picked == .white, "palette \(hex) resolves a label colour")
+    }
+
+    // The verdict tints the Budgets rows use. Asserting only that each resolves to one of the two
+    // legible options, not WHICH — the exact luminance of SwiftUI's semantic colours is Apple's to
+    // change, and pinning it would make this test fail on an OS update rather than on a real bug.
+    // (Written after guessing `.green` took a black label; it measures below the threshold and takes
+    // white, which is correct — SwiftUI's green is a mid-dark green, not a bright one.)
+    for (name, tint) in [("green", Color.green), ("orange", .orange), ("red", .red)] {
+        let l = InlineBar.perceptualLuminance(of: tint) ?? -1
+        let picked = InlineBar.readableTextColor(on: tint)
+        check(picked == .black || picked == .white,
+              "verdict \(name) (luminance \(String(format: "%.2f", l))) resolves a legible label")
+        // The pairing must at least be self-consistent with the threshold it claims to use.
+        check((l > 0.6) == (picked == .black), "verdict \(name) label agrees with its luminance")
+    }
+}
+
+
+// MARK: - TaskOrdering (shared recency order)
+
+/// Hoisted out of the Mac's `AppState` so the phone's task list and Action Button wheel order tasks
+/// identically. The rules are subtle enough that a second implementation would drift, so they're
+/// pinned here rather than trusted to two call sites agreeing.
+func testTaskOrdering() {
+    print("\nTask ordering:")
+
+    func p(_ id: Int64) -> Project {
+        Project(id: id, name: "t\(id)", colorHex: "#4E79A7", sortOrder: Int(id), archived: false)
+    }
+    let display = [p(1), p(2), p(3), p(4)]
+    let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
+    do { // more recent first
+        let order = TaskOrdering.recencyOrdered(
+            display: display,
+            lastActivity: [1: t0, 2: t0.addingTimeInterval(100), 3: t0.addingTimeInterval(50)],
+            current: nil).map(\.id)
+        check(order.prefix(3).elementsEqual([2, 3, 1]), "most recently worked comes first")
+        check(order.last == 4, "never-tracked task sinks to the tail")
+    }
+
+    do { // the current task is PINNED to index 0, even when another is more recent
+        let order = TaskOrdering.recencyOrdered(
+            display: display,
+            lastActivity: [1: t0, 2: t0.addingTimeInterval(999)],
+            current: 1).map(\.id)
+        check(order.first == 1, "current task is pinned to index 0")
+        check(order.dropFirst().first == 2, "index 1 is the task you came from — alt-tab behaviour")
+    }
+
+    do { // A -> B leaves both with the SAME activity time; pinning is what breaks the tie correctly
+        let same = t0
+        let order = TaskOrdering.recencyOrdered(
+            display: display, lastActivity: [1: same, 2: same], current: 2).map(\.id)
+        check(order.first == 2,
+              "equal timestamps: the current task still leads, so one press returns to the other")
+        check(order.dropFirst().first == 1, "...and the one just left sits at index 1")
+    }
+
+    do { // untracked tasks keep DISPLAY order among themselves, rather than interleaving randomly
+        let order = TaskOrdering.recencyOrdered(
+            display: [p(9), p(3), p(7)], lastActivity: [:], current: nil).map(\.id)
+        check(order == [9, 3, 7], "all-untracked keeps displayed order (stable, not arbitrary)")
+    }
+
+    do { // ordering must be a no-op on an empty list rather than trapping
+        check(TaskOrdering.recencyOrdered(display: [], lastActivity: [:], current: 5).isEmpty,
+              "empty input yields empty output")
+    }
+}
+
+
+// MARK: - BudgetRows (shared budget row composition)
+
+/// The composition hoisted out of the Mac's MetricsView so the phone's Budgets screen measures each
+/// budget over the identical windows. Each row reads three separate clocks — its own period, today,
+/// and the range being viewed — and which figure uses which window is the whole reason the numbers
+/// mean anything. These checks pin that wiring, not the maths inside `TargetMath` (already covered).
+func testBudgetRows() throws {
+    print("\nBudget rows:")
+
+    let (store, url) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let groupID = try store.upsertTaskProject(name: "work", colorHex: "#76B7B2")
+    let a = try store.createProject(name: "alpha", colorHex: "#4E79A7", inGroup: groupID)
+    let b = try store.createProject(name: "beta", colorHex: "#F28E2B")
+    let tagID = try store.upsertTag(name: "deep", colorHex: "#59A14F")
+    try store.addTag(tagID, to: .project(groupID))
+
+    let tasks = try store.listProjects(includeArchived: true)
+    let groups = try store.listTaskProjects()
+    let tags = try store.listTags()
+    let tagIDsByTask = try store.effectiveTagIDsByTask()
+
+    // A fixed "now" so the elapsed fraction and windows are deterministic.
+    let now = date(2026, 3, 11, 12, 0)               // a Wednesday, midday
+    let dayRange = DateRange.resolve(unit: .day, anchor: now)
+
+    // 2h on alpha today.
+    try store.insertClosedInterval(projectID: a, start: date(2026, 3, 11, 9, 0),
+                                   end: date(2026, 3, 11, 11, 0))
+    // 1h on beta today.
+    try store.insertClosedInterval(projectID: b, start: date(2026, 3, 11, 11, 0),
+                                   end: date(2026, 3, 11, 12, 0))
+    let intervals = try store.intervals()
+
+    do { // a task floor, judged against ITS OWN period rather than the viewed range
+        _ = try store.setTarget(subject: .task(a), seconds: 4 * 3600,
+                                direction: .atLeast, period: .day)
+        let rows = BudgetRows.build(targets: try store.listTargets(), tasks: tasks, groups: groups,
+                                    tags: tags, tagIDsByTask: tagIDsByTask, intervals: intervals,
+                                    viewedRange: dayRange, now: now)
+        check(rows.count == 1, "one target yields one row")
+        guard let row = rows.first else { return }
+        check(row.progress.name == "alpha", "subject name resolved from the task")
+        check(approx(row.progress.actualSeconds, 2 * 3600, 1), "actual is the subject's own seconds")
+        check(approx(row.progress.expectedSeconds, 4 * 3600, 1), "a daily target expects its full amount on a day range")
+        // Midday against a 4h floor with 2h done: on pace, NOT behind. Calling this a failure is
+        // what would train you to ignore the number.
+        if case .onPace = row.progress.verdict {} else {
+            check(false, "half-done at half-elapsed is on pace, got \(row.progress.verdict)")
+        }
+        // A task inside a project takes the project's SHADE, matching the list and the island.
+        check(row.colorHex != "#8E8E93", "task subject resolves a real colour")
+        check(row.colorHex == Palette.displayColorHex(
+                for: tasks.first { $0.id == a }!, groups: groups, allTasks: tasks),
+              "task colour is its display shade, not its raw swatch")
+    }
+
+    do { // the budget PERIOD follows the viewed range, not today
+        //
+        // `TargetMath.periodAnchor` is tested on its own elsewhere; this asserts `BudgetRows.build`
+        // actually routes through it. It didn't: every window was anchored at `now`, so paging back a
+        // day still judged TODAY's budget and the section contradicted every other number on the page.
+        // Both front-ends read these rows, so the regression would hit the Mac and the phone at once.
+        for t in try store.listTargets() { try store.deleteTarget(id: t.id) }
+        _ = try store.setTarget(subject: .task(a), seconds: 4 * 3600,
+                                direction: .atLeast, period: .day)
+
+        // 3h on alpha two days earlier, so the past day has a different total from today's 2h.
+        try store.insertClosedInterval(projectID: a, start: date(2026, 3, 9, 9, 0),
+                                       end: date(2026, 3, 9, 12, 0))
+        let withPast = try store.intervals()
+
+        let pastDay = DateRange.resolve(unit: .day, anchor: date(2026, 3, 9, 12, 0))
+        let rows = BudgetRows.build(targets: try store.listTargets(), tasks: tasks, groups: groups,
+                                    tags: tags, tagIDsByTask: tagIDsByTask, intervals: withPast,
+                                    viewedRange: pastDay, now: now)
+        guard let row = rows.first else { check(false, "past-range target produced a row"); return }
+        check(approx(row.progress.actualSeconds, 3 * 3600, 1),
+              "viewing a past day judges THAT day's 3h, not today's 2h")
+        // A fully elapsed period is 100% elapsed, so "behind" is a verdict about the finished day
+        // rather than about a pace that no longer applies.
+        check(row.progress.elapsedFraction >= 0.999,
+              "a past period counts as fully elapsed")
+
+        // And the current range still reports today, so the fix didn't invert the common case.
+        let todayRows = BudgetRows.build(targets: try store.listTargets(), tasks: tasks,
+                                        groups: groups, tags: tags, tagIDsByTask: tagIDsByTask,
+                                        intervals: withPast, viewedRange: dayRange, now: now)
+        check(approx(todayRows.first?.progress.actualSeconds ?? 0, 2 * 3600, 1),
+              "the current range still judges today")
+    }
+
+    do { // a TAG subject aggregates every task carrying it (via its project)
+        for t in try store.listTargets() { try store.deleteTarget(id: t.id) }
+        _ = try store.setTarget(subject: .tag(tagID), seconds: 1 * 3600,
+                                direction: .atLeast, period: .day)
+        let rows = BudgetRows.build(targets: try store.listTargets(), tasks: tasks, groups: groups,
+                                    tags: tags, tagIDsByTask: tagIDsByTask, intervals: intervals,
+                                    viewedRange: dayRange, now: now)
+        guard let row = rows.first else { check(false, "tag target produced a row"); return }
+        check(row.progress.name == "deep", "tag name resolved")
+        check(approx(row.progress.actualSeconds, 2 * 3600, 1),
+              "tag rolls up alpha's 2h (inherited from its project) and not beta's")
+        check(row.colorHex == "#59A14F", "tag subject uses the tag's own colour")
+        if case .met = row.progress.verdict {} else {
+            check(false, "2h against a 1h floor is met, got \(row.progress.verdict)")
+        }
+    }
+
+    do { // trouble sorts first: a breached ceiling ahead of a floor that's fine
+        for t in try store.listTargets() { try store.deleteTarget(id: t.id) }
+        _ = try store.setTarget(subject: .task(b), seconds: 10 * 60,
+                                direction: .atMost, period: .day)     // 1h spent vs 10m ceiling
+        _ = try store.setTarget(subject: .task(a), seconds: 1 * 3600,
+                                direction: .atLeast, period: .day)    // 2h vs 1h floor: met
+        let rows = BudgetRows.build(targets: try store.listTargets(), tasks: tasks, groups: groups,
+                                    tags: tags, tagIDsByTask: tagIDsByTask, intervals: intervals,
+                                    viewedRange: dayRange, now: now)
+        check(rows.count == 2, "two targets, two rows")
+        check(rows.first?.progress.name == "beta", "the breached ceiling sorts first")
+        check(BudgetRows.rank(.over) < BudgetRows.rank(.behind)
+              && BudgetRows.rank(.behind) < BudgetRows.rank(.onPace)
+              && BudgetRows.rank(.onPace) < BudgetRows.rank(.met),
+              "verdict ranking is over < behind < onPace < met")
+    }
+
+    do { // a target whose subject was deleted must not render as a blank row
+        for t in try store.listTargets() { try store.deleteTarget(id: t.id) }
+        _ = try store.setTarget(subject: .task(9_999), seconds: 3600,
+                                direction: .atLeast, period: .day)
+        let rows = BudgetRows.build(targets: try store.listTargets(), tasks: tasks, groups: groups,
+                                    tags: tags, tagIDsByTask: tagIDsByTask, intervals: intervals,
+                                    viewedRange: dayRange, now: now)
+        check(rows.isEmpty, "a target pointing at a deleted subject is dropped, not rendered blank")
+        check(BudgetRows.name(for: .task(9_999), tasks: tasks, groups: groups, tags: tags) == nil,
+              "name resolution returns nil for a missing subject")
+    }
+
+    do { // budget durations are ALWAYS hours — never "1d 16h", which is unreadable as a budget
+        check(BudgetRows.duration(40 * 3600) == "40h", "40h stays 40h rather than rolling to days")
+        check(BudgetRows.duration(0) == "0", "zero is bare")
+        check(BudgetRows.duration(90) == "1m", "under an hour shows minutes")
+        check(BudgetRows.duration(30) == "30s", "under a minute shows seconds")
+        check(BudgetRows.duration(3600 + 7 * 60) == "1h 7m", "hours and minutes")
+        // Past 100h the minutes are noise and used to overflow the column.
+        check(BudgetRows.duration(107 * 3600 + 2 * 60) == "107h", "minutes dropped past 100h")
+    }
+}
+
+
+/// `createProject(inGroup:)` must actually FILE the task, not just use the group to dedup.
+///
+/// It used to drop the parameter after the dedup lookup, so a task created in a group landed in
+/// Inbox. The Mac masked it by calling `setTaskProject` straight afterwards; the phone's `/project`
+/// filing trusted the parameter and silently did nothing. Pinned here because the symptom is
+/// invisible — the task exists, just in the wrong place.
+func testCreateProjectFilesIntoGroup() throws {
+    print("\nCreate-in-group:")
+    let (store, url) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let groupID = try store.upsertTaskProject(name: "work", colorHex: "#76B7B2")
+    let filed = try store.createProject(name: "alpha", colorHex: "#4E79A7", inGroup: groupID)
+    let inbox = try store.createProject(name: "beta", colorHex: "#F28E2B")
+
+    let tasks = try store.listProjects(includeArchived: true)
+    check(tasks.first { $0.id == filed }?.taskProjectID == groupID,
+          "a task created inGroup is actually in that group")
+    check(tasks.first { $0.id == inbox }?.taskProjectID == nil,
+          "a task created with no group stays in Inbox")
+
+    // And the consequence that made it matter: tag inheritance flows through the group.
+    let tagID = try store.upsertTag(name: "deep", colorHex: "#59A14F")
+    try store.addTag(tagID, to: .project(groupID))
+    let byTask = try store.effectiveTagIDsByTask()
+    check(byTask[filed]?.contains(tagID) == true, "the filed task inherits its project's tag")
+    check(byTask[inbox]?.contains(tagID) != true, "an Inbox task inherits nothing")
+}
+
+
+/// The swipe-to-change-period convention.
+///
+/// Here because the gesture cannot be exercised headlessly — `simctl` has no drag — so the decision the
+/// gesture delegates to is the only part that can be pinned down. An inverted direction builds cleanly
+/// and screenshots identically, and would only show up as the screen going the wrong way in your hand.
+func testSwipeDelta() {
+    print("\nSwipe delta:")
+
+    // Content follows the finger: left goes forward in time, right goes back.
+    check(DateRange.swipeDelta(dx: -80, dy: 0) == 1, "dragging left moves forward")
+    check(DateRange.swipeDelta(dx: 80, dy: 0) == -1, "dragging right moves back")
+
+    // Mostly-vertical drags belong to the scroll view, not to us.
+    check(DateRange.swipeDelta(dx: 10, dy: 90) == nil, "a vertical drag is ignored")
+    check(DateRange.swipeDelta(dx: 30, dy: 30) == nil, "a diagonal drag is ignored")
+    check(DateRange.swipeDelta(dx: 0, dy: 0) == nil, "a tap-sized drag is ignored")
+
+    // Comfortably horizontal still wins even with some vertical drift, which every real thumb has.
+    check(DateRange.swipeDelta(dx: -100, dy: 40) == 1, "horizontal wins despite drift")
+
+    // The magnitude never matters — a long swipe is still one period, so a flick can't skip a week.
+    check(DateRange.swipeDelta(dx: -1000, dy: 0) == 1, "a long swipe is still one period")
+}
+
+/// `rangeTotals` is the general form of `todayTotals`. Added because "Where time went" needs per-task
+/// figures for an arbitrary range, and every caller was otherwise trimming intervals by hand — the
+/// DST/midnight-sensitive arithmetic that must not exist twice.
+func testRangeTotals() throws {
+    print("\nRange totals:")
+    let (store, url) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let a = try store.createProject(name: "alpha", colorHex: "#4E79A7")
+    let b = try store.createProject(name: "beta", colorHex: "#F28E2B")
+    let tasks = try store.listProjects(includeArchived: true)
+    let now = date(2026, 3, 11, 12, 0)
+
+    // Fully inside the day.
+    try store.insertClosedInterval(projectID: a, start: date(2026, 3, 11, 9, 0),
+                                   end: date(2026, 3, 11, 11, 0))
+    // Straddles midnight INTO the day — only the post-midnight hour counts.
+    try store.insertClosedInterval(projectID: a, start: date(2026, 3, 10, 23, 0),
+                                   end: date(2026, 3, 11, 1, 0))
+    // Entirely before the day — must not count at all.
+    try store.insertClosedInterval(projectID: b, start: date(2026, 3, 9, 9, 0),
+                                   end: date(2026, 3, 9, 10, 0))
+    let intervals = try store.intervals()
+
+    let day = DateRange.resolve(unit: .day, anchor: now, calendar: cal)
+    let totals = Aggregations.rangeTotals(projects: tasks, intervals: intervals, range: day, now: now)
+    let byID = Dictionary(uniqueKeysWithValues: totals.map { ($0.project.id, $0.seconds) })
+
+    check(approx(byID[a] ?? -1, 3 * 3600, 1),
+          "2h inside + 1h of a midnight-straddling session = 3h, not 4h")
+    check(approx(byID[b] ?? -1, 0, 1), "an interval entirely outside the range contributes nothing")
+
+    // Widening the range must pick the earlier session up rather than change the clipping rules.
+    let month = DateRange.resolve(unit: .month, anchor: now, calendar: cal)
+    let wide = Aggregations.rangeTotals(projects: tasks, intervals: intervals, range: month, now: now)
+    let wideByID = Dictionary(uniqueKeysWithValues: wide.map { ($0.project.id, $0.seconds) })
+    check(approx(wideByID[a] ?? -1, 4 * 3600, 1), "over a month, both of alpha's sessions count fully")
+    check(approx(wideByID[b] ?? -1, 3600, 1), "beta's earlier hour appears once the range includes it")
+
+    // Agrees with todayTotals for a day range — they must not be two different clippings.
+    let viaToday = Aggregations.todayTotals(projects: tasks, intervals: intervals, now: now,
+                                            calendar: cal)
+    let todayByID = Dictionary(uniqueKeysWithValues: viaToday.map { ($0.project.id, $0.seconds) })
+    check(approx(todayByID[a] ?? -1, byID[a] ?? -2, 1),
+          "rangeTotals over a day equals todayTotals")
+
+    // Every project appears, including ones with no time — the UI filters, the maths doesn't.
+    check(totals.count == tasks.count, "a row per project, zeroes included")
+}
+
+
+/// Lanes packed by time overlap only. `assignLanes` deliberately gives each DEVICE its own row; this
+/// variant exists for the phone, where three devices whose blocks never overlap should not cost three
+/// rows and should not imply concurrency that didn't happen.
+func testLanesByOverlap() {
+    print("\nLanes by overlap:")
+    func seg(_ id: Int64, _ from: Double, _ to: Double, _ device: String?) -> DaySegment {
+        DaySegment(id: id, projectID: id, startHour: from, endHour: to, deviceID: device)
+    }
+
+    do { // three devices, NO time overlap -> one row
+        let out = Aggregations.assignLanesByOverlap([
+            seg(1, 9, 10, "mac"), seg(2, 11, 12, "air"), seg(3, 13, 14, "phone"),
+        ])
+        check(out.allSatisfy { $0.lane == 0 }, "non-overlapping blocks share one lane across devices")
+        check(Aggregations.laneCount(out) == 1, "laneCount is 1")
+        // The device-per-lane function still behaves as the Mac needs it to.
+        let macStyle = Aggregations.assignLanes([
+            seg(1, 9, 10, "mac"), seg(2, 11, 12, "air"), seg(3, 13, 14, "phone"),
+        ])
+        check(Aggregations.laneCount(macStyle) == 3, "assignLanes still gives one lane per device")
+    }
+
+    do { // genuine overlap DOES get its own row
+        let out = Aggregations.assignLanesByOverlap([
+            seg(1, 9, 12, "mac"), seg(2, 10, 11, "air"),
+        ])
+        check(Set(out.map(\.lane)) == [0, 1], "overlapping blocks are split onto two lanes")
+    }
+
+    do { // overlap within ONE device also splits, so a handoff can't hide a block
+        let out = Aggregations.assignLanesByOverlap([
+            seg(1, 9, 12, "mac"), seg(2, 10, 13, "mac"),
+        ])
+        check(Set(out.map(\.lane)) == [0, 1], "one device's own overlap still fans out")
+    }
+
+    do { // touching but not overlapping stays on one lane
+        let out = Aggregations.assignLanesByOverlap([seg(1, 9, 10, "a"), seg(2, 10, 11, "b")])
+        check(out.allSatisfy { $0.lane == 0 }, "abutting blocks don't count as overlapping")
+        check(Aggregations.assignLanesByOverlap([]).isEmpty, "empty input is empty output")
+    }
+}
+
+
+/// The iOS client's redirect scheme is the REVERSED client id — not a free choice. Getting it wrong
+/// means Google refuses the exchange, so the derivation is pinned here.
+func testReversedClientID() {
+    print("\nReversed client id:")
+    let id = "1234567890-abcdefg.apps.googleusercontent.com"
+    check(GoogleOAuth.reversedClientID(id) == "com.googleusercontent.apps.abcdefg-1234567890"
+          || GoogleOAuth.reversedClientID(id) == "com.googleusercontent.apps.1234567890-abcdefg",
+          "components are reversed, got \(GoogleOAuth.reversedClientID(id) ?? "nil")")
+
+    // The redirect appends a path to that scheme.
+    if let redirect = GoogleOAuth.iOSRedirect(id) {
+        check(redirect.uriString.hasPrefix("com.googleusercontent.apps."),
+              "redirect uses the reversed-client-id scheme")
+        check(redirect.uriString.hasSuffix(":/oauth"), "redirect carries a path")
+    } else {
+        check(false, "iOSRedirect returned nil for a well-formed client id")
+    }
+
+    // A client id of the wrong shape must fail loudly rather than produce a scheme Google rejects.
+    check(GoogleOAuth.reversedClientID("not-a-google-client") == nil,
+          "a malformed client id yields no scheme")
+    check(GoogleOAuth.iOSRedirect("nonsense") == nil, "and no redirect")
+
+    // The runtime override feeds `clientID`, which is how iOS supplies one at all.
+    let saved = GoogleOAuth.clientIDOverride
+    GoogleOAuth.clientIDOverride = id
+    check(GoogleOAuth.clientID == id, "override wins over the config file")
+    check(GoogleOAuth.isConfigured, "an override is enough to report configured")
+    GoogleOAuth.clientIDOverride = nil
+    check(GoogleOAuth.clientID != id, "clearing the override restores the previous source")
+    GoogleOAuth.clientIDOverride = saved
+}
+
+
+/// The seeded database must obey the app's own invariants — otherwise it shows the UI states that
+/// cannot occur and hides the ones that can.
+///
+/// The one that matters here: **only one timer runs across all devices**, enforced by
+/// `TakeoverPolicy`, so no two intervals may overlap in time regardless of which device recorded
+/// them. An earlier seeder opened a running interval 42 minutes back on top of blocks it had already
+/// painted for today, which put fake lane contention on the day timeline.
+func testDemoSeedInvariants() throws {
+    print("\nDemo seed invariants:")
+    let (store, url) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let now = date(2026, 3, 11, 12, 0)
+    try DemoSeed.seed(into: store, preset: .rich, now: now)
+
+    let intervals = try store.intervals().sorted { $0.start < $1.start }
+    check(intervals.count > 500, "rich preset produces months of history (\(intervals.count))")
+
+    // No overlaps, across every device.
+    var offenders: [(Int64, Int64)] = []
+    for (a, b) in zip(intervals, intervals.dropFirst()) {
+        let aEnd = a.end ?? now
+        if b.start < aEnd { offenders.append((a.id, b.id)) }
+    }
+    check(offenders.isEmpty,
+          "no two intervals overlap — got \(offenders.count) pair(s), e.g. \(offenders.first.map(String.init(describing:)) ?? "none")")
+
+    // Nothing in the future.
+    let future = intervals.filter { ($0.end ?? now) > now }
+    check(future.count <= 1, "at most the running interval reaches `now` (\(future.count))")
+    check(intervals.allSatisfy { $0.start <= now }, "no interval starts in the future")
+
+    // Exactly one open interval, and it's the last thing recorded.
+    let open = intervals.filter { $0.end == nil }
+    check(open.count == 1, "exactly one running interval")
+    if let running = open.first, let previousEnd = intervals.compactMap(\.end).max() {
+        check(running.start >= previousEnd,
+              "the running interval starts at or after the last closed block")
+    }
+
+    // The shape the UI needs in order to be exercised at all.
+    check(try store.listTaskProjects().count >= 8, "several projects")
+    check(try store.listProjects(includeArchived: true).count >= 30, "many tasks")
+    check(try store.listTags().count >= 8, "several tags")
+    check(try store.listTargets().count >= 6, "budgets across subject kinds")
+    check(try store.deviceLabels().count >= 3, "several devices")
+
+    // And because the invariant holds, the day timeline needs only one lane.
+    let segments = Aggregations.assignLanesByOverlap(
+        Aggregations.daySegments(intervals: intervals, day: now, now: now))
+    check(Aggregations.laneCount(segments) == 1,
+          "a valid database needs ONE timeline lane; lanes only appear for anomalies")
+}
+
 // MARK: - Allocation done state and history
 
 func testAllocationLifecycle() throws {
@@ -3185,6 +3830,387 @@ func testAllocationLifecycle() throws {
         let theirs = try b.listTargets()[0]
         check(abs(theirs.createdAt.timeIntervalSince(mine.createdAt)) < 2,
               "the start date carries, so the span isn't reset to the merge time")
+    }
+}
+
+// MARK: - Two devices through a transport (the takeover the phone was missing)
+
+/// An in-memory `SyncTransport`, so two stores can be driven against each other with no network.
+///
+/// The gap this closes: `TakeoverPolicy.decide` and `SyncEngine.merge` were each well covered in
+/// ISOLATION, and both were correct — yet "auto pause is not working across devices" was still a real
+/// bug, because nothing tested the two of them wired together through a transport. A unit test per
+/// component can't catch a missing caller.
+final class MemoryTransport: SyncTransport, @unchecked Sendable {
+    var payloads: [String: Data] = [:]
+    var markers: [String: Data] = [:]
+    /// What the transport reports as each marker's write time — the server clock `TakeoverPolicy`
+    /// prefers over any peer's self-report.
+    var modified: [String: Date] = [:]
+
+    func put(payload: Data, deviceID: String) throws { payloads[deviceID] = payload }
+    func fetchOthers(excluding deviceID: String) throws -> [Data] {
+        payloads.filter { $0.key != deviceID }.map(\.value)
+    }
+    func putRunning(_ marker: Data?, deviceID: String) throws {
+        if let marker { markers[deviceID] = marker; modified[deviceID] = Date() }
+        else { markers[deviceID] = nil; modified[deviceID] = nil }
+    }
+    func fetchOtherRunning(excluding deviceID: String) throws -> [Data] {
+        markers.filter { $0.key != deviceID }.map(\.value)
+    }
+    func fetchOtherRunningWithTimes(excluding deviceID: String) throws -> [(data: Data, modified: Date?)] {
+        markers.filter { $0.key != deviceID }.map { ($0.value, modified[$0.key]) }
+    }
+    func deletePayload(deviceID: String) throws {
+        payloads[deviceID] = nil; markers[deviceID] = nil; modified[deviceID] = nil
+    }
+    /// Nothing here is ever unreadable — this transport only holds what these tests put in it.
+    func deleteUnreadablePayloads(excluding deviceID: String) -> Int { 0 }
+}
+
+func testCrossDeviceTakeover() throws {
+    print("\nCross-device takeover:")
+    let (macStore, macURL) = try makeStore()
+    let (phoneStore, phoneURL) = try makeStore()
+    defer {
+        try? FileManager.default.removeItem(at: macURL)
+        try? FileManager.default.removeItem(at: phoneURL)
+    }
+    let transport = MemoryTransport()
+
+    // Same task on both sides, sharing a uid — which is the only handle that means anything across
+    // devices. Row ids differ deliberately: the phone gets a decoy first so its ids can't line up.
+    _ = try phoneStore.createProject(name: "decoy", colorHex: "#000000")
+    let macTask = try macStore.createProject(name: "deep work", colorHex: "#4E79A7")
+    let uid = try macStore.uid(table: "projects", id: macTask)!
+    _ = try phoneStore.insertRemoteTask(uid: uid, name: "deep work", colorHex: "#4E79A7",
+                                        sortOrder: 0, archived: false, finished: false,
+                                        finishedAt: nil, taskProjectID: nil,
+                                        updatedAt: Date().timeIntervalSince1970)
+    let phoneTask = try phoneStore.localID(table: "projects", uid: uid)!
+    check(phoneTask != macTask, "the same task has DIFFERENT row ids on the two devices")
+
+    /// One device's settle step, mirroring what both `SyncController`s do.
+    func settle(_ store: IntervalStore, deviceID: String, now: Date) throws -> String? {
+        let observed = try transport.fetchOtherRunningWithTimes(excluding: deviceID)
+        var marks: [RunningMarker] = []
+        var observedAt: [String: Date] = [:]
+        for e in observed {
+            guard let m = try? JSONDecoder().decode(RunningMarker.self, from: e.data) else { continue }
+            marks.append(m)
+            if let mod = e.modified { observedAt[m.deviceID] = mod }
+        }
+        guard let d = TakeoverPolicy.decide(localRunningSince: try store.openInterval()?.start,
+                                            markers: marks, now: now, observedAt: observedAt)
+        else { return nil }
+        try store.stopOpenInterval(at: d.pauseAt)
+        return d.byDeviceID
+    }
+
+    func publishMarker(_ store: IntervalStore, deviceID: String, now: Date) throws {
+        guard let open = try store.openInterval(),
+              let taskUID = try store.uid(table: "projects", id: open.projectID) else {
+            try transport.putRunning(nil, deviceID: deviceID)
+            return
+        }
+        let m = RunningMarker(deviceID: deviceID, taskUID: taskUID,
+                             since: open.start.timeIntervalSince1970,
+                             isRunning: true, writtenAt: now.timeIntervalSince1970)
+        try transport.putRunning(try JSONEncoder().encode(m), deviceID: deviceID)
+    }
+
+    let t0 = Date().addingTimeInterval(-600)      // phone started 10 minutes ago
+
+    do { // the reported case: the phone is running, the Mac starts later, the phone must yield
+        try phoneStore.switchTo(projectID: phoneTask, at: t0)
+        try publishMarker(phoneStore, deviceID: "phone", now: t0)
+
+        let macStart = t0.addingTimeInterval(300) // Mac starts 5 minutes later
+        try macStore.switchTo(projectID: macTask, at: macStart)
+        try publishMarker(macStore, deviceID: "mac", now: macStart)
+
+        // The Mac shouldn't stop itself: its own start is the later one.
+        check(try settle(macStore, deviceID: "mac", now: macStart) == nil,
+              "the device that started LAST keeps running")
+
+        // The phone notices and yields.
+        let by = try settle(phoneStore, deviceID: "phone", now: macStart.addingTimeInterval(1))
+        check(by == "mac", "the earlier device is taken over by the later one")
+        check(try phoneStore.openInterval() == nil, "and its timer is actually stopped")
+
+        // Back-dated to the Mac's start, so the two intervals ABUT rather than overlap. This is the
+        // whole reason a late wake-up is harmless: no wall-clock second is counted twice.
+        let phoneEnd = try phoneStore.intervals().compactMap(\.end).max()
+        check(phoneEnd.map { abs($0.timeIntervalSince(macStart)) < 1 } == true,
+              "the phone's interval ends exactly where the Mac's began")
+    }
+
+    do { // a STALE claim must not pause anyone — a slept device's marker never expires on its own
+        try phoneStore.switchTo(projectID: phoneTask, at: Date().addingTimeInterval(-60))
+        // The Mac's marker is old: written well beyond the liveness cutoff.
+        transport.modified["mac"] = Date().addingTimeInterval(-TakeoverPolicy.livenessCutoff - 120)
+        check(try settle(phoneStore, deviceID: "phone", now: Date()) == nil,
+              "a stale marker is ignored, so a slept device can't pause this one forever")
+        check(try phoneStore.openInterval() != nil, "the phone keeps running")
+    }
+
+    do { // clearing the marker on pause stops it taking anyone over afterwards
+        try macStore.stopOpenInterval(at: Date())
+        try publishMarker(macStore, deviceID: "mac", now: Date())
+        check(transport.markers["mac"] == nil, "pausing clears the running marker")
+        check(try settle(phoneStore, deviceID: "phone", now: Date()) == nil,
+              "and a cleared marker takes nobody over")
+    }
+}
+
+// MARK: - The stopwatch-style clock format
+
+/// `durationHundredths` is what the in-app clock renders 30 times a second, so its edges matter: a format
+/// that can emit `.100`, or that rounds up to a whole second early, produces a visible jump on a digit the
+/// eye is already tracking.
+func testDurationHundredths() {
+    print("\nHundredths format:")
+    check(Format.durationHundredths(0) == "0:00.00", "zero")
+    check(Format.durationHundredths(1.5) == "0:01.50", "one and a half seconds")
+    check(Format.durationHundredths(83.45) == "1:23.45", "minutes and seconds, stopwatch style")
+    check(Format.durationHundredths(3600) == "1:00:00.00", "an hours field appears at an hour")
+    check(Format.durationHundredths(3661.07) == "1:01:01.07", "hours, minutes, seconds, hundredths")
+
+    // TRUNCATED, not rounded. 0.999 must read .99 and stay on second 0 — rounding gives ".100", which is
+    // three digits in a two-digit field, and rounding the whole value would tick the seconds early.
+    check(Format.durationHundredths(0.999) == "0:00.99", "0.999 truncates to .99 rather than rolling over")
+    check(Format.durationHundredths(59.999) == "0:59.99", "and doesn't roll the minute early")
+
+    // Negative elapsed is impossible but arrives if a clock is skewed; it must not render nonsense.
+    check(Format.durationHundredths(-5) == "0:00.00", "negative clamps to zero")
+
+    // Width is stable, which is what `monospacedDigit` plus a fixed format buys — a clock that changes
+    // width 30 times a second drags the whole row with it.
+    check(Format.durationHundredths(9.99).count == Format.durationHundredths(1.01).count,
+          "same width regardless of value, within a magnitude")
+}
+
+// MARK: - Footprint series bucketing
+
+/// The footprint chart's maths. Two things here are easy to get quietly wrong and would both produce a
+/// convincing-looking chart: pairing samples across a RESTART (cumulative CPU resets, so the delta is
+/// nonsense) and averaging away the spikes the chart exists to reveal.
+func testFootprintSeries() {
+    print("\nFootprint series:")
+    let t0: Double = 1_800_000_000   // an arbitrary fixed epoch, so buckets are deterministic
+
+    func sample(_ offset: Double, cpu: Double, mb: Double = 50, launch: Int = 1) -> FootprintSample {
+        FootprintSample(t: t0 + offset, r: UInt64(mb * 1_048_576), c: cpu, n: 4, l: launch)
+    }
+
+    do { // load is a slope, so one sample can produce nothing
+        check(FootprintSeries.bucket([sample(0, cpu: 0)], resolution: .tenMinutes).isEmpty,
+              "a single sample yields no buckets — load needs a pair")
+        check(FootprintSeries.bucket([], resolution: .hour).isEmpty, "no samples, no buckets")
+    }
+
+    do { // 60s apart, 6s of CPU consumed = 10% of one core
+        let b = FootprintSeries.bucket([sample(0, cpu: 10), sample(60, cpu: 16)],
+                                       resolution: .tenMinutes)
+        check(b.count == 1, "both samples land in one 10-minute bucket")
+        check(approx(b[0].peakCPULoad, 0.10, 0.001), "6s over 60s is 10% of a core")
+        check(approx(b[0].meanCPULoad, 0.10, 0.001), "a single pair means peak == mean")
+    }
+
+    do { // the PEAK survives, which is the whole point
+        let s = [sample(0, cpu: 0), sample(60, cpu: 0.6),      // 1%
+                 sample(120, cpu: 30.6),                       // 50% — the spike
+                 sample(180, cpu: 31.2)]                       // 1%
+        let b = FootprintSeries.bucket(s, resolution: .tenMinutes)
+        check(b.count == 1, "all within one bucket")
+        check(approx(b[0].peakCPULoad, 0.50, 0.01), "the spike is reported, not averaged away")
+        check(b[0].meanCPULoad < b[0].peakCPULoad, "and the mean is visibly lower, marking it as a burst")
+    }
+
+    do { // a RESTART must not fabricate a spike
+        // Launch 1 reaches 100s of CPU; launch 2 starts over at 0.5s. Pairing across that boundary would
+        // give a negative delta (discarded) — but pairing the other way round, which is what a naive
+        // implementation does when the new launch has already accrued more, invents an enormous spike.
+        let s = [sample(0, cpu: 99, launch: 1), sample(60, cpu: 100, launch: 1),
+                 sample(120, cpu: 0.5, launch: 2), sample(180, cpu: 1.0, launch: 2)]
+        let b = FootprintSeries.bucket(s, resolution: .tenMinutes)
+        check(b.count == 1, "one bucket")
+        // Only the two same-launch pairs count, both ~1s/60s.
+        check(b[0].peakCPULoad < 0.05,
+              "no spike is invented at the launch boundary (got \(b[0].peakCPULoad))")
+    }
+
+    do { // a long gap is not a flat reading
+        // Two samples an hour apart in a 10-minute chart: the gap exceeds twice the bucket width, so the
+        // pair is dropped rather than dividing a tiny delta across an hour and reporting a reassuring zero.
+        let b = FootprintSeries.bucket([sample(0, cpu: 0), sample(3600, cpu: 5)],
+                                       resolution: .tenMinutes)
+        check(b.allSatisfy { $0.peakCPULoad == 0 }, "a pair spanning a long sleep contributes no load")
+    }
+
+    do { // buckets align to absolute multiples, so the same data always charts the same
+        let b = FootprintSeries.bucket([sample(0, cpu: 0), sample(60, cpu: 1),
+                                        sample(1200, cpu: 2), sample(1260, cpu: 3)],
+                                       resolution: .tenMinutes)
+        check(b.count == 2, "samples 20 minutes apart fall in different 10-minute buckets")
+        check(b[0].start < b[1].start, "and come back in chronological order")
+        let width = FootprintResolution.tenMinutes.seconds
+        check(b.allSatisfy { $0.start.timeIntervalSince1970.truncatingRemainder(dividingBy: width) == 0 },
+              "bucket starts are aligned to the width, not to the first sample")
+    }
+
+    do { // trimming
+        let old = sample(-40 * 86_400, cpu: 1)
+        let recent = sample(-1 * 86_400, cpu: 1)
+        let kept = FootprintSeries.trimmed([old, recent], keepingDays: 30,
+                                           now: Date(timeIntervalSince1970: t0))
+        check(kept.count == 1 && kept[0].t == recent.t, "samples older than the window are dropped")
+    }
+}
+
+// MARK: - windowTotals agrees with summary, in one pass
+
+/// `windowTotals` exists purely for speed, so the only thing worth asserting is that it is IDENTICAL to the
+/// per-window `summary` calls it replaced. A faster function that quietly disagrees is worse than a slow one.
+func testWindowTotals() throws {
+    print("\nWindow totals:")
+    let (store, url) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let a = try store.createProject(name: "alpha", colorHex: "#4E79A7")
+    let b = try store.createProject(name: "beta", colorHex: "#F28E2B")
+
+    let now = date(2026, 3, 11, 12, 0)
+    // Spread across several days, including one interval that CROSSES MIDNIGHT — the case a naive
+    // bucket-by-start-date would put entirely in the wrong window.
+    try store.insertClosedInterval(projectID: a, start: date(2026, 3, 9, 22, 30),
+                                   end: date(2026, 3, 10, 1, 15))
+    try store.insertClosedInterval(projectID: b, start: date(2026, 3, 10, 9, 0),
+                                   end: date(2026, 3, 10, 10, 30))
+    try store.insertClosedInterval(projectID: a, start: date(2026, 3, 11, 9, 0),
+                                   end: date(2026, 3, 11, 11, 0))
+    // Overlapping pair on one day, so the UNION (not sum) behaviour is exercised.
+    try store.insertClosedInterval(projectID: b, start: date(2026, 3, 11, 10, 30),
+                                   end: date(2026, 3, 11, 11, 30))
+    let intervals = try store.intervals()
+    let deep: TimeInterval = 25 * 60
+
+    // Six days ending today, oldest first — the shape the period strip builds.
+    var windows: [DateRange] = []
+    var cursor = DateRange.resolve(unit: .day, anchor: now)
+    for _ in 0..<6 { windows.append(cursor); cursor = cursor.stepped(by: -1) }
+    windows.reverse()
+
+    let fast = Aggregations.windowTotals(intervals: intervals, windows: windows,
+                                         deepThreshold: deep, now: now)
+    check(fast.count == windows.count, "one result per window, in order")
+
+    for (i, window) in windows.enumerated() {
+        let slow = Aggregations.summary(intervals: intervals, range: window,
+                                        deepThreshold: deep, now: now)
+        check(approx(fast[i].total, slow.totalSeconds, 0.5),
+              "window \(i) total matches summary (\(fast[i].total) vs \(slow.totalSeconds))")
+        check(approx(fast[i].deep, slow.deepSeconds, 0.5),
+              "window \(i) deep matches summary")
+    }
+
+    // The midnight-crossing interval must be SPLIT across two adjacent windows rather than landing
+    // wholly in one.
+    //
+    // Asserted as a PROPERTY, not as specific minute counts. My first attempt hard-coded "90m on the 9th,
+    // 75m on the 10th" and failed — not because the code was wrong (every window matched `summary` above)
+    // but because the test's own `date()` helper and the `Calendar` used for day boundaries don't
+    // necessarily share a timezone, so which calendar day a 22:30 instant belongs to isn't fixed. The
+    // splitting behaviour is what matters and it holds regardless.
+    let nonEmpty = fast.enumerated().filter { $0.element.total > 0 }.map(\.offset)
+    check(nonEmpty.count >= 3, "time lands in at least three distinct windows")
+    check(zip(nonEmpty, nonEmpty.dropFirst()).contains { $1 == $0 + 1 },
+          "the crossing interval puts time in two ADJACENT windows")
+
+    // And nothing is lost or double-counted: the windows together account for exactly the same time as one
+    // range spanning all of them.
+    let whole = DateRange(unit: .day, start: windows[0].start, end: windows[windows.count - 1].end)
+    let spanning = Aggregations.summary(intervals: intervals, range: whole,
+                                        deepThreshold: deep, now: now)
+    check(approx(fast.reduce(0) { $0 + $1.total }, spanning.totalSeconds, 1),
+          "the windows sum to the whole span's total — nothing dropped at a boundary")
+
+    check(Aggregations.windowTotals(intervals: intervals, windows: [],
+                                    deepThreshold: deep, now: now).isEmpty,
+          "no windows yields no results")
+}
+
+// MARK: - Chunked running intervals
+
+/// `rollOpenInterval` replaces prompt-based auto-pause: a long run becomes consecutive blocks instead of
+/// being paused when a "still working?" prompt goes unanswered.
+///
+/// The invariant that matters most is that this changes NOTHING about totals — it's a storage shape, not
+/// a measurement. If rolling could lose or duplicate a second, it would silently corrupt every
+/// aggregation, which is far worse than the prompt it replaces.
+func testRollOpenInterval() throws {
+    print("\nChunked intervals:")
+    let (store, url) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let a = try store.createProject(name: "alpha", colorHex: "#4E79A7")
+
+    let start = date(2026, 4, 1, 9, 0)
+    let chunk: TimeInterval = 30 * 60
+
+    do { // nothing to do before the first boundary
+        try store.switchTo(projectID: a, at: start)
+        check(try store.rollOpenInterval(chunkSeconds: chunk,
+                                         now: start.addingTimeInterval(20 * 60)) == 0,
+              "a run shorter than one chunk is left alone")
+        check(try store.openInterval()?.start == start, "and keeps its original start")
+    }
+
+    do { // 100 minutes at 30 = three boundaries crossed, four rows, one still running
+        let now = start.addingTimeInterval(100 * 60)
+        check(try store.rollOpenInterval(chunkSeconds: chunk, now: now) == 3,
+              "three boundaries crossed in 100 minutes")
+        let all = try store.intervals().filter { $0.projectID == a }
+        check(all.count == 4, "three closed chunks plus the live one")
+        check(try store.openInterval() != nil, "the timer is STILL RUNNING — this isn't a pause")
+        check(try store.openInterval()?.start == start.addingTimeInterval(90 * 60),
+              "the live row starts at the last boundary")
+
+        // The whole point: identical measured time.
+        let closed = all.filter { $0.end != nil }
+        let total = closed.reduce(0.0) { $0 + $1.seconds() }
+        check(approx(total, 90 * 60, 1), "the closed chunks total exactly the 90 elapsed minutes")
+
+        // Abutting, not overlapping — otherwise the day timeline would show fake lane contention and
+        // `SpanUnion` would have to paper over it.
+        let sorted = closed.sorted { $0.start < $1.start }
+        var abut = true
+        for (prev, next) in zip(sorted, sorted.dropFirst()) {
+            if let end = prev.end, abs(end.timeIntervalSince(next.start)) > 0.001 { abut = false }
+        }
+        check(abut, "each chunk ends exactly where the next begins")
+    }
+
+    do { // idempotent: calling again at the same instant must not roll a zero-length block
+        let now = start.addingTimeInterval(100 * 60)
+        check(try store.rollOpenInterval(chunkSeconds: chunk, now: now) == 0,
+              "a second call at the same time is a no-op")
+    }
+
+    do { // a boundary landing exactly on `now` must not roll, or it would loop forever
+        try store.stopOpenInterval(at: start.addingTimeInterval(100 * 60))
+        let s2 = date(2026, 4, 2, 9, 0)
+        try store.switchTo(projectID: a, at: s2)
+        check(try store.rollOpenInterval(chunkSeconds: chunk,
+                                         now: s2.addingTimeInterval(chunk)) == 0,
+              "a boundary exactly at now is not yet past")
+    }
+
+    do { // guards
+        check(try store.rollOpenInterval(chunkSeconds: 30, now: Date()) == 0,
+              "an implausibly small chunk is refused rather than shredding the row")
+        try store.stopOpenInterval(at: date(2026, 4, 2, 12, 0))
+        check(try store.rollOpenInterval(chunkSeconds: chunk, now: Date()) == 0,
+              "nothing running is a no-op")
     }
 }
 
@@ -3357,7 +4383,24 @@ do {
     testDuplicateFileCollapse()
     try testTags()
     try testTagSync()
+    testTagTotals()
+    testTargetMath()
+    testPalette()
+    testInlineBarContrast()
+    testTaskOrdering()
+    try testCreateProjectFilesIntoGroup()
+    try testBudgetRows()
+    testSwipeDelta()
+    try testRangeTotals()
+    testLanesByOverlap()
+    testReversedClientID()
+    try testDemoSeedInvariants()
     try testAllocationLifecycle()
+    testDurationHundredths()
+    testFootprintSeries()
+    try testWindowTotals()
+    try testCrossDeviceTakeover()
+    try testRollOpenInterval()
     try testFeedback()
     try testAllocationOrdering()
     try testDuplicateNameIsProjectScoped()

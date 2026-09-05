@@ -75,6 +75,19 @@ public enum TaskSearch {
     /// `groupNames` maps task id → its project's name, so a query can match a task by the
     /// project it belongs to. A project-name hit scores lower than a name hit of the same
     /// quality, so directly-named tasks still win.
+    /// Group name per task id — what lets `rank` match "task in project X" as well as by task name.
+    ///
+    /// Shared because both the Mac's palette and the phone's search field need it, and building it
+    /// twice is how the two would drift on the first change to the matching rules.
+    public static func groupNames(tasks: [Project], groups: [TaskProject]) -> [Int64: String] {
+        let byID = Dictionary(uniqueKeysWithValues: groups.map { ($0.id, $0.name) })
+        var out: [Int64: String] = [:]
+        for task in tasks {
+            if let gid = task.taskProjectID, let name = byID[gid] { out[task.id] = name }
+        }
+        return out
+    }
+
     public static func rank(
         query: String, projects: [Project], lastActivity: [Int64: Date],
         groupNames: [Int64: String] = [:], limit: Int = 8

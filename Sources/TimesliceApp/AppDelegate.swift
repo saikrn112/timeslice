@@ -8,7 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var engine: TimerEngine!
     private var appState: AppState!
     private var privacy: PrivacyController!
-    private let settings = Settings()
+    private let settings = AppSettings()
     private var statusBar: StatusBarController!
     private var mainWindowController: MainWindowController?
     private var hotkeys: GlobalHotkeyManager!
@@ -55,7 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        engine = TimerEngine(store: store)
+        engine = TimerEngine(store: store, settings: settings)
         privacy = PrivacyController()
         // In screenshot mode, keep windows capturable so `screencapture` can image them
         // (with privacy on, windows use sharingType = .none and appear blank to any capture).

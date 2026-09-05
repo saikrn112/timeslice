@@ -3,7 +3,7 @@ import TimesliceCore
 
 /// Compact settings for the metrics: daily goal, deep-block threshold, trend window.
 struct SettingsPanel: View {
-    @ObservedObject var settings: Settings
+    @ObservedObject var settings: AppSettings
     /// The store, for the notes sheet. Passed in rather than reached for through the sync
     /// controller, which owns its copy privately and shouldn't be a back door to it.
     let store: IntervalStore

@@ -1,5 +1,6 @@
 import SwiftUI
 import TimesliceCore
+import TimesliceUI
 
 /// One place to manage tags and the budgets attached to them.
 ///

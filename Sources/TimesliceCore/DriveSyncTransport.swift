@@ -1,7 +1,11 @@
 import Foundation
-import TimesliceCore
 
 /// `SyncTransport` over Google Drive's `appDataFolder`.
+///
+/// In Core rather than the Mac app target because **iOS needs this exact transport**: a phone has no
+/// arbitrary filesystem access, so `FolderSyncTransport` (iCloud/Dropbox folder) is Mac-to-Mac only
+/// and the Drive API is the only rendezvous that works everywhere. It was already free of AppKit, so
+/// the move is a relocation, not a port.
 ///
 /// Same file model as the folder transport — one payload file and one marker file per device, so
 /// no two devices ever write the same file and conflicts are impossible by construction. The
@@ -12,13 +16,13 @@ import TimesliceCore
 /// async Drive API. Callers are already off the hot path — sync runs on a timer, never during
 /// timing — so blocking briefly here is acceptable and keeps one merge implementation for both
 /// transports.
-final class DriveSyncTransport: SyncTransport {
+public final class DriveSyncTransport: SyncTransport {
     private let api: DriveAPI
     /// name → file id, so we PATCH instead of creating duplicates.
     private var idCache: [String: String] = [:]
     private let cacheLock = NSLock()
 
-    init(api: DriveAPI) {
+    public init(api: DriveAPI) {
         self.api = api
     }
 
@@ -27,15 +31,15 @@ final class DriveSyncTransport: SyncTransport {
 
     // MARK: - SyncTransport
 
-    func put(payload: Data, deviceID: String) throws {
+    public func put(payload: Data, deviceID: String) throws {
         try upsert(name: payloadName(deviceID), contents: payload)
     }
 
-    func fetchOthers(excluding deviceID: String) throws -> [Data] {
+    public func fetchOthers(excluding deviceID: String) throws -> [Data] {
         try fetch(suffix: ".json", excluding: deviceID)
     }
 
-    func putRunning(_ marker: Data?, deviceID: String) throws {
+    public func putRunning(_ marker: Data?, deviceID: String) throws {
         let name = runningName(deviceID)
         if let marker {
             try upsert(name: name, contents: marker)
@@ -45,7 +49,7 @@ final class DriveSyncTransport: SyncTransport {
         }
     }
 
-    func fetchOtherRunning(excluding deviceID: String) throws -> [Data] {
+    public func fetchOtherRunning(excluding deviceID: String) throws -> [Data] {
         try fetch(suffix: ".running", excluding: deviceID)
     }
 
@@ -54,11 +58,11 @@ final class DriveSyncTransport: SyncTransport {
     /// The server timestamp is preferable to the marker's self-reported heartbeat for judging
     /// staleness: comparing against a peer's clock inherits the same skew weakness as LWW, whereas
     /// this is one clock for all devices. Falls back to the in-marker value when Drive omits it.
-    func fetchOtherRunningWithTimes(excluding deviceID: String) throws -> [(data: Data, modified: Date?)] {
+    public func fetchOtherRunningWithTimes(excluding deviceID: String) throws -> [(data: Data, modified: Date?)] {
         try fetchWithTimes(suffix: ".running", excluding: deviceID)
     }
 
-    func deleteUnreadablePayloads(excluding deviceID: String) -> Int {
+    public func deleteUnreadablePayloads(excluding deviceID: String) -> Int {
         let mine = "device-\(deviceID)"
         guard let files = try? blocking({ try await self.api.list() }) else { return 0 }
         refreshCache(files)
@@ -79,7 +83,7 @@ final class DriveSyncTransport: SyncTransport {
     /// Deletes by listing rather than by cached id: the id cache holds one id per NAME, so
     /// duplicates were invisible to it and retiring a device left the extra copies behind (each
     /// still showing as its own row).
-    func deletePayload(deviceID: String) throws {
+    public func deletePayload(deviceID: String) throws {
         let prefix = "device-\(deviceID)"
         let files = try blocking { try await self.api.list() }
         for file in files where file.name.hasPrefix(prefix) {
@@ -116,13 +120,13 @@ final class DriveSyncTransport: SyncTransport {
 
     /// Write-once. The name comes from a uid, so if it's already there the bytes are already right
     /// and re-uploading a screenshot on every sync would be pure waste.
-    func putBlob(name: String, data: Data) throws {
+    public func putBlob(name: String, data: Data) throws {
         if try lookup(name: name) != nil { return }
         let id = try blocking { try await self.api.create(name: name, contents: data) }
         cacheLock.lock(); idCache[name] = id; cacheLock.unlock()
     }
 
-    func fetchBlob(name: String) throws -> Data? {
+    public func fetchBlob(name: String) throws -> Data? {
         guard let id = try lookup(name: name) else { return nil }
         do {
             return try blocking { try await self.api.download(id: id) }
@@ -134,7 +138,7 @@ final class DriveSyncTransport: SyncTransport {
         }
     }
 
-    func deleteBlob(name: String) throws {
+    public func deleteBlob(name: String) throws {
         guard let id = try lookup(name: name) else { return }
         try? blocking { try await self.api.delete(id: id) }
         cacheLock.lock(); idCache[name] = nil; cacheLock.unlock()
