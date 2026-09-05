@@ -1706,6 +1706,68 @@ func testFeedbackPlatform() {
     }
 }
 
+// MARK: - Tagging a task directly
+
+func testTaskTags() {
+    print("Task tags:")
+    do {
+        let (store, url) = try! makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let group = try! store.upsertTaskProject(name: "office", colorHex: "#00f")
+        let task = try! store.createProject(name: "recon paper", colorHex: "#f00", inGroup: group)
+        let loose = try! store.createProject(name: "tax return", colorHex: "#0f0")
+
+        let work = try! store.upsertTag(name: "work", colorHex: "#111")
+        let research = try! store.upsertTag(name: "research", colorHex: "#222")
+
+        // A tag on the PROJECT is inherited by its tasks — the behaviour that already existed.
+        try! store.addTag(work, to: .project(group))
+        check(try! store.effectiveTagIDsByTask()[task] == [work],
+              "a task inherits its project's tag")
+
+        // A tag on the TASK adds to what it inherits rather than replacing it: tags overlap by
+        // design, and "this task is also research" is the whole reason to reach for it.
+        try! store.addTag(research, to: .task(task))
+        check(try! store.effectiveTagIDsByTask()[task] == [work, research],
+              "and its own tag adds to that rather than replacing it")
+
+        // A task in no project can be tagged on its own, which is what made this necessary: it was
+        // taggable only by inventing a project to hold it.
+        try! store.addTag(research, to: .task(loose))
+        check(try! store.effectiveTagIDsByTask()[loose] == [research],
+              "a task with no project carries its own tags")
+
+        // Removing the task's own tag leaves the inherited one alone.
+        try! store.removeTag(research, from: .task(task))
+        check(try! store.effectiveTagIDsByTask()[task] == [work],
+              "removing a task's own tag doesn't touch what it inherits")
+
+        // What the UI shows on a task row: its own tags only, since the inherited ones are already
+        // on the project header above it.
+        try! store.addTag(research, to: .task(task))
+        let direct = try! store.directTagIDsByTask()
+        check(direct[task] == [research],
+              "a task's own tags exclude what it inherits — the row shows the addition, not the copy")
+        // Keyed by TASK only. Not asserted per-id: `task_projects` and `projects` are separate
+        // autoincrement namespaces, so a project id can equal a task id and `direct[group]` would be
+        // some unrelated task's entry. The key SET is the honest check.
+        check(Set(direct.keys) == Set([task, loose]),
+              "only directly-tagged tasks appear — project links don't leak into this map")
+        try! store.removeTag(research, from: .task(task))
+
+        // And the task's time reaches the tag through its OWN link, with no project involved.
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        try! store.insertClosedInterval(projectID: loose, start: t0, end: t0.addingTimeInterval(3600))
+        let range = DateRange(unit: .day, start: t0.addingTimeInterval(-86_400),
+                             end: t0.addingTimeInterval(86_400))
+        let totals = Aggregations.tagTotals(tags: try! store.listTags(),
+                                            intervals: try! store.intervals(),
+                                            tagIDsByTask: try! store.effectiveTagIDsByTask(),
+                                            range: range)
+        check(totals.first { $0.tag?.id == research }?.seconds == 3600,
+              "a directly-tagged task's time shows up under that tag")
+    }
+}
+
 // MARK: - Allocation weekdays
 
 func testAllocationWeekdays() {
@@ -2042,15 +2104,31 @@ func testSharedSettings() {
                                               remoteUpdatedAt: later.timeIntervalSince1970 + 100)),
               "the same value arriving later isn't reported as a change")
 
-        // Cosmetic preferences deliberately don't travel; nor does a key from a newer build.
-        check(!(try! peer.applyRemoteSetting(key: "highlightDimPercent", value: "10",
+        // Device-local settings deliberately don't travel; nor does a key from a newer build. A
+        // filesystem path is the clearest case: one machine's folder means nothing on another, and a
+        // phone has no such path at all.
+        check(!(try! peer.applyRemoteSetting(key: "syncFolderPath", value: "/Users/someone/Dropbox",
                                             remoteUpdatedAt: later.timeIntervalSince1970)),
               "an unsynced key is ignored rather than stored")
-        check(try! peer.settingValue("highlightDimPercent") == nil,
+        check(try! peer.settingValue("syncFolderPath") == nil,
               "so nothing accumulates rows that nothing reads")
         check(IntervalStore.syncedSettingKeys.sorted()
-                == ["autoPauseMinutes", "idleNudgeMinutes", "promptsEnabled"],
-              "only the thresholds that decide what gets RECORDED are shared")
+                == ["autoPauseMinutes", "deepBlockMinutes", "highlightDimPercent",
+                    "idleNudgeMinutes", "promptsEnabled", "wakingHours"],
+              "everything that changes what's recorded or what a number MEANS is shared")
+        for local in ["syncFolderPath", "syncMode", "googleClientID", "deviceLabel"] {
+            check(!IntervalStore.syncedSettingKeys.contains(local),
+                  "\(local) stays per-device — a path, a channel, a client id and a name")
+        }
+
+        // A second key travels independently of the first, so adopting one can't stall another.
+        try! store.setSetting("deepBlockMinutes", value: "45", at: later)
+        for row in try! store.settingsForExport() {
+            _ = try! peer.applyRemoteSetting(key: row.key, value: row.value,
+                                             remoteUpdatedAt: row.updatedAt)
+        }
+        check(try! peer.settingValue("deepBlockMinutes")?.value == "45",
+              "what counts as a focused block agrees across devices too")
     }
 }
 
@@ -4288,6 +4366,7 @@ do {
     try testDeviceAttribution()
     testDeviceLanes()
     testFeedbackPlatform()
+    testTaskTags()
     testAllocationWeekdays()
     testWeekdaysSync()
     testFeedbackNumbering()

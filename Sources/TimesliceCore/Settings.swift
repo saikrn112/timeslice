@@ -24,8 +24,13 @@ public final class AppSettings: ObservableObject {
     private let defaults = UserDefaults.standard
 
     /// Minimum unbroken session length (seconds) that counts as a "deep block" for Focus %.
+    /// SYNCED: it decides what counts as focused, so two devices with different values disagree
+    /// about the same recorded day.
     @Published public var deepBlockMinutes: Int {
-        didSet { defaults.set(deepBlockMinutes, forKey: Keys.deepBlockMinutes) }
+        didSet {
+            defaults.set(deepBlockMinutes, forKey: Keys.deepBlockMinutes)
+            publishSynced(Keys.deepBlockMinutes, String(deepBlockMinutes))
+        }
     }
 
     /// Daily target hours (goal line on the daily-hours chart).
@@ -66,16 +71,26 @@ public final class AppSettings: ObservableObject {
     /// Replaced the old "daily goal", which stopped meaning anything once everything gets tracked
     /// rather than just work: 4h against an 8h work target said nothing about the other 12 hours.
     /// Per-subject commitments are Budgets' job now.
+    /// SYNCED: it's the denominator of "Tracked", so 4h of a 16h day and 4h of a 12h day are
+    /// different claims about the same recorded time.
     @Published public var wakingHours: Double {
-        didSet { defaults.set(wakingHours, forKey: Keys.wakingHours) }
+        didSet {
+            defaults.set(wakingHours, forKey: Keys.wakingHours)
+            publishSynced(Keys.wakingHours, String(wakingHours))
+        }
     }
 
     public var wakingSeconds: TimeInterval { wakingHours * 3600 }
 
     /// How far non-matching items fade while something is highlighted, as a percentage.
     /// 0 = no dimming at all (matches are picked out only by what tints), 90 = nearly invisible.
+    /// SYNCED, though it's only cosmetic: a highlight that dims by 85% here and 40% there makes the
+    /// same page read differently for no reason.
     @Published public var highlightDimPercent: Int {
-        didSet { defaults.set(highlightDimPercent, forKey: Keys.highlightDimPercent) }
+        didSet {
+            defaults.set(highlightDimPercent, forKey: Keys.highlightDimPercent)
+            publishSynced(Keys.highlightDimPercent, String(highlightDimPercent))
+        }
     }
 
     /// Opacity to draw non-matching items at.
@@ -183,7 +198,10 @@ public final class AppSettings: ObservableObject {
     private func syncedValues() -> [(String, String)] {
         [(Keys.autoPauseMinutes, String(autoPauseMinutes)),
          (Keys.idleNudgeMinutes, String(idleNudgeMinutes)),
-         (Keys.promptsEnabled, promptsEnabled ? "1" : "0")]
+         (Keys.promptsEnabled, promptsEnabled ? "1" : "0"),
+         (Keys.deepBlockMinutes, String(deepBlockMinutes)),
+         (Keys.wakingHours, String(wakingHours)),
+         (Keys.highlightDimPercent, String(highlightDimPercent))]
     }
 
     private func publishSynced(_ key: String, _ value: String) {
@@ -207,6 +225,18 @@ public final class AppSettings: ObservableObject {
         if let row = (try? store.settingValue(Keys.promptsEnabled)) ?? nil {
             let on = row.value == "1"
             if on != promptsEnabled { promptsEnabled = on }
+        }
+        if let row = (try? store.settingValue(Keys.deepBlockMinutes)) ?? nil,
+           let n = Int(row.value), n != deepBlockMinutes {
+            deepBlockMinutes = n
+        }
+        if let row = (try? store.settingValue(Keys.wakingHours)) ?? nil,
+           let n = Double(row.value), n != wakingHours {
+            wakingHours = n
+        }
+        if let row = (try? store.settingValue(Keys.highlightDimPercent)) ?? nil,
+           let n = Int(row.value), n != highlightDimPercent {
+            highlightDimPercent = n
         }
     }
 

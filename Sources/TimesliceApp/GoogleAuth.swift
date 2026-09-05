@@ -132,11 +132,11 @@ final class GoogleAuth: ObservableObject {
             accessToken = tokens.accessToken
             accessTokenExpiry = Date().addingTimeInterval(tokens.expiresIn - 60)
             needsReauth = false
+            lastError = nil
             return tokens.accessToken
-        } catch {
-            // Access tokens expire hourly and are refreshed silently above. Reaching here means
-            // the REFRESH token itself was rejected — revoked, or the Google password changed —
-            // which no amount of retrying fixes. Drop it and ask for one click.
+        } catch AuthError.refreshTokenRejected {
+            // The one case that genuinely needs a human: Google says this token is dead, and no
+            // amount of retrying fixes it. Drop it and ask for one click.
             Self.deleteRefreshToken()
             cachedRefreshToken = nil
             accessToken = nil
@@ -145,18 +145,35 @@ final class GoogleAuth: ObservableObject {
             needsReauth = true
             lastError = "Google sign-in expired — sign in again to resume syncing"
             throw AuthError.notSignedIn
+        } catch {
+            // Anything ELSE — offline, DNS not up yet after waking, a 500, a captive portal — and the
+            // token is KEPT. Deleting it here is what signed this Mac out every few hours: the app
+            // refreshes on wake, and a refresh attempted a second before Wi-Fi associates fails with
+            // a network error, which used to be treated as "revoked". Exactly the bug the Drive
+            // transport had, where any failed update was read as "file deleted" and forked a copy.
+            //
+            // The next attempt just tries again; the token is still on disk and still valid.
+            accessToken = nil
+            accessTokenExpiry = nil
+            NSLog("[timeslice-auth] refresh failed, KEEPING token: \(error.localizedDescription)")
+            lastError = "Couldn't reach Google — will retry"
+            throw error
         }
     }
 
     enum AuthError: LocalizedError {
         case denied(String), stateMismatch, noCode, noRefreshToken, notSignedIn
         case badTokenResponse(String), keychainFailed(OSStatus)
+        /// Google said `invalid_grant`: this refresh token will never work again.
+        case refreshTokenRejected(String)
 
         var errorDescription: String? {
             switch self {
             case .denied(let e): return "Google sign-in was declined (\(e))"
             case .stateMismatch: return "Sign-in response didn't match the request; try again"
             case .noCode: return "Google didn't return an authorization code"
+            case .refreshTokenRejected:
+                return "Google rejected the saved sign-in — sign in again"
             case .noRefreshToken: return "Google didn't return a refresh token — revoke access and retry"
             case .notSignedIn: return "Not signed in"
             case .badTokenResponse(let b): return "Token exchange failed: \(b.prefix(160))"
@@ -184,6 +201,12 @@ final class GoogleAuth: ObservableObject {
               let access = root["access_token"] as? String else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             NSLog("[timeslice-auth] token endpoint HTTP \(code): \(text.prefix(300))")
+            // `invalid_grant` is Google's one and only "this refresh token is dead" — revoked,
+            // password changed, or expired. Everything else (a 500, a 429, a proxy's HTML error
+            // page) says nothing about the token's validity and must not cost us the token.
+            if text.contains("invalid_grant") {
+                throw AuthError.refreshTokenRejected(text)
+            }
             throw AuthError.badTokenResponse(text)
         }
         return Tokens(accessToken: access,

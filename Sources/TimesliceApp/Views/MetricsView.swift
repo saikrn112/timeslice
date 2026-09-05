@@ -169,12 +169,16 @@ struct MetricsView: View {
         // Changing day/range invalidates any timeline selection — the hours it referred to
         // belong to a different day's data.
         .onChange(of: range) { _, _ in
-            // The pin points at a task/tag in the range being left; carrying it over is what left
-            // every row dimmed with nothing highlighted.
-            pinnedFocuses = []
+            // The PINS survive. Comparing an allocation across weeks means clicking it once and then
+            // moving, and re-picking it on every step made that unusable. They were cleared because
+            // a pin matching nothing in the new range left every row dimmed with no highlight to
+            // show for it — but `focusMatchesAnything` handles that now by treating a highlight that
+            // matches nothing as no highlight at all.
+            //
+            // The timeline SELECTION still goes: it names hours of a specific day, and those hours
+            // belong to different data once the day changes.
             clearSelection(); recompute()
         }
-        .onChange(of: scope) { _, _ in pinnedFocuses = [] }
         .onReceive(NotificationCenter.default.publisher(for: TimesliceNotifications.dataDidChange)) { _ in recompute() }
         .onReceive(settings.objectWillChange) { _ in DispatchQueue.main.async { recompute() } }
         // The app can run for days; re-anchor to the real "today" on wake so the range never
@@ -1189,7 +1193,7 @@ struct MetricsView: View {
     private var hoursChart: some View {
         section("Hours \(bucketNoun)",
                 subtitle: hasSelectionOverlay
-                    ? "solid = focused (≥\(settings.deepBlockMinutes)m blocks) · red = selected"
+                    ? "solid = focused (≥\(settings.deepBlockMinutes)m blocks) · red over it = selected"
                     : "solid = focused (≥\(settings.deepBlockMinutes)m blocks)") {
             if buckets.isEmpty {
                 placeholder("Nothing tracked in this range")
@@ -1209,35 +1213,37 @@ struct MetricsView: View {
                         .foregroundStyle(base.opacity(0.32))
                         .opacity(dim)
                         .cornerRadius(2)
-                        // …then the focused portion and the pinned selection, both FULL width and
-                        // both solid. Three nested bars, all opaque, no washes.
-                        //
-                        // Drawn SHORTER LAST. Same-width solid bars occlude whatever sits behind
-                        // them, so with a fixed order one of the two inner measures could vanish
-                        // entirely — a 3h selection inside 5h of focus, or the reverse. Putting the
-                        // shorter one in front means both are always visible: the taller one shows
-                        // above the shorter, and the shorter reads as the bar's base.
-                        //
-                        // All of this needs `.unstacked`. BarMarks at the same x stack by default,
-                        // which drew each bar at total + focused (a 7.1h day at 100% focus read as
-                        // 14.2h).
+                        // …with the focused portion overlaid solid inside it. Deep time is a subset
+                        // of total by definition, so it nests cleanly — but only with `.unstacked`:
+                        // BarMarks at the same x stack by default, which drew each bar at total +
+                        // focused (a 7.1h day at 100% focus read as 14.2h).
+                        BarMark(
+                            x: .value(bucketUnitWord.capitalized, b.start, unit: bucketComponent),
+                            y: .value("Focused", b.deepSeconds / 3600),
+                            width: barWidth,
+                            stacking: .unstacked
+                        )
+                        .foregroundStyle(base)
+                        .opacity(dim)
+                        .cornerRadius(2)
+                        // Then the selection, laid OVER the other two at half opacity — always last, no
+                        // ordering to get right. Where it covers the solid focused bar the two mix
+                        // into violet; above that it sits on the faint total and reads as plain red.
+                        // So all three are legible whether the selection is taller or shorter than
+                        // the focused time, which is what the opaque version couldn't do: an opaque
+                        // layer hides whatever is behind it from the baseline up, and a bar that
+                        // starts at zero then looks exactly like a stacked segment starting where the
+                        // one in front ended.
                         let selected = selectedByBucket[b.start] ?? 0
-                        // Paired with their colours and sorted tallest-first, so the layer order is
-                        // stated once instead of being reconstructed from a comparison downstream.
-                        let layers = [(seconds: b.deepSeconds, label: "Focused", color: base),
-                                      (seconds: selected, label: "Selected",
-                                       color: Self.selectionOverlay)]
-                            .filter { $0.seconds > 0 }
-                            .sorted { $0.seconds > $1.seconds }
-                        ForEach(Array(layers.enumerated()), id: \.offset) { _, layer in
+                        if selected > 0 {
                             BarMark(
                                 x: .value(bucketUnitWord.capitalized, b.start,
                                           unit: bucketComponent),
-                                y: .value(layer.label, layer.seconds / 3600),
+                                y: .value("Selected", selected / 3600),
                                 width: barWidth,
                                 stacking: .unstacked
                             )
-                            .foregroundStyle(layer.color)
+                            .foregroundStyle(Self.selectionOverlay.opacity(0.5))
                             .opacity(dim)
                             .cornerRadius(2)
                         }
@@ -1252,7 +1258,7 @@ struct MetricsView: View {
                 // Gridline on every bucket, but only label every Nth so a month's worth of ticks
                 // stays legible instead of colliding into mush.
                 .chartXAxis {
-                    AxisMarks(values: buckets.map(\.start)) { value in
+                    AxisMarks(values: axisBucketValues) { value in
                         AxisGridLine(centered: true)
                         if let d = value.as(Date.self),
                            let idx = buckets.firstIndex(where: { $0.start == d }),
@@ -1545,18 +1551,40 @@ struct MetricsView: View {
         }
     }
 
-    /// The bucket range with half a bucket of margin at each end, so the first and last bars are
-    /// drawn whole instead of being clipped by the plot's edge.
+    /// Bucket starts plus ONE sentinel a step past the last.
+    ///
+    /// `AxisValueLabel(centered: true)` centres a label between its own mark and the NEXT one, so the
+    /// final bucket — having no next mark — got no label: a seven-day week labelled six days and left
+    /// its last bar anonymous. The sentinel gives that label something to centre against. It isn't in
+    /// `buckets`, so the label lookup below finds no index for it and draws nothing there; it only
+    /// contributes a gridline, which matches the one every other bucket already has.
+    private var axisBucketValues: [Date] {
+        let starts = buckets.map(\.start)
+        guard let last = starts.last else { return starts }
+        return starts + [paddedBucketDomain.upperBound == last ? last : paddedBucketDomain.upperBound]
+    }
+
+    /// The bucket range, extended by ONE bucket at the end and not at all at the start.
+    ///
+    /// A unit-based `BarMark` is positioned at the MIDPOINT of its bucket's interval, so bucket `d`
+    /// draws at `d + step/2` and needs the domain to cover `[d, d + step]` to be whole. Half a step
+    /// at each end — what this did first — put the last bar's midpoint exactly on the domain's edge,
+    /// so it was sliced in half and its axis label disappeared with it: a seven-day week showed six
+    /// labels. The same half-step at the start was pure empty margin, which is what made the chart
+    /// look shoved to the left.
+    ///
+    /// With `[first, last + step]` the first and last midpoints each sit half a step inside their
+    /// edge — symmetric, and nothing clipped.
     private var paddedBucketDomain: ClosedRange<Date> {
         guard let first = buckets.first?.start, let last = buckets.last?.start else {
             return range.start...range.end
         }
         let cal = Calendar.current
-        // Half of ONE bucket, measured from the data rather than assumed: a 6M range buckets by
-        // week and a year by month, so a fixed number of seconds would be wrong for most ranges.
-        let step = cal.date(byAdding: bucketComponent, value: 1, to: first)?
-            .timeIntervalSince(first) ?? 86_400
-        return first.addingTimeInterval(-step / 2)...last.addingTimeInterval(step / 2)
+        // ONE bucket, measured from the data rather than assumed: a 6M range buckets by week and a
+        // year by month, so a fixed number of seconds would be wrong for most ranges.
+        let step = cal.date(byAdding: bucketComponent, value: 1, to: last)?
+            .timeIntervalSince(last) ?? 86_400
+        return first...last.addingTimeInterval(step)
     }
 
     // MARK: - Building blocks
