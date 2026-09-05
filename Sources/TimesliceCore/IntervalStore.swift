@@ -1951,7 +1951,29 @@ public final class IntervalStore {
     /// `autoPauseMinutes` lived in that machine's `UserDefaults` and nothing carried it. A threshold
     /// that decides where an interval ends is part of the data model, not a local taste like window
     /// size — so these travel, and cosmetic preferences deliberately don't.
-    public static let syncedSettingKeys = ["autoPauseMinutes", "idleNudgeMinutes", "promptsEnabled"]
+    /// Everything that changes what gets recorded or what a number MEANS.
+    ///
+    /// Deliberately excluded, and why:
+    ///  • `syncFolderPath` — a filesystem path on one machine. A phone has no such path, and sending
+    ///    one Mac's path to another would point it at a folder that isn't there.
+    ///  • `syncMode` — HOW this device reaches the shared data (Drive, a folder, or off). Syncing it
+    ///    could switch sync off everywhere at once, using the very channel it just closed.
+    ///  • `googleClientID` — per-platform by construction: an iOS OAuth client has no secret and a
+    ///    reversed-client-id redirect, a Desktop one doesn't.
+    ///  • `deviceLabel` — it names the device; being different is the entire point.
+    public static let syncedSettingKeys = [
+        "autoPauseMinutes", "idleNudgeMinutes", "promptsEnabled",
+        // Changes what "focused" MEANS, so two devices with different values disagree about the same
+        // recorded day — the metric stops being comparable across devices, which is worse than it
+        // being set to a value you'd not have picked.
+        "deepBlockMinutes",
+        // The denominator of "Tracked": 4h of a 16h day and 4h of a 12h day are different claims.
+        "wakingHours",
+        // Cosmetic, and included anyway. It's a rendering preference rather than a fact about the
+        // data, so this is the one that could reasonably have gone either way — but a highlight that
+        // dims by 85% here and 40% there makes the same page read differently for no reason.
+        "highlightDimPercent",
+    ]
 
     public func setSetting(_ key: String, value: String, at when: Date = Date()) throws {
         let stmt = try prepare("""

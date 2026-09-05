@@ -2076,15 +2076,31 @@ func testSharedSettings() {
                                               remoteUpdatedAt: later.timeIntervalSince1970 + 100)),
               "the same value arriving later isn't reported as a change")
 
-        // Cosmetic preferences deliberately don't travel; nor does a key from a newer build.
-        check(!(try! peer.applyRemoteSetting(key: "highlightDimPercent", value: "10",
+        // Device-local settings deliberately don't travel; nor does a key from a newer build. A
+        // filesystem path is the clearest case: one machine's folder means nothing on another, and a
+        // phone has no such path at all.
+        check(!(try! peer.applyRemoteSetting(key: "syncFolderPath", value: "/Users/someone/Dropbox",
                                             remoteUpdatedAt: later.timeIntervalSince1970)),
               "an unsynced key is ignored rather than stored")
-        check(try! peer.settingValue("highlightDimPercent") == nil,
+        check(try! peer.settingValue("syncFolderPath") == nil,
               "so nothing accumulates rows that nothing reads")
         check(IntervalStore.syncedSettingKeys.sorted()
-                == ["autoPauseMinutes", "idleNudgeMinutes", "promptsEnabled"],
-              "only the thresholds that decide what gets RECORDED are shared")
+                == ["autoPauseMinutes", "deepBlockMinutes", "highlightDimPercent",
+                    "idleNudgeMinutes", "promptsEnabled", "wakingHours"],
+              "everything that changes what's recorded or what a number MEANS is shared")
+        for local in ["syncFolderPath", "syncMode", "googleClientID", "deviceLabel"] {
+            check(!IntervalStore.syncedSettingKeys.contains(local),
+                  "\(local) stays per-device — a path, a channel, a client id and a name")
+        }
+
+        // A second key travels independently of the first, so adopting one can't stall another.
+        try! store.setSetting("deepBlockMinutes", value: "45", at: later)
+        for row in try! store.settingsForExport() {
+            _ = try! peer.applyRemoteSetting(key: row.key, value: row.value,
+                                             remoteUpdatedAt: row.updatedAt)
+        }
+        check(try! peer.settingValue("deepBlockMinutes")?.value == "45",
+              "what counts as a focused block agrees across devices too")
     }
 }
 
