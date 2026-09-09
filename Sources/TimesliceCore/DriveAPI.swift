@@ -36,10 +36,24 @@ public struct DriveAPI: Sendable {
     private let token: TokenProvider
     private let session: URLSession
 
-    public init(token: @escaping TokenProvider, session: URLSession = .shared) {
+    public init(token: @escaping TokenProvider, session: URLSession = DriveAPI.defaultSession) {
         self.token = token
         self.session = session
     }
+
+    /// `URLSession.shared` waits out the system default (60s) per request, and a sync cycle makes
+    /// many requests — so one unreachable network turned a poll into minutes of hanging (observed:
+    /// a mean cycle of 130s and a worst of 4244s on a phone whose auth had died). A poll that runs
+    /// every 10-15s must fail well inside that.
+    public static let defaultSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 30
+        // Don't queue a request waiting for connectivity: the next cycle is seconds away, and a
+        // backlog of waiting requests is what makes a cycle outlast its own interval.
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config)
+    }()
 
     private static let filesBase = "https://www.googleapis.com/drive/v3/files"
     private static let uploadBase = "https://www.googleapis.com/upload/drive/v3/files"

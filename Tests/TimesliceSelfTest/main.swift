@@ -255,6 +255,27 @@ func testTaskSearch() {
 
 // MARK: - Google OAuth / PKCE
 
+func testRefreshRefusalClassification() {
+    print("Refresh refusal:")
+
+    // Permanent: the grant is gone. Retrying can never succeed, so sync must stop and ask for
+    // re-auth rather than looping on a dead credential — the bug this classifier exists to end.
+    check(GoogleOAuth.isPermanentRefusal("{\"error\": \"invalid_grant\"}"),
+          "invalid_grant is permanent")
+    check(GoogleOAuth.isPermanentRefusal("{\"error\":\"invalid_client\",\"error_description\":\"x\"}"),
+          "invalid_client is permanent")
+    check(GoogleOAuth.isPermanentRefusal("unauthorized_client"),
+          "unauthorized_client is permanent")
+
+    // Transient: the token is still good. Signing the user out here would be a self-inflicted
+    // outage every time a phone changes network.
+    check(!GoogleOAuth.isPermanentRefusal(""), "an empty body is not permanent")
+    check(!GoogleOAuth.isPermanentRefusal("The request timed out."), "a timeout is not permanent")
+    check(!GoogleOAuth.isPermanentRefusal("{\"error\": \"internal_failure\"}"),
+          "a 500 is not permanent")
+    check(!GoogleOAuth.isPermanentRefusal("offline"), "being offline is not permanent")
+}
+
 func testOAuthPKCE() {
     print("OAuth PKCE:")
 
@@ -4354,6 +4375,7 @@ do {
     testFinishedVisibility()
     testTaskSearch()
     testOAuthPKCE()
+    testRefreshRefusalClassification()
     testTakeoverPolicy()
     try testFieldLevelSyncCoverage()
     try testSyncEngine()

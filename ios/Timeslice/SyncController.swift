@@ -213,6 +213,19 @@ final class SyncController {
 
             await MainActor.run { TimerModel.shared.reload() }
             return true
+        } catch DriveAPI.DriveError.notAuthorized {
+            // 401 from Drive: the access token is dead and refreshing it did not help. `DriveAPI`
+            // has always distinguished this from 403 and said re-auth is what fixes it, but nothing
+            // acted on it — the error was thrown into this catch, logged, and retried on the next
+            // cycle forever. A phone in that state keeps tracking locally and never syncs again,
+            // which is exactly how three days of data went unnoticed.
+            //
+            // Handing it to GoogleAuthiOS clears the credential and flips `isSignedIn`, so Settings
+            // shows "Sign in with Google" instead of a sync that silently does nothing. The client
+            // id lives in UserDefaults, not the Keychain, so it survives — this costs one tap.
+            NSLog("[timeslice] sync failed: not authorised — signing out so re-auth is offered")
+            await MainActor.run { GoogleAuthiOS.shared.handleUnauthorized() }
+            return false
         } catch {
             NSLog("[timeslice] sync failed: \(error.localizedDescription)")
             return false
