@@ -5,6 +5,23 @@ import Foundation
 /// An interval running across local midnight naturally contributes to both days.
 public enum Aggregations {
 
+    /// How far short of the threshold still counts as a full block.
+    ///
+    /// Interval boundaries come from `Date()`, and the auto-pause checkpoint aims for exactly the
+    /// threshold — so a "30 minute" block lands either side of 1800s by a fraction of a millisecond.
+    /// One real block measured 1799.999716s and was dropped from the focus figure, which is how five
+    /// half-hour blocks on screen showed as four. Half a second of slack is far below anything a
+    /// person could have meant to record differently, and far above the noise.
+    public static let deepBlockTolerance: TimeInterval = 0.5
+
+    /// Whether one interval's own duration counts as a focused block.
+    ///
+    /// A single definition on purpose: this comparison was written out at five call sites, so a
+    /// tolerance added to one of them would have left the other four disagreeing with it.
+    public static func isDeepBlock(duration: TimeInterval, threshold: TimeInterval) -> Bool {
+        duration >= threshold - deepBlockTolerance
+    }
+
     /// Seconds of `interval` that fall inside the half-open window [windowStart, windowEnd).
     /// An open interval (end == nil) is treated as ending at `now`.
     public static func clip(
@@ -277,7 +294,8 @@ public enum Aggregations {
 
         for interval in intervals {
             let end = interval.end ?? now
-            let isDeep = end.timeIntervalSince(interval.start) >= deepThreshold
+            let isDeep = isDeepBlock(duration: end.timeIntervalSince(interval.start),
+                                     threshold: deepThreshold)
             // Split by day, then fold each day's slice into its bucket — keeps DST/midnight correct.
             forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
                 guard dayStart >= range.start && dayStart < range.end else { return }
@@ -336,7 +354,8 @@ public enum Aggregations {
         for interval in intervals {
             let end = interval.end ?? now
             guard end > overallStart, interval.start < overallEnd else { continue }
-            let isDeep = end.timeIntervalSince(interval.start) >= deepThreshold
+            let isDeep = isDeepBlock(duration: end.timeIntervalSince(interval.start),
+                                     threshold: deepThreshold)
             forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
                 guard segEnd > segStart, dayStart >= overallStart, dayStart < overallEnd else { return }
                 // Rightmost window whose start is <= this day. Binary search rather than a linear scan:
@@ -371,7 +390,7 @@ public enum Aggregations {
         for interval in intervals {
             let end = interval.end ?? now
             let full = end.timeIntervalSince(interval.start)
-            let isDeep = full >= deepThreshold
+            let isDeep = isDeepBlock(duration: full, threshold: deepThreshold)
             var withinRange: TimeInterval = 0
             forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
                 guard dayStart >= range.start && dayStart < range.end else { return }
@@ -453,7 +472,8 @@ public enum Aggregations {
 
         for interval in intervals {
             let end = interval.end ?? now
-            let isDeep = end.timeIntervalSince(interval.start) >= deepThreshold
+            let isDeep = isDeepBlock(duration: end.timeIntervalSince(interval.start),
+                                     threshold: deepThreshold)
             forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
                 guard dayStart >= windowStart else { return }
                 let seconds = segEnd.timeIntervalSince(segStart)
@@ -608,7 +628,8 @@ public enum Aggregations {
 
         for interval in intervals {
             let end = interval.end ?? now
-            let isDeep = end.timeIntervalSince(interval.start) >= deepThreshold
+            let isDeep = isDeepBlock(duration: end.timeIntervalSince(interval.start),
+                                     threshold: deepThreshold)
             forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
                 guard dayStart >= monthStart && dayStart < monthEnd else { return }
                 let seconds = segEnd.timeIntervalSince(segStart)

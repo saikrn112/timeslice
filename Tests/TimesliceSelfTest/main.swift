@@ -1768,6 +1768,45 @@ func testTaskTags() {
     }
 }
 
+// MARK: - Focus block boundary
+
+func testDeepBlockBoundary() {
+    print("Deep block boundary:")
+    // The reported bug: five half-hour blocks on screen, four counted as focused. The odd one out
+    // measured 1799.999716s — 284 MICROseconds under 30 minutes — because interval boundaries come
+    // from `Date()` and the auto-pause checkpoint aims for exactly the threshold.
+    check(Aggregations.isDeepBlock(duration: 1799.999716, threshold: 1800),
+          "a block 284µs short of the threshold still counts")
+    check(Aggregations.isDeepBlock(duration: 1800, threshold: 1800),
+          "and so does one exactly on it")
+    check(Aggregations.isDeepBlock(duration: 1799.6, threshold: 1800),
+          "half a second of slack is allowed, being far below anything anyone meant to record")
+    check(!Aggregations.isDeepBlock(duration: 1799.4, threshold: 1800),
+          "but a second short is genuinely short — the tolerance can't become a discount")
+    check(!Aggregations.isDeepBlock(duration: 600, threshold: 1800),
+          "and a ten-minute block is not a focused one")
+
+    // End to end through the summary, which is where the wrong number was seen.
+    do {
+        let (store, url) = try! makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let p = try! store.createProject(name: "P", colorHex: "#f00")
+        let day = date(2026, 9, 14, 9, 0)
+        // Two blocks: one a hair under 30m, one comfortably over.
+        try! store.insertClosedInterval(projectID: p, start: day,
+                                        end: day.addingTimeInterval(1799.999716))
+        try! store.insertClosedInterval(projectID: p, start: day.addingTimeInterval(7200),
+                                        end: day.addingTimeInterval(7200 + 2400))
+        let range = DateRange(unit: .day, start: cal.startOfDay(for: day),
+                             end: cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: day))!)
+        let summary = Aggregations.summary(intervals: try! store.intervals(), range: range,
+                                           deepThreshold: 1800)
+        check(approx(summary.deepSeconds, 1799.999716 + 2400, 0.01),
+              "both blocks count towards focused time, not just the one that cleared 1800 exactly")
+        check(approx(summary.focusRatio, 1, 0.001),
+              "so a day made entirely of half-hour blocks reads as 100% focused")
+    }
+}
+
 // MARK: - Allocation weekdays
 
 func testAllocationWeekdays() {
@@ -1844,6 +1883,34 @@ func testAllocationWeekdays() {
                                           viewedRangeEnd: date(2026, 8, 27, 0, 0), calendar: cal)
     check(approx(onWednesday.rangeExpectedSeconds / 3600, 2, 0.01),
           "and a Wednesday expects the full 2h, not a seventh of the week")
+}
+
+// MARK: - Editing an allocation keeps its days
+
+func testEditingKeepsWeekdays() {
+    print("Editing an allocation:")
+    do {
+        let (store, url) = try! makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let tag = try! store.upsertTag(name: "office", colorHex: "#f00")
+        _ = try! store.setTarget(subject: .tag(tag), seconds: 10 * 3600,
+                                direction: .atLeast, period: .week, weekdays: .weekdaysOnly)
+
+        // The reported bug: pick days, then change the hours, and the days reset. `setTarget`
+        // upserts and its ON CONFLICT clause assigns every column it is given, so a caller that
+        // omitted `weekdays` wrote the .all default over the selection.
+        _ = try! store.setTarget(subject: .tag(tag), seconds: 12 * 3600,
+                                direction: .atLeast, period: .week,
+                                weekdays: try! store.listTargets().first!.weekdays)
+        let after = try! store.listTargets().first!
+        check(after.seconds == 12 * 3600, "the new amount is saved")
+        check(after.weekdays == Weekdays.weekdaysOnly, "and the days it was set for survive it")
+
+        // The days can still be changed on their own, which is the other half of the interaction.
+        try! store.setTargetWeekdays(id: after.id, .all)
+        check(try! store.listTargets().first?.weekdays.isAll == true, "and are still editable")
+        check(try! store.listTargets().first?.seconds == 12 * 3600,
+              "without disturbing the amount either")
+    }
 }
 
 // MARK: - Allocation weekdays travel
@@ -4367,7 +4434,9 @@ do {
     testDeviceLanes()
     testFeedbackPlatform()
     testTaskTags()
+    testDeepBlockBoundary()
     testAllocationWeekdays()
+    testEditingKeepsWeekdays()
     testWeekdaysSync()
     testFeedbackNumbering()
     testFeedbackAttachments()

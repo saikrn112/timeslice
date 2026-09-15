@@ -362,7 +362,7 @@ struct TargetsSheet: View {
                 Button(existing.direction.symbol) {
                     save(subject: subject, seconds: existing.seconds,
                          direction: existing.direction == .atLeast ? .atMost : .atLeast,
-                         period: existing.period)
+                         period: existing.period, weekdays: existing.weekdays)
                 }
                 .buttonStyle(.bordered)
                 .help(existing.direction == .atLeast
@@ -371,22 +371,26 @@ struct TargetsSheet: View {
 
                 Button("−") {
                     save(subject: subject, seconds: max(1800, existing.seconds - 1800),
-                         direction: existing.direction, period: existing.period)
+                         direction: existing.direction, period: existing.period,
+                         weekdays: existing.weekdays)
                 }.buttonStyle(.borderless)
                 // Typeable, not just steppable: reaching 160h in half-hour clicks is 320 presses.
                 HoursField(seconds: existing.seconds) { secs in
                     save(subject: subject, seconds: secs,
-                         direction: existing.direction, period: existing.period)
+                         direction: existing.direction, period: existing.period,
+                         weekdays: existing.weekdays)
                 }
                 Button("+") {
                     save(subject: subject, seconds: existing.seconds + 1800,
-                         direction: existing.direction, period: existing.period)
+                         direction: existing.direction, period: existing.period,
+                         weekdays: existing.weekdays)
                 }.buttonStyle(.borderless)
 
                 Picker("", selection: Binding(
                     get: { existing.period },
                     set: { save(subject: subject, seconds: existing.seconds,
-                                direction: existing.direction, period: $0) }
+                                direction: existing.direction, period: $0,
+                                weekdays: existing.weekdays) }
                 )) {
                     ForEach(Target.Period.allCases, id: \.self) { p in
                         Text(p.rawValue).tag(p)
@@ -426,8 +430,10 @@ struct TargetsSheet: View {
                 .help("Delete this allocation and its history")
             } else {
                 Button("Set allocation") {
-                    // A weekly floor is the common case; both are one tap from here.
-                    save(subject: subject, seconds: 5 * 3600, direction: .atLeast, period: .week)
+                    // A weekly floor is the common case; both are one tap from here. A brand-new
+                    // allocation starts on every day — narrowing it is a later, deliberate choice.
+                    save(subject: subject, seconds: 5 * 3600, direction: .atLeast, period: .week,
+                         weekdays: .all)
                 }
                 .buttonStyle(.link).font(.system(size: 11))
             }
@@ -442,10 +448,17 @@ struct TargetsSheet: View {
         }
     }
 
+    /// `weekdays` must be passed through, not defaulted.
+    ///
+    /// `setTarget` upserts, and its `ON CONFLICT` clause assigns every column it was given — so
+    /// leaving `weekdays` at its `.all` default meant editing the HOURS silently reset the day
+    /// bubbles to all seven. Picking days and then adjusting the number lost the days, which is the
+    /// order anyone would naturally work in.
     private func save(subject: TargetSubject, seconds: TimeInterval,
-                      direction: Target.Direction, period: Target.Period) {
+                      direction: Target.Direction, period: Target.Period,
+                      weekdays: Weekdays) {
         try? store.setTarget(subject: subject, seconds: seconds,
-                             direction: direction, period: period)
+                             direction: direction, period: period, weekdays: weekdays)
         reload()
     }
 

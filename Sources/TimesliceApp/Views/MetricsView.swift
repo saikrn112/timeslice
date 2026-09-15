@@ -1248,6 +1248,21 @@ struct MetricsView: View {
                             .cornerRadius(2)
                         }
                     }
+                    // The average, so a bar can be read against something rather than only against its
+                    // neighbours. Dotted and thin: it's a reference, not a series.
+                    //
+                    // Divided by every bucket in the range, including empty ones — a day you tracked
+                    // nothing is still a day, and dropping it would quietly raise the line every time
+                    // you skipped one.
+                    if let mean = meanBucketHours {
+                        RuleMark(y: .value("Average", mean))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                            .foregroundStyle(Color.secondary)
+                            .annotation(position: .top, alignment: .leading, spacing: 1) {
+                                Text("avg \(hours(mean * 3600))")
+                                    .font(.system(size: 9)).foregroundStyle(.secondary)
+                            }
+                    }
                 }
                 .frame(height: 190)
                 .chartYAxisLabel("hours")
@@ -1549,6 +1564,14 @@ struct MetricsView: View {
         case .sixMonths: return .fixed(14)
         case .year, .all: return .fixed(22)
         }
+    }
+
+    /// Mean hours per bucket over the range, or nil when there's nothing to average.
+    private var meanBucketHours: Double? {
+        guard !buckets.isEmpty else { return nil }
+        let total = buckets.reduce(0.0) { $0 + $1.totalSeconds }
+        guard total > 0 else { return nil }
+        return total / Double(buckets.count) / 3600
     }
 
     /// Bucket starts plus ONE sentinel a step past the last.
@@ -1960,6 +1983,12 @@ struct MetricsView: View {
 
     /// Range bar: the same budget pro-rated onto what's on screen, plus the range's daily average.
     private func rangeHelp(_ row: TargetProgress) -> String {
+        if row.rangeExpectedSeconds == 0 && row.rangeSeconds > 0 {
+            let day = Weekdays.initials[Calendar.current.component(.weekday, from: range.start) - 1]
+            return "\(rangeWord) · not one of this allocation's days (\(day)), so there's nothing to "
+                 + "measure against — the \(budgetDuration(row.rangeSeconds)) still counts towards "
+                 + "the \(row.target.period.rawValue)"
+        }
         let delta = row.rangeSeconds - row.rangeExpectedSeconds
         let verdict: TargetProgress.Verdict
         if row.target.direction == .atMost {
@@ -2030,6 +2059,11 @@ struct MetricsView: View {
 
     /// Same rule for the pro-rated bar: a breached ceiling reads "over", not a runaway percentage.
     private func rangePercentText(_ row: TargetProgress) -> String {
+        // Time on a day the allocation was never meant for. There's no denominator, so a percentage
+        // is undefined — and printing "0%" beside real hours reads as a failure when it's the
+        // opposite. It says "extra": the hours still count towards the period's total, they just
+        // weren't planned for this day.
+        if row.rangeExpectedSeconds == 0 && row.rangeSeconds > 0 { return "extra" }
         if row.target.direction == .atMost, row.rangePercent > 100 { return "over" }
         return "\(Int(row.rangePercent.rounded()))%"
     }
