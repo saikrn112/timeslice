@@ -89,5 +89,10 @@ public final class Perf: @unchecked Sendable {
         public static let rollChunks = "store.rollChunks"
         public static let activityUpdate = "activity.update"
         public static let toggle = "timer.toggle"
+        /// A button press on the Lock Screen or in the island, from the intent entering the app's
+        /// process to the write finishing. Separate from `timer.toggle` because the interesting part
+        /// is what the SYSTEM adds before `perform()` runs — that's the lag you feel, and comparing
+        /// the two figures is what tells you which half to chase.
+        public static let activityAction = "activity.action"
     }
 }

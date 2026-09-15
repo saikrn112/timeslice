@@ -39,10 +39,48 @@ struct MetricsScreen: View {
         var groupTotals: [TaskProjectTotal] = []
         var tagTotals: [TagTotal] = []
         var weekdays: [WeekdayAverage] = []
-        var sessions: [Interval] = []
+        var sessions: [Session] = []
+        /// How many sessions the range holds in total, which is more than the list shows when the
+        /// cap bites. Surfaced rather than left implicit: a list that silently stops at 40 reads as
+        /// a complete list that disagrees with the day's total.
+        var sessionTotal = 0
         var budgets: [BudgetRows.Row] = []
         /// The neighbouring periods, for the card strip that browses them.
         var strip: [PeriodCard] = []
+    }
+
+    /// One row of the Sessions list: the interval, plus the part of it lying inside the range.
+    ///
+    /// The clipped duration is the point. The row used to print `interval.seconds()` — the WHOLE
+    /// interval — while the timeline above it clips each block to the day. So a session crossing
+    /// midnight was drawn short and listed long, and the listed durations didn't add up to the day's
+    /// total. That is what "some time difference between what's being recorded and what's shown in
+    /// the sessions" describes. The Mac never had it: its rows come from already-clipped
+    /// `DaySegment`s.
+    private struct Session: Identifiable {
+        let interval: Interval
+        /// Start and end as they appear WITHIN the viewed range.
+        let start: Date
+        let end: Date
+        /// True when the range cut the session, so the row can say so rather than just look wrong.
+        let isClipped: Bool
+
+        var id: Int64 { interval.id }
+        var seconds: TimeInterval { max(0, end.timeIntervalSince(start)) }
+    }
+
+    /// Sessions newest-first, which is what the Mac does and what you want when checking today.
+    /// Flipped by the arrow in the section's title row.
+    @State private var newestFirst = true
+
+    /// Says when the list is showing fewer sessions than the range holds. A list that silently stops
+    /// at 40 reads as complete and then disagrees with the day's total, which is a worse lie than a
+    /// longer subtitle.
+    private var sessionsSubtitle: String {
+        let shown = data.sessions.count
+        let total = data.sessionTotal
+        let count = shown < total ? "\(shown) of \(total) blocks" : "\(total) blocks"
+        return "\(count) · swipe to delete"
     }
 
     private var isDay: Bool { range.unit == .day }
@@ -826,7 +864,20 @@ struct MetricsScreen: View {
     /// scrolling — two nested scrollers fight each other, and this one exists purely for its row
     /// behaviour.
     private var sessionList: some View {
-        section("Sessions", subtitle: "\(data.sessions.count) blocks · swipe to delete") {
+        section("Sessions", subtitle: sessionsSubtitle, accessory: {
+            // The arrow IS the control, per the request — tapping it flips the order rather than
+            // opening a menu for a binary choice.
+            Button {
+                newestFirst.toggle()
+                Haptics.switched()
+            } label: {
+                Image(systemName: newestFirst ? "arrow.down" : "arrow.up")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel(newestFirst ? "Newest first" : "Oldest first")
+        }) {
             if data.sessions.isEmpty {
                 placeholder("No sessions on this day")
             } else {
@@ -854,13 +905,20 @@ struct MetricsScreen: View {
         }
     }
 
-    private func sessionRow(_ s: Interval) -> some View {
+    private func sessionRow(_ s: Session) -> some View {
         HStack(spacing: 7) {
-            Circle().fill(Color(hex: colorHex(for: s.projectID)))
+            Circle().fill(Color(hex: colorHex(for: s.interval.projectID)))
                 .frame(width: 7, height: 7)
-            Text(model.task(id: s.projectID)?.name ?? "(deleted task)")
+            Text(model.task(id: s.interval.projectID)?.name ?? "(deleted task)")
                 .font(Theme.caption).lineLimit(1)
-            if let id = s.deviceID, let label = model.deviceLabels[id],
+            // A session the range cut. Says so, because the alternative is a duration that silently
+            // disagrees with the block drawn above it.
+            if s.isClipped {
+                Image(systemName: "scissors").font(.system(size: 8))
+                    .foregroundStyle(.tertiary)
+                    .help("Continues outside this \(range.unit.rawValue.lowercased())")
+            }
+            if let id = s.interval.deviceID, let label = model.deviceLabels[id],
                model.knownDevices.count > 1 {
                 Text(label).font(Theme.captionSmall).foregroundStyle(.tertiary)
             }
@@ -870,7 +928,7 @@ struct MetricsScreen: View {
             Text(sessionClock(s))
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.tertiary)
-            Text(Format.compact(s.seconds()))
+            Text(Format.compact(s.seconds))
                 .font(.system(size: 11, design: .monospaced))
         }
         .frame(height: Self.sessionRowHeight)
@@ -880,12 +938,21 @@ struct MetricsScreen: View {
 
     private func section<C: View>(_ title: String, subtitle: String?,
                                   @ViewBuilder content: () -> C) -> some View {
+        section(title, subtitle: subtitle, accessory: { EmptyView() }, content: content)
+    }
+
+    /// Same, with a control at the end of the title row.
+    private func section<C: View, A: View>(_ title: String, subtitle: String?,
+                                           @ViewBuilder accessory: () -> A,
+                                           @ViewBuilder content: () -> C) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
                 Text(title).font(Theme.sectionHeader)
                 if let subtitle {
                     Text(subtitle).font(Theme.captionSmall).foregroundStyle(.tertiary)
                 }
+                Spacer(minLength: 4)
+                accessory()
             }
             // The VStack is load-bearing. Applying `.background` straight to `content()` applies it
             // to a TupleView, and SwiftUI distributes such modifiers across EACH child — so the Day
@@ -917,9 +984,17 @@ struct MetricsScreen: View {
         return s[max(0, min(s.count - 1, weekday - 1))]
     }
 
-    private func delete(_ session: Interval) {
+    private func delete(_ session: Session) {
         guard let store = model.storeIfLoaded else { return }
-        _ = try? store.deleteInterval(id: session.id)
+        if session.isClipped {
+            // Delete only the part shown. Taking the whole interval would remove time from a day you
+            // aren't looking at, which is not what a row in THIS list offers to do — the same
+            // reasoning as the Mac's clipped-session delete.
+            _ = try? store.deleteIntervalSlice(id: session.interval.id,
+                                               from: session.start, to: session.end)
+        } else {
+            _ = try? store.deleteInterval(id: session.interval.id)
+        }
         model.reload()
         rebuild()
     }
@@ -955,9 +1030,17 @@ struct MetricsScreen: View {
         d.tagTotals = Aggregations.tagTotals(tags: model.allTags, intervals: all,
                                              tagIDsByTask: tagIDsByTask, range: range, now: now)
         d.weekdays = Aggregations.weekdayAverages(intervals: all, range: range, now: now)
-        d.sessions = all
-            .filter { ($0.end ?? now) > range.start && $0.start < range.end }
-            .sorted { $0.start > $1.start }
+        let inRange = all.filter { ($0.end ?? now) > range.start && $0.start < range.end }
+        d.sessionTotal = inRange.count
+        d.sessions = inRange
+            .map { interval -> Session in
+                let rawEnd = interval.end ?? now
+                let start = max(interval.start, range.start)
+                let end = min(rawEnd, range.end)
+                return Session(interval: interval, start: start, end: end,
+                               isClipped: start > interval.start || end < rawEnd)
+            }
+            .sorted { newestFirst ? $0.start > $1.start : $0.start < $1.start }
             .prefix(40).map { $0 }
         d.budgets = BudgetRows.build(
             targets: (try? store.listTargets()) ?? [], tasks: model.allTasks,
@@ -1082,11 +1165,14 @@ extension MetricsScreen {
     /// `9:05–10:20` for a closed session, `14:32–now` for the running one.
     ///
     /// A `DateFormatter` per row would be wasteful; one static formatter is reused.
-    fileprivate func sessionClock(_ session: Interval) -> String {
+    private func sessionClock(_ session: Session) -> String {
         let f = MetricsScreen.clockFormatter
         let start = f.string(from: session.start)
-        guard let end = session.end else { return "\(start)–now" }
-        return "\(start)–\(f.string(from: end))"
+        // "now" only for a session that is genuinely still running, not for one the range clipped.
+        if session.interval.end == nil, session.end >= Date().addingTimeInterval(-1) {
+            return "\(start)–now"
+        }
+        return "\(start)–\(f.string(from: session.end))"
     }
 
     fileprivate static let clockFormatter: DateFormatter = {

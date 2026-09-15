@@ -342,12 +342,21 @@ struct TasksView: View {
                     } isTargeted: { targeted in
                         dropTarget = targeted ? (task.taskProjectID ?? -1) : nil
                     }
-                    .onLongPressGesture {
-                        // Confirms the press landed BEFORE the sheet animates in. A long press with no
-                        // feedback reads as "did that register?", which is the whole reason start/stop
-                        // already buzz.
-                        Haptics.switched()
-                        editing = task
+                    // Details live in the CONTEXT MENU, not on a raw long press.
+                    //
+                    // `.draggable` and `.onLongPressGesture` both begin with press-and-hold, so they
+                    // competed for the same gesture: the sheet would open when a drag was meant, or
+                    // the lift never happened. `.contextMenu` is the combination iOS actually
+                    // supports alongside `.draggable` — hold to get the menu, move during the hold to
+                    // drag instead — and it's what Files and Photos do, so the muscle memory already
+                    // exists.
+                    .contextMenu {
+                        Button {
+                            Haptics.switched()
+                            editing = task
+                        } label: {
+                            Label("Details", systemImage: "info.circle")
+                        }
                     }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button {

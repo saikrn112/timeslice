@@ -1,4 +1,5 @@
 import AppIntents
+import TimesliceCore
 import Foundation
 
 /// Intents driven from buttons **inside** a Live Activity — the Lock Screen card and the expanded
@@ -57,12 +58,24 @@ public struct ToggleFromActivityIntent: LiveActivityIntent {
     public static var description = IntentDescription("Pause or resume the current task.")
     /// Must stay false: the point of a button on the Lock Screen is not opening the app.
     public static var openAppWhenRun: Bool { false }
+    /// And it must not demand a passcode either. `AppIntent`'s default is
+    /// `.requiresAuthentication`, which is why every Lock Screen tap bounced to Face ID first — a
+    /// button you have to unlock the phone to press is slower than opening the app, so the whole
+    /// affordance was pointless. `.alwaysAllowed` is the deliberate trade: someone holding the
+    /// locked phone can pause or switch the timer, and can read nothing.
+    public static var authenticationPolicy: IntentAuthenticationPolicy { .alwaysAllowed }
 
     public init() {}
 
     @MainActor
     public func perform() async throws -> some IntentResult {
-        TimerActionRegistry.handler?.toggleCurrent()
+        // Measured so "there is some latency" becomes a number that rides the next sync, rather than
+        // an impression. This covers our half only: the system's own dispatch before `perform()` is
+        // reached isn't observable from here, so a small figure here with a slow-feeling button is
+        // itself the finding.
+        Perf.shared.measure(Perf.Path.activityAction) {
+            TimerActionRegistry.handler?.toggleCurrent()
+        }
         return .result()
     }
 }
@@ -75,6 +88,8 @@ public struct PreviousTaskIntent: LiveActivityIntent {
     public static var title: LocalizedStringResource = "Switch to Previous Task"
     public static var description = IntentDescription("Switch back to the task you were on before.")
     public static var openAppWhenRun: Bool { false }
+    /// See `ToggleFromActivityIntent`: a Lock Screen button that requires unlocking isn't one.
+    public static var authenticationPolicy: IntentAuthenticationPolicy { .alwaysAllowed }
 
     public init() {}
 
@@ -99,6 +114,8 @@ public struct SwitchToTaskIntent: LiveActivityIntent {
     public static var title: LocalizedStringResource = "Switch Timeslice Task"
     public static var description = IntentDescription("Start tracking a specific task.")
     public static var openAppWhenRun: Bool { false }
+    /// See `ToggleFromActivityIntent`: a Lock Screen button that requires unlocking isn't one.
+    public static var authenticationPolicy: IntentAuthenticationPolicy { .alwaysAllowed }
 
     /// The task's uid. A string, so it stays valid across devices and across a re-sync.
     @Parameter(title: "Task")
