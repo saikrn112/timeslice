@@ -29,6 +29,9 @@ public struct SyncPayload: Codable, Equatable, Sendable {
     public var feedback: [FeedbackRecord]?
     /// Preferences that decide what gets recorded, so every device applies the same thresholds.
     public var settings: [SettingRecord]?
+    /// Non-negotiables. They travel because a plan made on one device is meaningless on another that
+    /// doesn't know which hours are already gone.
+    public var reservations: [ReservationRecord]?
     /// The manifest of images attached to feedback. Just the manifest — the bytes travel as their
     /// own blobs, because this payload is rewritten in full on every publish.
     public var attachments: [AttachmentRecord]?
@@ -132,16 +135,23 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         /// Weekday bitmask (Sunday = bit 0). Absent from an older peer, which means every day — the
         /// behaviour those builds had.
         public var weekdays: Int?
+        /// How the total wants to be spread. Absent means flexible — what every allocation was before
+        /// shapes existed — and absent must NOT overwrite a shape set here, same as `weekdays`.
+        public var shapeKind: Int?
+        public var shapeMin: TimeInterval?
+        public var shapeCount: Int?
 
         public init(uid: String, subjectKind: String, subjectUID: String, seconds: TimeInterval,
                     direction: String, period: String, updatedAt: TimeInterval,
                     createdAt: TimeInterval? = nil, completedAt: TimeInterval? = nil,
-                    weekdays: Int? = nil) {
+                    weekdays: Int? = nil, shapeKind: Int? = nil, shapeMin: TimeInterval? = nil,
+                    shapeCount: Int? = nil) {
             self.uid = uid; self.subjectKind = subjectKind; self.subjectUID = subjectUID
             self.seconds = seconds; self.direction = direction; self.period = period
             self.updatedAt = updatedAt
             self.createdAt = createdAt; self.completedAt = completedAt
             self.weekdays = weekdays
+            self.shapeKind = shapeKind; self.shapeMin = shapeMin; self.shapeCount = shapeCount
         }
     }
 
@@ -168,6 +178,21 @@ public struct SyncPayload: Codable, Equatable, Sendable {
             self.createdAt = createdAt; self.resolvedAt = resolvedAt; self.updatedAt = updatedAt
             self.platform = platform
             self.seq = seq
+        }
+    }
+
+    public struct ReservationRecord: Codable, Equatable, Sendable {
+        public var uid: String
+        public var name: String
+        /// Weekday bitmask, Sunday = bit 0 — the same encoding allocations use.
+        public var weekdays: Int
+        public var secondsPerDay: TimeInterval
+        public var updatedAt: TimeInterval
+
+        public init(uid: String, name: String, weekdays: Int, secondsPerDay: TimeInterval,
+                    updatedAt: TimeInterval) {
+            self.uid = uid; self.name = name; self.weekdays = weekdays
+            self.secondsPerDay = secondsPerDay; self.updatedAt = updatedAt
         }
     }
 
@@ -214,6 +239,7 @@ public struct SyncPayload: Codable, Equatable, Sendable {
                 targets: [TargetRecord]? = nil, feedback: [FeedbackRecord]? = nil,
                 attachments: [AttachmentRecord]? = nil,
                 settings: [SettingRecord]? = nil,
+                reservations: [ReservationRecord]? = nil,
                 tasks: [TaskRecord], projects: [ProjectRecord], intervals: [IntervalRecord],
                 tombstones: [TombstoneRecord]) {
         self.deviceID = deviceID; self.deviceLabel = deviceLabel
@@ -223,6 +249,7 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         self.feedback = feedback
         self.attachments = attachments
         self.settings = settings
+        self.reservations = reservations
     }
 }
 
@@ -297,6 +324,7 @@ public struct MergeReport: Equatable, Sendable {
     public var attachmentsApplied = 0
     /// Settings adopted from a peer. Surfaced so the app knows to re-read them.
     public var settingsApplied = 0
+    public var reservationsApplied = 0
     public var deletionsApplied = 0
 
     public init() {}
@@ -308,6 +336,6 @@ public struct MergeReport: Equatable, Sendable {
             && intervalsReattributed == 0
             && tagsAdded == 0 && tagsMergedByName.isEmpty && tagEditsApplied == 0
             && tagLinksAdded == 0 && targetsApplied == 0 && feedbackApplied == 0
-            && attachmentsApplied == 0 && settingsApplied == 0
+            && attachmentsApplied == 0 && settingsApplied == 0 && reservationsApplied == 0
     }
 }

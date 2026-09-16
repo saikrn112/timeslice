@@ -1768,6 +1768,149 @@ func testTaskTags() {
     }
 }
 
+// MARK: - Reservations and shapes, persisted and synced
+
+func testReservationsStore() {
+    print("Reservations:")
+    do {
+        let (store, url) = try! makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+
+        let commute = try! store.addReservation(name: "commute", weekdays: .weekdaysOnly,
+                                                secondsPerDay: 2 * 3600)!
+        _ = try! store.addReservation(name: "meals", secondsPerDay: 90 * 60)
+        var all = try! store.listReservations()
+        check(all.count == 2, "both are stored")
+        check(all.map(\.name) == ["commute", "meals"], "listed by name, so the list doesn't reshuffle")
+        check(all.first { $0.name == "commute" }?.weekdays == Weekdays.weekdaysOnly,
+              "the weekday mask survives, reusing the allocation encoding")
+
+        // Blank names and non-positive hours are refused rather than stored as a row that claims
+        // nothing and shows as an empty line.
+        check(try! store.addReservation(name: "   ", secondsPerDay: 3600) == nil,
+              "a blank name is refused")
+        check(try! store.addReservation(name: "zero", secondsPerDay: 0) == nil,
+              "and so is a zero-length reservation")
+
+        // One field at a time. The COALESCE pattern exists because restating every field is exactly
+        // how editing an allocation's hours used to wipe its weekdays.
+        try! store.updateReservation(id: commute, secondsPerDay: 3 * 3600)
+        all = try! store.listReservations()
+        check(all.first { $0.id == commute }?.secondsPerDay == 3 * 3600, "the hours change")
+        check(all.first { $0.id == commute }?.weekdays == Weekdays.weekdaysOnly,
+              "and the days it was set for are untouched")
+        try! store.updateReservation(id: commute, name: "commute + parking")
+        check(try! store.listReservations().first { $0.id == commute }?.secondsPerDay == 3 * 3600,
+              "renaming leaves the hours alone too")
+
+        // Deleting tombstones, or a peer re-adds it.
+        try! store.deleteReservation(id: commute)
+        check(try! store.listReservations().count == 1, "it's gone")
+        check(try! store.tombstoneRecords().contains { $0.kind == "reservation" },
+              "and tombstoned so a peer can't resurrect it")
+    }
+}
+
+func testReservationsSync() {
+    print("Reservations over sync:")
+    do {
+        let (a, aURL) = try! makeStore(); defer { try? FileManager.default.removeItem(at: aURL) }
+        let (b, bURL) = try! makeStore(); defer { try? FileManager.default.removeItem(at: bURL) }
+        _ = try! a.addReservation(name: "commute", weekdays: .weekdaysOnly, secondsPerDay: 2 * 3600)
+
+        func push(from x: IntervalStore, to y: IntervalStore, bump: TimeInterval = 0) {
+            for r in try! x.reservationsForExport() {
+                _ = try! y.applyRemoteReservation(uid: r.uid, name: r.name, weekdays: r.weekdays,
+                                                  secondsPerDay: r.secondsPerDay,
+                                                  remoteUpdatedAt: r.updatedAt + bump)
+            }
+        }
+        push(from: a, to: b)
+        check(try! b.listReservations().count == 1, "it arrives on the peer")
+        check(try! b.listReservations().first?.weekdays == Weekdays.weekdaysOnly,
+              "with its days — a plan is meaningless on a device that doesn't know which hours are gone")
+
+        // Last write wins, and an older copy can't undo a newer edit.
+        let id = try! b.listReservations().first!.id
+        try! b.updateReservation(id: id, secondsPerDay: 4 * 3600)
+        push(from: a, to: b)                    // a's older version, pushed again
+        check(try! b.listReservations().first?.secondsPerDay == 4 * 3600,
+              "an older copy from a peer doesn't overwrite a newer local edit")
+        push(from: b, to: a)
+        check(try! a.listReservations().first?.secondsPerDay == 4 * 3600,
+              "and the newer edit reaches the other device")
+
+        // A remote delete removes it here.
+        let uid = try! a.reservationsForExport().first!.uid
+        try! a.applyRemoteTombstone(uid: uid, kind: "reservation",
+                                    deletedAt: Date().timeIntervalSince1970)
+        check(try! a.listReservations().isEmpty, "a remote delete applies")
+    }
+}
+
+func testTargetShapePersistence() {
+    print("Allocation shapes:")
+    do {
+        let (store, url) = try! makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let tag = try! store.upsertTag(name: "research", colorHex: "#0f0")
+        _ = try! store.setTarget(subject: .tag(tag), seconds: 7 * 3600, direction: .atLeast,
+                                period: .week, weekdays: .all,
+                                shape: .everyDay(minSeconds: 3600))
+        check(try! store.listTargets().first?.shape == .everyDay(minSeconds: 3600),
+              "a habit shape round-trips through the database")
+
+        // The shape can be changed alone, and changing it must not disturb anything else.
+        let id = try! store.listTargets().first!.id
+        try! store.setTargetShape(id: id, .sessions(count: 2, minSeconds: 3 * 3600))
+        let t = try! store.listTargets().first!
+        check(t.shape == .sessions(count: 2, minSeconds: 3 * 3600), "and can be changed on its own")
+        check(t.seconds == 7 * 3600 && t.weekdays.isAll, "without touching the amount or the days")
+
+        // An unknown kind — a newer build's shape — degrades to flexible rather than breaking.
+        check(TargetShape(kindRaw: 99, minSeconds: 60, count: 3) == .flexible,
+              "an unrecognised shape reads as flexible instead of crashing or vanishing")
+    }
+}
+
+func testTargetShapeSync() {
+    print("Allocation shapes over sync:")
+    do {
+        let (a, aURL) = try! makeStore(); defer { try? FileManager.default.removeItem(at: aURL) }
+        let (b, bURL) = try! makeStore(); defer { try? FileManager.default.removeItem(at: bURL) }
+        let tagA = try! a.upsertTag(name: "research", colorHex: "#0f0")
+        _ = try! a.setTarget(subject: .tag(tagA), seconds: 7 * 3600, direction: .atLeast,
+                            period: .week, shape: .everyDay(minSeconds: 3600))
+        for row in try! a.tagsWithUIDs() {
+            _ = try! b.insertRemoteTag(uid: row.uid, name: row.tag.name, colorHex: row.tag.colorHex,
+                                       sortOrder: row.tag.sortOrder, updatedAt: row.updatedAt)
+        }
+        func pushTargets(shapeless: Bool = false, bump: TimeInterval = 0) {
+            for t in try! a.targetsForExport() {
+                guard let table = IntervalStore.table(forSubjectKind: t.subjectKind),
+                      let sid = try! b.localID(table: table, uid: t.subjectUID),
+                      let subject = TargetSubject(kind: t.subjectKind, id: sid) else { continue }
+                _ = try! b.applyRemoteTarget(
+                    uid: t.uid, subject: subject, seconds: t.seconds,
+                    direction: Target.Direction(rawValue: t.direction)!,
+                    period: Target.Period(rawValue: t.period)!,
+                    remoteUpdatedAt: t.updatedAt + bump, createdAt: t.createdAt,
+                    completedAt: t.completedAt, weekdays: t.weekdays,
+                    shapeKind: shapeless ? nil : t.shapeKind,
+                    shapeMin: shapeless ? nil : t.shapeMin,
+                    shapeCount: shapeless ? nil : t.shapeCount)
+            }
+        }
+        pushTargets()
+        check(try! b.listTargets().first?.shape == .everyDay(minSeconds: 3600),
+              "the shape travels, so a habit means the same thing on both devices")
+
+        // A peer on an older build sends no shape at all, and can easily be the newer writer. Silence
+        // must mean "no opinion", never "flexible" — the same trap weekdays had.
+        pushTargets(shapeless: true, bump: 60)
+        check(try! b.listTargets().first?.shape == .everyDay(minSeconds: 3600),
+              "an older peer's newer edit leaves the shape it doesn't know about alone")
+    }
+}
+
 // MARK: - Planner
 
 /// Builds the membership for a made-up world: `tasks` maps a task id to its group, `tags` maps a
@@ -4732,6 +4875,10 @@ do {
     testDeviceLanes()
     testFeedbackPlatform()
     testTaskTags()
+    testReservationsStore()
+    testReservationsSync()
+    testTargetShapePersistence()
+    testTargetShapeSync()
     testSubjectMembership()
     testPlannerBounds()
     testPlannerNormalisation()

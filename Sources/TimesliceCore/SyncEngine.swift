@@ -74,7 +74,9 @@ public struct SyncEngine {
                                      subjectUID: $0.subjectUID, seconds: $0.seconds,
                                      direction: $0.direction, period: $0.period,
                                      updatedAt: $0.updatedAt, createdAt: $0.createdAt,
-                                     completedAt: $0.completedAt, weekdays: $0.weekdays)
+                                     completedAt: $0.completedAt, weekdays: $0.weekdays,
+                                     shapeKind: $0.shapeKind, shapeMin: $0.shapeMin,
+                                     shapeCount: $0.shapeCount)
         }
 
         let feedbackRecords = try store.feedbackForExport().map {
@@ -94,12 +96,17 @@ public struct SyncEngine {
             SyncPayload.SettingRecord(key: $0.key, value: $0.value, updatedAt: $0.updatedAt)
         }
 
+        let reservationRecords = try store.reservationsForExport().map {
+            SyncPayload.ReservationRecord(uid: $0.uid, name: $0.name, weekdays: $0.weekdays,
+                                          secondsPerDay: $0.secondsPerDay, updatedAt: $0.updatedAt)
+        }
+
         let tombs = try store.tombstoneRecords()
         return SyncPayload(deviceID: deviceID, deviceLabel: deviceLabel,
                            writtenAt: now.timeIntervalSince1970,
                            tags: tagRecords, tagLinks: linkRecords, targets: targetRecords,
                            feedback: feedbackRecords, attachments: attachmentRecords,
-                           settings: settingRecords,
+                           settings: settingRecords, reservations: reservationRecords,
                            tasks: taskRecords, projects: projectRecords,
                            intervals: intervalRecords, tombstones: tombs)
     }
@@ -278,7 +285,8 @@ public struct SyncEngine {
                                            direction: direction, period: period,
                                            remoteUpdatedAt: t.updatedAt,
                                            createdAt: t.createdAt, completedAt: t.completedAt,
-                                           weekdays: t.weekdays) {
+                                           weekdays: t.weekdays, shapeKind: t.shapeKind,
+                                           shapeMin: t.shapeMin, shapeCount: t.shapeCount) {
                 report.targetsApplied += 1
             }
         }
@@ -300,6 +308,15 @@ public struct SyncEngine {
             if try store.applyRemoteSetting(key: setting.key, value: setting.value,
                                             remoteUpdatedAt: setting.updatedAt) {
                 report.settingsApplied += 1
+            }
+        }
+        // Non-negotiables. Independent of everything else — no subject to resolve, so order doesn't
+        // matter.
+        for r in (remote.reservations ?? []) where !deleted.contains(r.uid) {
+            if try store.applyRemoteReservation(uid: r.uid, name: r.name, weekdays: r.weekdays,
+                                                secondsPerDay: r.secondsPerDay,
+                                                remoteUpdatedAt: r.updatedAt) {
+                report.reservationsApplied += 1
             }
         }
         // Attachments after the notes they hang off: the manifest row references a note by uid, and
