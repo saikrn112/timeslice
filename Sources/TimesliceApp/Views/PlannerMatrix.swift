@@ -18,6 +18,9 @@ struct PlannerMatrix: View {
     let replan: Replan?
     /// weekday → target id → seconds actually tracked this week.
     let actuals: [Int: [Int64: TimeInterval]]
+    /// weekday → every tracked second, allocation or not. Used for the load of days that have gone,
+    /// where what actually happened is the fact and the plan is only a memory of an intention.
+    let actualTotals: [Int: TimeInterval]
     let today: Int
     let colorFor: (Int64) -> String
     let nameFor: (Int64) -> String
@@ -47,24 +50,46 @@ struct PlannerMatrix: View {
         let name: String
         let done: TimeInterval
         let target: TimeInterval
-        /// weekday → (done, planned) for this allocation.
-        let cells: [Int: (done: TimeInterval, planned: TimeInterval)]
+        /// weekday → what happened and what's still wanted there.
+        let cells: [Int: Cell]
         let item: Replan.Item?
         /// Sort key: trouble first.
         let rank: Int
+    }
+
+    private struct Cell {
+        let done: TimeInterval
+        let planned: TimeInterval
+        /// True when work landed on a day this allocation doesn't claim.
+        ///
+        /// It still counts — weekdays change the DENOMINATOR, not the numerator, so an hour of office
+        /// work on a Sunday goes towards the weekly total exactly as a Monday hour does. Building the
+        /// cells from the plan alone hid 3.5h of real Sunday work behind a "not one of its days" dot,
+        /// which is the plan overruling the facts.
+        let isExtra: Bool
     }
 
     private var rows: [Row] {
         let items = Dictionary(uniqueKeysWithValues: (replan?.items ?? []).map { ($0.targetID, $0) })
         var built: [Row] = []
         var seen: Set<Int64> = []
-        for placement in plan.days.flatMap(\.placements) where seen.insert(placement.targetID).inserted {
-            let id = placement.targetID
-            var cells: [Int: (done: TimeInterval, planned: TimeInterval)] = [:]
+        // Every allocation the plan places, PLUS any with tracked time this week. The second half
+        // matters for an allocation whose claimed days have all gone: it has no placements left, and
+        // building only from the plan would drop it off the page just when its backlog matters most.
+        let withWork = actuals.values.flatMap { $0.filter { $0.value > 60 }.keys }
+        let ids = plan.days.flatMap { $0.placements.map(\.targetID) } + withWork
+        for id in ids where seen.insert(id).inserted {
+            var cells: [Int: Cell] = [:]
             for day in plan.days {
-                guard let mine = day.placements.first(where: { $0.targetID == id }) else { continue }
                 let done = actuals[day.weekday]?[id] ?? 0
-                cells[day.weekday] = (done, max(0, mine.seconds - done))
+                if let mine = day.placements.first(where: { $0.targetID == id }) {
+                    cells[day.weekday] = Cell(done: done,
+                                              planned: max(0, mine.seconds - done),
+                                              isExtra: false)
+                } else if done > 60 {
+                    // Work on a day the allocation never claimed. Shown, and marked as extra.
+                    cells[day.weekday] = Cell(done: done, planned: 0, isExtra: true)
+                }
             }
             let item = items[id]
             built.append(Row(targetID: id, name: nameFor(id),
@@ -153,9 +178,14 @@ struct PlannerMatrix: View {
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 3))
                     .overlay {
+                        // Dashed for work on a day this allocation doesn't claim: it counts, but it
+                        // wasn't the plan, and those are different facts.
                         RoundedRectangle(cornerRadius: 3)
-                            .strokeBorder(Color(hex: colorFor(row.targetID)).opacity(0.65),
-                                          lineWidth: entry.planned > 60 ? 1 : 0)
+                            .strokeBorder(Color(hex: colorFor(row.targetID)).opacity(0.8),
+                                          style: StrokeStyle(
+                                            lineWidth: entry.isExtra ? 1.5
+                                                       : (entry.planned > 60 ? 1 : 0),
+                                            dash: entry.isExtra ? [2, 2] : []))
                     }
                 }
                 .frame(height: 14)
@@ -182,11 +212,10 @@ struct PlannerMatrix: View {
         switch item.standing {
         case .met: return "done"
         case .unreachable:
-            if item.remainingClaimedDays == 0 { return "no days left" }
-            if let top = item.blockers.first {
-                return "✗ \(top.name) wants \(short(top.secondsOnThoseDays))"
-            }
-            return "✗ no room"
+            // Why, in the row itself. "Unreachable" now means this allocation's OWN days can't hold
+            // what's left of it, so the reason is always one of these two — not "something else won".
+            if item.remainingClaimedDays == 0 { return "✗ no days left" }
+            return "✗ needs \(short(item.remainingSeconds)) in \(short(item.availableOnRemainingDays))"
         case .recoverable, .onTrack:
             guard let per = item.requiredPerRemainingDay, item.remainingSeconds > 60 else {
                 return "done"
@@ -202,7 +231,10 @@ struct PlannerMatrix: View {
             lines.append("behind by \(short(item.debtSeconds)) against an even spread")
         }
         lines.append("\(short(item.remainingSeconds)) left, \(item.remainingClaimedDays) day(s) to do it")
-        lines.append("those days have \(short(item.availableOnRemainingDays)) free between them")
+        lines.append("those days have \(short(item.availableOnRemainingDays)) free between them "
+                     + "(waking hours minus what's reserved)")
+        lines.append("catch-up can use any of those hours — being behind earlier doesn't cost you "
+                     + "later ones")
         if !item.blockers.isEmpty {
             lines.append("")
             lines.append("competing for those days:")
@@ -251,7 +283,7 @@ struct PlannerMatrix: View {
                     // hour-cell version had, at a fraction of the space.
                     GeometryReader { geo in
                         let capacity = max(day.capacitySeconds, 1)
-                        let used = day.reservedSeconds + day.committedSeconds
+                        let used = load(day)
                         let fraction = min(1.4, used / capacity)
                         VStack(spacing: 0) {
                             Spacer(minLength: 0)
@@ -272,7 +304,7 @@ struct PlannerMatrix: View {
                     .frame(height: 26)
                     .frame(maxWidth: 18)
                     .clipShape(RoundedRectangle(cornerRadius: 2))
-                    Text(short(day.reservedSeconds + day.committedSeconds))
+                    Text(short(load(day)))
                         .font(.system(size: 9, design: .monospaced)).monospacedDigit()
                         .foregroundStyle(day.isOverCapacity ? PlannerView.overColor : .secondary)
                 }
@@ -285,12 +317,28 @@ struct PlannerMatrix: View {
         }
     }
 
+    /// A day's load: what HAPPENED for days that have gone, what's planned for the ones still coming.
+    ///
+    /// A past Sunday showing its plan is a lie about a day you already lived — and it was showing a
+    /// nearly-empty column for a Sunday with 3.5h of real work in it, because office doesn't claim
+    /// Sundays. Today takes whichever is larger: the day isn't over, so the plan is still a claim on it.
+    private func load(_ day: Planner.DayPlan) -> TimeInterval {
+        let actual = (actualTotals[day.weekday] ?? 0) + day.reservedSeconds
+        let planned = day.reservedSeconds + day.committedSeconds
+        if day.weekday < today { return actual }
+        if day.weekday == today { return max(actual, planned) }
+        return planned
+    }
+
     private func dayTooltip(_ day: Planner.DayPlan) -> String {
         var lines = ["\(Self.dayNames[day.weekday - 1]) — \(short(day.capacitySeconds)) awake"]
         if day.reservedSeconds > 0 { lines.append("reserved  \(short(day.reservedSeconds))") }
         for p in day.placements.sorted(by: { $0.seconds > $1.seconds }) {
             let done = actuals[day.weekday]?[p.targetID] ?? 0
             lines.append("\(p.name)  \(short(p.seconds))" + (done > 60 ? " (\(short(done)) done)" : ""))
+        }
+        if let actual = actualTotals[day.weekday], actual > 60 {
+            lines.append("actually tracked  \(short(actual))")
         }
         lines.append(day.isOverCapacity ? "OVER by \(short(-day.slackSeconds))"
                                         : "\(short(day.freeSeconds)) free")

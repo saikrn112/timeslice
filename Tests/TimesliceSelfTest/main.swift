@@ -2326,6 +2326,66 @@ func testReplan() {
               "whereas a whole 16h day could technically still hold it")
     }
 
+    // Catch-up may use ANY free hour on the remaining days, including hours the plan had pencilled in
+    // for the very allocations that are behind.
+    //
+    // This is the bug that made a recoverable week read "cannot be finished": the room was computed as
+    // `slackSeconds` — capacity minus reserved minus COMMITTED — and committed is the plan's own spread
+    // of the allocations whose remaining need was being summed. So it compared what's left to do against
+    // what's left after what's left to do. Nothing caught it, because every existing case had one
+    // allocation, where the two definitions agree.
+    do {
+        let m2 = plannerWorld(taskGroups: [1: 10, 2: 20], taskTags: [:])
+        // 60h of need in a 112h week, nothing done, the whole week ahead. Comfortable.
+        let input2 = plannerInput([floor(1, .project(10), hours: 30),
+                                   floor(2, .project(20), hours: 30)], membership: m2)
+        let r = Replan.compute(plan: Planner.plan(input2), input: input2, actuals: [:],
+                               elapsedWeekdays: [], remainingWeekdays: [1, 2, 3, 4, 5, 6, 7])
+        check(approx(r.remainingNeedSeconds / 3600, 60, 0.01), "60h still to do")
+        check(approx(r.remainingCapacitySeconds / 3600, 112, 0.01),
+              "and the whole 112h of the week is available for it, not 112h minus the plan")
+        check(!r.weekIsLost,
+              "so the week is finishable — the old arithmetic called this lost by subtracting the "
+                  + "need from the room before comparing them")
+    }
+
+    // Reserved time IS subtracted, because those hours genuinely aren't available.
+    do {
+        let m2 = plannerWorld(taskGroups: [1: 10], taskTags: [:])
+        let reserved = [Reservation(id: 1, name: "life", secondsPerDay: 10 * 3600)]
+        let input2 = plannerInput([floor(1, .project(10), hours: 50)], reservations: reserved,
+                                  membership: m2)
+        let r = Replan.compute(plan: Planner.plan(input2), input: input2, actuals: [:],
+                               elapsedWeekdays: [], remainingWeekdays: [1, 2, 3, 4, 5, 6, 7])
+        check(approx(r.remainingCapacitySeconds / 3600, 42, 0.01),
+              "6h a day after a 10h reservation is 42h, not 112h")
+        check(r.weekIsLost, "so 50h of need doesn't fit, and that verdict is about real hours")
+    }
+
+    // "Unreachable" is about one allocation's own days, not about losing a race with another. Mixing the
+    // two made everything look impossible whenever the week was merely busy.
+    do {
+        let m2 = plannerWorld(taskGroups: [1: 10, 2: 20], taskTags: [:])
+        let sat = Weekdays(rawValue: 1 << 6)
+        // Two allocations both wanting Saturday, 10h each, on a 16h day.
+        let input2 = plannerInput([floor(1, .project(10), hours: 10, weekdays: sat),
+                                   floor(2, .project(20), hours: 10, weekdays: sat)],
+                                  membership: m2)
+        let plan2 = Planner.plan(input2)
+        let r = Replan.compute(plan: plan2, input: input2, actuals: [:],
+                               elapsedWeekdays: [], remainingWeekdays: [1, 2, 3, 4, 5, 6, 7])
+        check(r.unreachable.isEmpty,
+              "neither is unreachable: each would fit in Saturday on its own")
+        // The two questions live in different places on purpose. `weekIsLost` compares HOURS, and the
+        // week has 112 of them free, so it correctly says nothing is wrong with the total. Whether
+        // those hours fall on days the work is allowed to use is the PLANNER's job, and it flags
+        // Saturday. Answering both in one figure is what made every allocation look impossible
+        // whenever the week was merely busy.
+        check(!r.weekIsLost, "the week has hours to spare in aggregate, so that verdict stays clear")
+        check(plan2.overloadedDays == [7],
+              "and Saturday is flagged as over capacity, which is where the real problem is")
+    }
+
     // How much of today is left, measured against midnight rather than against "how far through the
     // waking day are we" — which needs to know when your day starts, and doesn't.
     do {

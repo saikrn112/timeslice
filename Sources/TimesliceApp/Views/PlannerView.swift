@@ -29,6 +29,9 @@ struct PlannerView: View {
     @State private var actuals: [Int: [Int64: TimeInterval]] = [:]
     /// weekday → seconds tracked against something no allocation covers.
     @State private var unallocated: [Int: TimeInterval] = [:]
+    /// weekday → every tracked second. What a past day's load really was, rather than what it was
+    /// meant to be.
+    @State private var actualTotals: [Int: TimeInterval] = [:]
     @State private var today = 1
     @State private var showReservations = false
     @State private var showAllocations = false
@@ -43,7 +46,8 @@ struct PlannerView: View {
                 if let plan {
                     headline(plan)
                     if let replan { todayCard(plan, replan) }
-                    PlannerMatrix(plan: plan, replan: replan, actuals: actuals, today: today,
+                    PlannerMatrix(plan: plan, replan: replan, actuals: actuals,
+                                  actualTotals: actualTotals, today: today,
                                   colorFor: colorHex(forTarget:), nameFor: name(forTarget:))
                     notes(plan)
                 } else {
@@ -96,10 +100,12 @@ struct PlannerView: View {
                 stat(hours(free), "free", .accentColor)
                 if let replan, replan.remainingNeedSeconds > 60 {
                     divider
-                    stat(hours(replan.remainingNeedSeconds), "left this week",
+                    stat(hours(replan.remainingNeedSeconds), "still to do",
                          replan.weekIsLost ? Self.overColor : .primary)
                     divider
-                    stat(hours(replan.remainingCapacitySeconds), "room left",
+                    // Free hours on the days that are left — catch-up can use any of them, which is
+                    // the whole point of catching up.
+                    stat(hours(replan.remainingCapacitySeconds), "free hours left",
                          replan.weekIsLost ? Self.overColor : .secondary)
                 }
                 Spacer()
@@ -110,9 +116,11 @@ struct PlannerView: View {
     /// The verdict as one clause. The paragraph that used to follow it is gone: what it explained is
     /// visible in the grid, and the numbers beside it carry the arithmetic.
     private func verdictLine(_ plan: Planner) -> String {
+        // Says what the comparison IS. "Not finishable" was a conclusion with its reasoning hidden,
+        // which is exactly the kind of number nobody can argue with or trust.
         if let replan, replan.weekIsLost {
-            return "Not finishable — \(hours(replan.remainingNeedSeconds)) left, "
-                 + "room for \(hours(replan.remainingCapacitySeconds))"
+            return "\(hours(replan.remainingNeedSeconds)) still to do, only "
+                 + "\(hours(replan.remainingCapacitySeconds)) of free hours left in the week"
         }
         switch plan.verdict {
         case .fits: return "The week fits"
@@ -282,6 +290,7 @@ struct PlannerView: View {
 
         var byDay: [Int: [Int64: TimeInterval]] = [:]
         var otherByDay: [Int: TimeInterval] = [:]
+        var totalByDay: [Int: TimeInterval] = [:]
         var weekTotals: [Int64: TimeInterval] = [:]
         for interval in intervals {
             let start = max(interval.start, week.start)
@@ -289,6 +298,7 @@ struct PlannerView: View {
             guard end > start else { continue }
             let seconds = end.timeIntervalSince(start)
             let weekday = cal.component(.weekday, from: start)
+            totalByDay[weekday, default: 0] += seconds
             var claimed = false
             for (id, ids) in idsBySubject where ids.contains(interval.projectID) {
                 byDay[weekday, default: [:]][id, default: 0] += seconds
@@ -301,6 +311,7 @@ struct PlannerView: View {
         }
         actuals = byDay
         unallocated = otherByDay
+        actualTotals = totalByDay
 
         replan = Replan.compute(plan: built, input: input, actuals: weekTotals,
                                 elapsedWeekdays: Array(1..<today),

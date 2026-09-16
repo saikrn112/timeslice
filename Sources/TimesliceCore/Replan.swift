@@ -98,20 +98,29 @@ public struct Replan: Sendable {
                                fractionOfTodayLeft: Double = 1) -> Replan {
         let floors = input.targets.filter { $0.direction == .atLeast }
 
-        /// A day's capacity for planning purposes, with today discounted to what's left of it.
+        /// Hours a day can still give to allocations: waking hours minus the non-negotiables, with
+        /// today discounted to what's left of it.
+        ///
+        /// Reserved time is subtracted; the PLAN is not. That distinction was a real bug: this used
+        /// `slackSeconds`, which is capacity minus reserved minus *committed* — and committed is the
+        /// plan's own spread of the very allocations whose remaining need is being summed. So it
+        /// compared "what's left to do" against "what's left after what's left to do", and declared a
+        /// perfectly recoverable week unfinishable. Catch-up can use any free hour on any remaining
+        /// day; that is the whole point of catching up.
         func usable(_ day: Planner.DayPlan) -> TimeInterval {
+            let free = max(0, day.capacitySeconds - day.reservedSeconds)
             let isToday = day.weekday == remainingWeekdays.first
-            let free = max(0, day.slackSeconds)
             return isToday ? free * max(0, min(1, fractionOfTodayLeft)) : free
         }
 
-        /// What an allocation could still take on a given day: the day's own free time plus whatever
-        /// the plan had already set aside for this very allocation.
+        /// What one allocation could still take on a day, ignoring what other allocations want.
+        ///
+        /// Deliberately not "after the competition": an allocation is *unreachable* only when its own
+        /// days physically cannot hold it, which is a fact about it alone. Whether all of them fit
+        /// together is a different question, answered once at the week level by `weekIsLost` — and
+        /// mixing the two made every allocation look impossible whenever the week was merely busy.
         func roomFor(_ target: Target, on day: Planner.DayPlan) -> TimeInterval {
-            let mine = day.placements.first { $0.targetID == target.id }?.seconds ?? 0
-            let raw = day.capacitySeconds - day.reservedSeconds - (day.committedSeconds - mine)
-            let isToday = day.weekday == remainingWeekdays.first
-            return max(0, isToday ? raw * max(0, min(1, fractionOfTodayLeft)) : raw)
+            usable(day)
         }
 
         var items: [Item] = []
