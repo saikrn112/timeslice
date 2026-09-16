@@ -18,6 +18,7 @@ struct PlannerView: View {
     @State private var targets: [Target] = []
     @State private var reservations: [Reservation] = []
     @State private var plan: Planner?
+    @State private var replan: Replan?
     @State private var showReservations = false
     @State private var showAllocations = false
 
@@ -33,6 +34,7 @@ struct PlannerView: View {
             VStack(alignment: .leading, spacing: 20) {
                 if let plan {
                     answer(plan)
+                    if let replan { restOfWeek(replan) }
                     dayLoads(plan)
                     perAllocation(plan)
                     if !plan.unplaced.isEmpty { problems(plan) }
@@ -133,6 +135,93 @@ struct PlannerView: View {
                  + "is needed against \(hours(free)) free. The range exists because allocations "
                  + "overlap — the same hour can count for a tag and for a project inside it — so it "
                  + "fits only if that sharing is real."
+        }
+    }
+
+    // MARK: - Rest of the week
+
+    /// The backlog, and whether the days left can still absorb it.
+    ///
+    /// This is the block that earns the page a second visit. The plan above answers "was this week
+    /// ever possible"; this answers the question that actually arrives on a Wednesday — a day went
+    /// differently, so is it still recoverable and what does the rest of the week have to carry now.
+    @ViewBuilder
+    private func restOfWeek(_ replan: Replan) -> some View {
+        block("Rest of the week", restSubtitle(replan)) {
+            VStack(alignment: .leading, spacing: 6) {
+                if replan.weekIsLost {
+                    // Said plainly, and said NOW: on Wednesday this is a choice, on Sunday it's only a
+                    // fact.
+                    Text("What's left needs \(hours(replan.remainingNeedSeconds)) and the days "
+                         + "remaining can hold \(hours(replan.remainingCapacitySeconds)). The week "
+                         + "can't be finished as it stands — something has to be cut or moved.")
+                        .font(.callout).foregroundStyle(Self.overColor)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(replan.items.filter { $0.standing != .met }.sorted {
+                    standingRank($0.standing) < standingRank($1.standing)
+                }, id: \.targetID) { item in
+                    HStack(spacing: 8) {
+                        Circle().fill(standingColor(item.standing)).frame(width: 8, height: 8)
+                        Text(item.name).font(.callout).lineLimit(1).truncationMode(.tail)
+                            .frame(width: 150, alignment: .leading).help(item.name)
+                        Text("\(hours(item.doneSeconds)) of \(hours(item.targetSeconds))")
+                            .font(.system(size: 11, design: .monospaced)).monospacedDigit()
+                            .frame(width: 96, alignment: .trailing)
+                        if item.debtSeconds > 60 {
+                            Text("behind \(hours(item.debtSeconds))")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(Self.overColor)
+                                .frame(width: 90, alignment: .leading)
+                        } else {
+                            Text("on pace").font(.system(size: 10))
+                                .foregroundStyle(.green)
+                                .frame(width: 90, alignment: .leading)
+                        }
+                        if let per = item.requiredPerRemainingDay, item.remainingSeconds > 60 {
+                            Text("needs \(hours(per))/day × \(item.remainingClaimedDays)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(item.standing == .unreachable ? Self.overColor
+                                                                               : .primary)
+                                .frame(width: 128, alignment: .leading)
+                        } else {
+                            Text("").frame(width: 128)
+                        }
+                        Text(item.standing == .unreachable ? item.adviceIfUnreachable : "")
+                            .font(.system(size: 10)).foregroundStyle(Self.overColor.opacity(0.9))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+        }
+    }
+
+    private func restSubtitle(_ replan: Replan) -> String {
+        let lost = replan.unreachable.count
+        if lost > 0 {
+            return "\(lost) can no longer be finished this week"
+        }
+        if replan.totalDebtSeconds > 60 {
+            return "behind by \(hours(replan.totalDebtSeconds)) in total, still recoverable"
+        }
+        return "nothing behind"
+    }
+
+    private func standingRank(_ s: Replan.Standing) -> Int {
+        switch s {
+        case .unreachable: return 0
+        case .recoverable: return 1
+        case .onTrack: return 2
+        case .met: return 3
+        }
+    }
+
+    private func standingColor(_ s: Replan.Standing) -> Color {
+        switch s {
+        case .unreachable: return Self.overColor
+        case .recoverable: return .orange
+        case .onTrack, .met: return .green
         }
     }
 
@@ -331,10 +420,43 @@ struct PlannerView: View {
         let tagIDsByTask = (try? store.effectiveTagIDsByTask()) ?? [:]
         var names: [Int64: String] = [:]
         for t in targets { names[t.id] = name(for: t, tasks: tasks) }
-        plan = Planner.plan(Planner.Input(
-            targets: targets, reservations: reservations,
-            membership: SubjectMembership(tasks: tasks, tagIDsByTask: tagIDsByTask),
-            names: names, wakingSecondsPerDay: settings.wakingSeconds))
+        let membership = SubjectMembership(tasks: tasks, tagIDsByTask: tagIDsByTask)
+        let input = Planner.Input(targets: targets, reservations: reservations,
+                                  membership: membership, names: names,
+                                  wakingSecondsPerDay: settings.wakingSeconds)
+        let built = Planner.plan(input)
+        plan = built
+
+        // The backlog needs this week's actuals per allocation. Attribution goes through the same
+        // `SubjectMembership` the planner uses, so "which hours count for this allocation" has one
+        // answer rather than two that can drift.
+        let cal = Calendar.current
+        let now = Date()
+        guard let week = cal.dateInterval(of: .weekOfYear, for: now) else { replan = nil; return }
+        let intervals = (try? store.intervals(from: week.start, to: week.end)) ?? []
+        var actuals: [Int64: TimeInterval] = [:]
+        for target in targets where target.direction == .atLeast {
+            let ids = membership.taskIDs(for: target.subject)
+            actuals[target.id] = intervals
+                .filter { ids.contains($0.projectID) }
+                .reduce(0.0) { sum, interval in
+                    let end = min(interval.end ?? now, week.end)
+                    let start = max(interval.start, week.start)
+                    return sum + max(0, end.timeIntervalSince(start))
+                }
+        }
+
+        // Today counts as remaining — there are still hours in it — and the elapsed list is the days
+        // strictly before it.
+        let todayWeekday = cal.component(.weekday, from: now)
+        let elapsed = (1..<todayWeekday).map { $0 }
+        let remaining = (todayWeekday...7).map { $0 }
+        // How much of today is left, so a replan at 9pm doesn't call the evening recoverable.
+        let fractionLeft = Replan.fractionOfDayLeft(now: now, wakingSeconds: settings.wakingSeconds,
+                                                   calendar: cal)
+        replan = Replan.compute(plan: built, input: input, actuals: actuals,
+                                elapsedWeekdays: elapsed, remainingWeekdays: remaining,
+                                fractionOfTodayLeft: fractionLeft)
     }
 
     private func name(for target: Target, tasks: [Project]? = nil) -> String {

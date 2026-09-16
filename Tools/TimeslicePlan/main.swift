@@ -90,6 +90,43 @@ do {
             print("  \(name) ≤ \(hrs(c.seconds)) per \(c.period.rawValue)")
         }
     }
+    // The backlog, from this week's actuals — the same computation the page shows.
+    let cal = Calendar.current
+    let now = Date()
+    if let week = cal.dateInterval(of: .weekOfYear, for: now) {
+        let intervals = try store.intervals(from: week.start, to: week.end)
+        var actuals: [Int64: TimeInterval] = [:]
+        for t in targets where t.direction == .atLeast {
+            let ids = membership.taskIDs(for: t.subject)
+            actuals[t.id] = intervals.filter { ids.contains($0.projectID) }.reduce(0.0) { sum, i in
+                let end = min(i.end ?? now, week.end), start = max(i.start, week.start)
+                return sum + max(0, end.timeIntervalSince(start))
+            }
+        }
+        let today = cal.component(.weekday, from: now)
+        let fractionLeft = Replan.fractionOfDayLeft(now: now, wakingSeconds: wakingHours * 3600,
+                                                    calendar: cal)
+        let replan = Replan.compute(plan: plan, input: Planner.Input(
+                targets: targets, reservations: reservations, membership: membership, names: names,
+                wakingSecondsPerDay: wakingHours * 3600),
+            actuals: actuals, elapsedWeekdays: Array(1..<today),
+            remainingWeekdays: Array(today...7), fractionOfTodayLeft: fractionLeft)
+
+        print("")
+        print("rest of the week (\(dayNames[today - 1]) onwards, "
+              + "\(Int(fractionLeft * 100))% of today left):")
+        print("  still needed \(hrs(replan.remainingNeedSeconds))"
+              + "  ·  days left can hold \(hrs(replan.remainingCapacitySeconds))"
+              + (replan.weekIsLost ? "  ·  WEEK CANNOT BE FINISHED" : ""))
+        for item in replan.items.sorted(by: { $0.debtSeconds > $1.debtSeconds }) {
+            let debt = item.debtSeconds > 60 ? "behind \(hrs(item.debtSeconds))" : "on pace"
+            let per = item.requiredPerRemainingDay.map { "\(hrs($0))/day" } ?? "no days left"
+            print("  \(item.name): \(hrs(item.doneSeconds)) of \(hrs(item.targetSeconds))"
+                  + "  \(debt)  needs \(per) × \(item.remainingClaimedDays)  [\(item.standing)]")
+            if !item.adviceIfUnreachable.isEmpty { print("        → \(item.adviceIfUnreachable)") }
+        }
+    }
+
     print("")
     // Nested allocations are skipped: they don't compete for capacity, so their ceiling is the whole
     // week and saying so is noise.

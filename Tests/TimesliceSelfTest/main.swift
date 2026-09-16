@@ -2230,6 +2230,149 @@ func testPlannerRealShape() {
           "and deep technical creative as inside recon paper")
 }
 
+// MARK: - Backlog and replanning
+
+func testReplan() {
+    print("Replan:")
+    let m = plannerWorld(taskGroups: [1: 10, 2: 20], taskTags: [:])
+    // 10h a week on all seven days, so ~1.43h a day.
+    let target = floor(1, .project(10), hours: 10)
+    let input = plannerInput([target], membership: m)
+    let plan = Planner.plan(input)
+
+    // Wednesday, with Sunday to Tuesday gone and nothing done. Three days' worth is owed.
+    do {
+        let r = Replan.compute(plan: plan, input: input, actuals: [:],
+                               elapsedWeekdays: [1, 2, 3], remainingWeekdays: [4, 5, 6, 7])
+        let item = r.items.first!
+        check(approx(item.expectedByNowSeconds / 3600, 30.0 / 7, 0.05),
+              "three of seven days elapsed means three days' worth was expected")
+        check(approx(item.debtSeconds / 3600, 30.0 / 7, 0.05), "and none of it was done, so that's the backlog")
+        check(item.remainingClaimedDays == 4, "four of its days are left")
+        check(approx((item.requiredPerRemainingDay ?? 0) / 3600, 2.5, 0.01),
+              "so finishing needs 2.5h a day rather than the original 1.43h")
+        check(item.standing == .recoverable, "which those days can hold, so it's still recoverable")
+    }
+
+    // Being ahead is not a backlog. An allocation with more done than expected owes nothing.
+    do {
+        let r = Replan.compute(plan: plan, input: input, actuals: [1: 8 * 3600],
+                               elapsedWeekdays: [1, 2, 3], remainingWeekdays: [4, 5, 6, 7])
+        check(r.items.first?.debtSeconds == 0, "ahead of schedule is not a debt")
+        check(r.items.first?.standing == .onTrack, "and reads as on track")
+        check(approx((r.items.first?.requiredPerRemainingDay ?? 0) / 3600, 0.5, 0.01),
+              "with only the remainder left to spread")
+    }
+
+    // Met, so nothing is owed at all.
+    do {
+        let r = Replan.compute(plan: plan, input: input, actuals: [1: 10 * 3600],
+                               elapsedWeekdays: [1, 2, 3], remainingWeekdays: [4, 5, 6, 7])
+        check(r.items.first?.standing == .met, "a finished allocation is met, not on track")
+        check(r.items.first?.remainingSeconds == 0, "with nothing remaining")
+    }
+
+    // The point of the whole thing: say "already lost" on Wednesday, not on Sunday.
+    do {
+        // 60h a week, nothing done, three days left. 20h a day against a 16h day is not happening.
+        let heavy = floor(1, .project(10), hours: 60)
+        let heavyInput = plannerInput([heavy], membership: m)
+        let r = Replan.compute(plan: Planner.plan(heavyInput), input: heavyInput, actuals: [:],
+                               elapsedWeekdays: [1, 2, 3, 4], remainingWeekdays: [5, 6, 7])
+        let item = r.items.first!
+        check(item.standing == .unreachable,
+              "60h with three 16h days left is unreachable, and saying so now leaves a choice")
+        check(item.adviceIfUnreachable.contains("drop it to"),
+              "and the advice names the figure that would be reachable")
+        check(r.weekIsLost, "the week as a whole can't absorb what's left either")
+    }
+
+    // A weekdays-only allocation owes NOTHING over a weekend. Charging it for days it never claimed is
+    // how a planner tells you you're behind when you aren't.
+    do {
+        let weekdayOnly = floor(1, .project(10), hours: 10, weekdays: .weekdaysOnly)
+        let wInput = plannerInput([weekdayOnly], membership: m)
+        let r = Replan.compute(plan: Planner.plan(wInput), input: wInput, actuals: [:],
+                               elapsedWeekdays: [1], remainingWeekdays: [2, 3, 4, 5, 6, 7])
+        check(r.items.first?.expectedByNowSeconds == 0,
+              "after only Sunday, a Monday-to-Friday allocation is not behind")
+        check(r.items.first?.debtSeconds == 0, "so there is no backlog to report")
+        check(r.items.first?.remainingClaimedDays == 5, "and all five of its days are still to come")
+    }
+
+    // No days left at all: unreachable for a reason worth stating differently.
+    do {
+        let weekdayOnly = floor(1, .project(10), hours: 10, weekdays: .weekdaysOnly)
+        let wInput = plannerInput([weekdayOnly], membership: m)
+        let r = Replan.compute(plan: Planner.plan(wInput), input: wInput, actuals: [1: 3 * 3600],
+                               elapsedWeekdays: [1, 2, 3, 4, 5, 6], remainingWeekdays: [7])
+        check(r.items.first?.standing == .unreachable, "Saturday is not one of its days")
+        check(r.items.first?.adviceIfUnreachable.contains("none of its days are left") == true,
+              "and the advice says so rather than suggesting a smaller number")
+    }
+
+    // Late in the day, only part of today is left. A replan at 9pm that assumed a full day would call
+    // an evening recoverable after it had gone.
+    do {
+        let r = Replan.compute(plan: plan, input: input, actuals: [:],
+                               elapsedWeekdays: [1, 2, 3, 4, 5, 6], remainingWeekdays: [7],
+                               fractionOfTodayLeft: 0.1)
+        check(r.items.first?.standing == .unreachable,
+              "10h owed with a tenth of one day left is unreachable")
+        let full = Replan.compute(plan: plan, input: input, actuals: [:],
+                                  elapsedWeekdays: [1, 2, 3, 4, 5, 6], remainingWeekdays: [7],
+                                  fractionOfTodayLeft: 1)
+        check(full.items.first?.standing == .recoverable,
+              "whereas a whole 16h day could technically still hold it")
+    }
+
+    // How much of today is left, measured against midnight rather than against "how far through the
+    // waking day are we" — which needs to know when your day starts, and doesn't.
+    do {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "America/New_York")!
+        let waking: TimeInterval = 16 * 3600
+        let at = { (h: Int) in c.date(from: DateComponents(year: 2026, month: 9, day: 16, hour: h))! }
+        // Early: more time before midnight than a waking day is long, so today is a whole day — it
+        // doesn't become bigger than a day because you got up early.
+        check(Replan.fractionOfDayLeft(now: at(6), wakingSeconds: waking, calendar: c) == 1,
+              "at 6am today counts as a full day, clamped at one")
+        // 8pm: four hours to midnight, a quarter of a waking day.
+        check(approx(Replan.fractionOfDayLeft(now: at(20), wakingSeconds: waking, calendar: c),
+                     0.25, 0.01),
+              "at 8pm a quarter of a waking day is left")
+        // The bug this replaces: dividing time-since-midnight by waking hours reported nothing left
+        // from mid-afternoon, which called every allocation unreachable for the rest of the day.
+        check(Replan.fractionOfDayLeft(now: at(15), wakingSeconds: waking, calendar: c) > 0.5,
+              "and at 3pm there is still most of a working evening, not zero")
+    }
+
+    // Nested allocations are listed but not added to the total, or the same hours count twice.
+    do {
+        let m2 = plannerWorld(taskGroups: [1: nil, 2: nil], taskTags: [1: [99], 2: [99]])
+        let outer = floor(1, .tag(99), hours: 20)
+        let inner = floor(2, .task(1), hours: 5)
+        let input2 = plannerInput([outer, inner], membership: m2)
+        let r = Replan.compute(plan: Planner.plan(input2), input: input2, actuals: [:],
+                               elapsedWeekdays: [], remainingWeekdays: [1, 2, 3, 4, 5, 6, 7])
+        check(r.items.count == 2, "both are listed — you can be on pace for the tag and behind on the "
+                                  + "piece of it you care about")
+        check(approx(r.remainingNeedSeconds / 3600, 20, 0.01),
+              "but the total counts 20h, not 25h: the inner hours are already inside the outer")
+    }
+
+    // The replan itself: the remaining days carry the catch-up, and only the days still to come appear.
+    do {
+        let r = Replan.compute(plan: plan, input: input, actuals: [:],
+                               elapsedWeekdays: [1, 2, 3], remainingWeekdays: [4, 5, 6, 7])
+        check(r.replannedDays.map(\.weekday) == [4, 5, 6, 7], "only the days left are replanned")
+        check(r.replannedDays.allSatisfy { day in
+                approx(day.committedSeconds / 3600, 2.5, 0.01)
+              },
+              "each carrying the catch-up figure rather than the original 1.43h")
+    }
+}
+
 // MARK: - Focus block boundary
 
 func testDeepBlockBoundary() {
@@ -4908,6 +5051,7 @@ do {
     testPlannerVerdicts()
     testPlannerFrontier()
     testPlannerRealShape()
+    testReplan()
     testDeepBlockBoundary()
     testAllocationWeekdays()
     testEditingKeepsWeekdays()
