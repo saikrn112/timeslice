@@ -1768,6 +1768,304 @@ func testTaskTags() {
     }
 }
 
+// MARK: - Planner
+
+/// Builds the membership for a made-up world: `tasks` maps a task id to its group, `tags` maps a
+/// task id to the tags it carries.
+func plannerWorld(taskGroups: [Int64: Int64?], taskTags: [Int64: Set<Int64>]) -> SubjectMembership {
+    let tasks = taskGroups.map { id, group in
+        Project(id: id, name: "t\(id)", colorHex: "#fff", sortOrder: 0, archived: false,
+                taskProjectID: group)
+    }
+    return SubjectMembership(tasks: tasks, tagIDsByTask: taskTags)
+}
+
+func floor(_ id: Int64, _ subject: TargetSubject, hours: Double,
+           period: Target.Period = .week, weekdays: Weekdays = .all,
+           shape: TargetShape = .flexible) -> Target {
+    Target(id: id, subject: subject, seconds: hours * 3600, direction: .atLeast,
+           period: period, weekdays: weekdays, shape: shape)
+}
+
+func plannerInput(_ targets: [Target], reservations: [Reservation] = [],
+                  membership: SubjectMembership, wakingHours: Double = 16) -> Planner.Input {
+    Planner.Input(targets: targets, reservations: reservations, membership: membership,
+                  names: Dictionary(uniqueKeysWithValues: targets.map { ($0.id, "a\($0.id)") }),
+                  wakingSecondsPerDay: wakingHours * 3600)
+}
+
+func testSubjectMembership() {
+    print("Subject membership:")
+    // 1,2 in group 10; 3 in the Inbox. 1 and 3 tagged 99.
+    let m = plannerWorld(taskGroups: [1: 10, 2: 10, 3: nil], taskTags: [1: [99], 3: [99]])
+
+    check(m.taskIDs(for: .task(2)) == [2], "a task is itself")
+    check(m.taskIDs(for: .project(10)) == [1, 2], "a project is its tasks")
+    check(m.taskIDs(for: .tag(99)) == [1, 3], "a tag is every task carrying it")
+
+    // The two cases `TargetSubject` cannot express, which the metrics highlight relies on. They were
+    // in the view before the hoist, so they need pinning here or the move could quietly lose them.
+    check(m.taskIDs(inGroup: nil) == [3], "nil group is the Inbox, not every task")
+    check(m.taskIDs(withTag: nil) == [2], "nil tag is the untagged bucket — task 2 carries none")
+
+    check(m.relation(.task(1), .project(10)) == .containedIn, "a task inside its project")
+    check(m.relation(.project(10), .task(1)) == .contains, "and the reverse")
+    check(m.relation(.task(2), .tag(99)) == .disjoint, "an untagged task is disjoint from the tag")
+    check(m.relation(.project(10), .tag(99)) == .partial,
+          "a project and a tag sharing one task of two overlap partially — the case that makes the "
+              + "bounds a range")
+}
+
+func testPlannerBounds() {
+    print("Planner bounds:")
+
+    // Disjoint floors simply add up: two separate things each need their own hours.
+    do {
+        let m = plannerWorld(taskGroups: [1: 10, 2: 20], taskTags: [:])
+        let (lo, hi) = Planner.bounds(floors: [floor(1, .project(10), hours: 7),
+                                               floor(2, .project(20), hours: 5)], membership: m)
+        check(approx(lo / 3600, 12, 0.01) && approx(hi / 3600, 12, 0.01),
+              "disjoint floors add to the same lower and upper bound")
+    }
+
+    // Nesting: a task inside a tag. Its hours are already inside the tag's, so the honest lower
+    // bound is the tag alone — adding them would count the same work twice.
+    do {
+        let m = plannerWorld(taskGroups: [1: nil, 2: nil], taskTags: [1: [99], 2: [99]])
+        let tag = floor(1, .tag(99), hours: 35)
+        let inner = floor(2, .task(1), hours: 2)
+        let (lo, hi) = Planner.bounds(floors: [tag, inner], membership: m)
+        check(approx(lo / 3600, 35, 0.01),
+              "a floor inside another contributes nothing to the lower bound")
+        check(approx(hi / 3600, 37, 0.01),
+              "while the upper bound is the naive sum, which is what no-sharing would cost")
+    }
+
+    // Partial overlap: neither contains the other, so they cannot both be in a disjoint family.
+    do {
+        let m = plannerWorld(taskGroups: [1: 10, 2: 10, 3: nil],
+                             taskTags: [2: [99], 3: [99]])
+        let group = floor(1, .project(10), hours: 10)     // tasks 1,2
+        let tag = floor(2, .tag(99), hours: 35)           // tasks 2,3
+        let (lo, hi) = Planner.bounds(floors: [group, tag], membership: m)
+        check(approx(lo / 3600, 35, 0.01), "the larger of two partly-overlapping floors is the bound")
+        check(lo < hi, "and the lower bound sits below the naive sum, as a range should")
+    }
+
+    // A ceiling is not work to do.
+    do {
+        let m = plannerWorld(taskGroups: [1: 10], taskTags: [:])
+        let ceiling = Target(id: 9, subject: .project(10), seconds: 3600, direction: .atMost,
+                             period: .day)
+        let p = Planner.plan(plannerInput([ceiling], membership: m))
+        check(p.requiredUpperSeconds == 0, "an atMost allocation never consumes capacity")
+        check(p.ceilings.count == 1, "but it is still reported, so it can be shown")
+        check(p.verdict == .fits, "a week of nothing but ceilings fits trivially")
+    }
+}
+
+func testPlannerNormalisation() {
+    print("Planner period normalisation:")
+    let m = plannerWorld(taskGroups: [1: 10], taskTags: [:])
+    check(approx(floor(1, .project(10), hours: 7, period: .week).weeklySeconds / 3600, 7, 0.01),
+          "a weekly floor is itself")
+    check(approx(floor(1, .project(10), hours: 30, period: .month).weeklySeconds / 3600, 7, 0.01),
+          "a 30h month is 7h a week on the app's nominal month")
+    // A DAILY floor is per claimed day, so the weekday mask decides how many of them there are.
+    check(approx(floor(1, .project(10), hours: 1, period: .day).weeklySeconds / 3600, 7, 0.01),
+          "1h a day across all seven days is 7h a week")
+    check(approx(floor(1, .project(10), hours: 1, period: .day,
+                       weekdays: .weekdaysOnly).weeklySeconds / 3600, 5, 0.01),
+          "and 1h a day Monday to Friday is 5h — ignoring the mask would have said 7")
+    _ = m
+}
+
+func testPlannerPlacement() {
+    print("Planner placement:")
+
+    // Weekday spreading: a Mon-Fri floor never lands on the weekend.
+    do {
+        let m = plannerWorld(taskGroups: [1: 10], taskTags: [:])
+        let p = Planner.plan(plannerInput([floor(1, .project(10), hours: 10,
+                                                 weekdays: .weekdaysOnly)], membership: m))
+        let weekend = p.days.filter { $0.weekday == 1 || $0.weekday == 7 }
+        check(weekend.allSatisfy { $0.committedSeconds == 0 },
+              "a Monday-to-Friday floor puts nothing on Saturday or Sunday")
+        check(approx(p.days.reduce(0) { $0 + $1.committedSeconds } / 3600, 10, 0.01),
+              "and all ten hours are placed somewhere")
+        check(p.unplaced.isEmpty, "with nothing left over")
+    }
+
+    // Narrow weekdays can make a total impossible before any competition.
+    do {
+        let m = plannerWorld(taskGroups: [1: 10], taskTags: [:])
+        let oneDay = Weekdays(rawValue: 1 << 1)          // Monday only
+        let p = Planner.plan(plannerInput([floor(1, .project(10), hours: 20, weekdays: oneDay)],
+                                          membership: m))
+        check(p.unplaced.first?.reason == .weekdaysTooNarrow,
+              "20h on a single 16h day is refused for the right reason")
+        check(p.unplaced.first?.wouldFitIf.contains("more days") == true,
+              "and the suggestion is to claim more days")
+    }
+
+    // The habit case, which is the question that started this feature.
+    do {
+        let m = plannerWorld(taskGroups: [1: 10, 2: 20], taskTags: [:])
+        // 15h of the 16h day is reserved, leaving one hour free everywhere.
+        let reserved = [Reservation(id: 1, name: "life", secondsPerDay: 15 * 3600)]
+        let habit = floor(1, .project(10), hours: 7, shape: .everyDay(minSeconds: 3600))
+        let p = Planner.plan(plannerInput([habit], reservations: reserved, membership: m))
+        check(p.unplaced.isEmpty, "1h a day fits when exactly 1h a day is free")
+
+        // Now take that hour away on two days by reserving more.
+        let tight = [Reservation(id: 1, name: "life", secondsPerDay: 15 * 3600),
+                     Reservation(id: 2, name: "tuesdays", weekdays: Weekdays(rawValue: 1 << 2),
+                                 secondsPerDay: 3600)]
+        let p2 = Planner.plan(plannerInput([habit], reservations: tight, membership: m))
+        check(p2.unplaced.first?.reason == .shapeImpossible,
+              "and is impossible as a habit when one day has no hour to give")
+        check(p2.unplaced.first?.wouldFitIf.contains("of 7 days") == true,
+              "the explanation says how many days it does fit on")
+    }
+
+    // Sessions are not shredded into fragments.
+    do {
+        let m = plannerWorld(taskGroups: [1: 10], taskTags: [:])
+        // 3h free per day, and two 3h sessions asked for.
+        let reserved = [Reservation(id: 1, name: "life", secondsPerDay: 13 * 3600)]
+        let target = floor(1, .project(10), hours: 6, shape: .sessions(count: 2, minSeconds: 3 * 3600))
+        let p = Planner.plan(plannerInput([target], reservations: reserved, membership: m))
+        check(p.unplaced.isEmpty, "two 3h sessions fit into days with 3h free")
+        let daysUsed = p.days.filter { $0.committedSeconds > 0 }
+        check(daysUsed.count == 2, "landing on exactly two days, not spread over six")
+        check(daysUsed.allSatisfy { approx($0.committedSeconds / 3600, 3, 0.01) },
+              "each taking a whole 3h block")
+    }
+
+    // A shape that contradicts its own total.
+    do {
+        let m = plannerWorld(taskGroups: [1: 10], taskTags: [:])
+        let target = floor(1, .project(10), hours: 4, shape: .sessions(count: 3, minSeconds: 2 * 3600))
+        let p = Planner.plan(plannerInput([target], membership: m))
+        check(p.unplaced.first?.reason == .shapeImpossible,
+              "three 2h sessions cannot come out of a 4h total")
+    }
+}
+
+func testPlannerReservations() {
+    print("Planner reservations:")
+    let m = plannerWorld(taskGroups: [1: 10], taskTags: [:])
+
+    // Reservations claim their days first, and only their days.
+    let commute = Reservation(id: 1, name: "commute", weekdays: .weekdaysOnly, secondsPerDay: 2 * 3600)
+    let p = Planner.plan(plannerInput([], reservations: [commute], membership: m))
+    check(approx(p.reservedSeconds / 3600, 10, 0.01), "2h on five weekdays is 10h reserved")
+    check(p.days.first { $0.weekday == 1 }?.reservedSeconds == 0, "and nothing on Sunday")
+
+    // A reservation bigger than the day is capped rather than producing negative slack, which would
+    // read as an allocation problem instead of the data-entry mistake it is.
+    let silly = Reservation(id: 2, name: "impossible", secondsPerDay: 30 * 3600)
+    let p2 = Planner.plan(plannerInput([], reservations: [silly], membership: m))
+    check(p2.days.allSatisfy { $0.reservedSeconds == $0.capacitySeconds },
+          "a reservation longer than the waking day is capped at it")
+    check(p2.days.allSatisfy { $0.slackSeconds == 0 }, "leaving zero slack, not negative slack")
+}
+
+func testPlannerVerdicts() {
+    print("Planner verdicts:")
+    let m = plannerWorld(taskGroups: [1: 10, 2: 20], taskTags: [:])
+
+    // Comfortably inside: 20h of a 112h week.
+    let easy = Planner.plan(plannerInput([floor(1, .project(10), hours: 20)], membership: m))
+    check(easy.verdict == .fits, "20h in a 112h week fits")
+
+    // Beyond even the disjoint lower bound.
+    let heavy = Planner.plan(plannerInput([floor(1, .project(10), hours: 60),
+                                           floor(2, .project(20), hours: 60)], membership: m))
+    check(heavy.verdict == .oversubscribed,
+          "120h of disjoint floors in a 112h week is oversubscribed whatever the overlap")
+
+    // Between the bounds: the pair overlaps, so whether it fits depends on how much they share.
+    do {
+        let m2 = plannerWorld(taskGroups: [1: 10, 2: 10, 3: nil], taskTags: [2: [99], 3: [99]])
+        let group = floor(1, .project(10), hours: 60)     // tasks 1,2
+        let tag = floor(2, .tag(99), hours: 60)           // tasks 2,3
+        let p = Planner.plan(plannerInput([group, tag], membership: m2))
+        check(p.requiredLowerSeconds / 3600 == 60 && p.requiredUpperSeconds / 3600 == 120,
+              "the bounds straddle the 112h capacity")
+        check(p.verdict == .uncertain,
+              "so the verdict says it depends on the overlap rather than inventing an answer")
+    }
+
+    // Nesting is named, so a commitment that is already counted can be shown as such.
+    do {
+        let m3 = plannerWorld(taskGroups: [1: nil, 2: nil], taskTags: [1: [99], 2: [99]])
+        let p = Planner.plan(plannerInput([floor(1, .tag(99), hours: 35),
+                                           floor(2, .task(1), hours: 2)], membership: m3))
+        check(p.nestings.count == 1, "the inner allocation is reported as nested")
+        check(p.nestings.first?.innerName == "a2" && p.nestings.first?.outerName == "a1",
+              "naming which sits inside which")
+    }
+}
+
+func testPlannerFrontier() {
+    print("Planner frontier:")
+    let m = plannerWorld(taskGroups: [1: 10, 2: 20], taskTags: [:])
+    // 4h free a day, so 28h a week for everything.
+    let reserved = [Reservation(id: 1, name: "life", secondsPerDay: 12 * 3600)]
+    let fixed = floor(1, .project(10), hours: 20)
+    let flexible = floor(2, .project(20), hours: 4)
+    let input = plannerInput([fixed, flexible], reservations: reserved, membership: m)
+
+    let ceiling = Planner.frontier(for: 2, in: input)
+    check(approx(ceiling / 3600, 8, 0.3),
+          "with 28h free and 20h taken, the other allocation tops out near 8h")
+
+    // The frontier must agree with the planner, which is the point of bisecting through it.
+    let at = Planner.plan(plannerInput([fixed, flexible.withWeeklySeconds(ceiling)],
+                                       reservations: reserved, membership: m))
+    check(at.unplaced.isEmpty, "an allocation set to its computed ceiling packs")
+    let over = Planner.plan(plannerInput([fixed, flexible.withWeeklySeconds(ceiling + 3600)],
+                                         reservations: reserved, membership: m))
+    check(!over.unplaced.isEmpty, "and one hour more does not")
+}
+
+func testPlannerRealShape() {
+    print("Planner against the real allocation shape:")
+    // The live database, reduced to its structure: office covers most work; KT sits inside office;
+    // vllm partly overlaps it; the rest are separate.
+    //  tasks 1-3 = office-tagged work, 3 = presentation for KT, 4 = the other vllm task,
+    //  5 = recon, 6 = deep technical creative (inside recon), 7 = family, 8 = gym, 9 = stonks
+    let m = plannerWorld(
+        taskGroups: [1: 100, 2: 100, 3: nil, 4: 100, 5: 200, 6: 200, 7: nil, 8: nil, 9: nil],
+        taskTags: [1: [1], 2: [1], 3: [1], 7: [2]])
+    let tueFri = Weekdays(rawValue: (1 << 2) | (1 << 5))
+    let weekends = Weekdays(rawValue: (1 << 0) | (1 << 6))
+    let monTue = Weekdays(rawValue: (1 << 1) | (1 << 2))
+    let targets = [
+        floor(1, .tag(1), hours: 35, weekdays: .weekdaysOnly),   // office
+        floor(2, .project(100), hours: 10),                      // vllm — partial overlap with office
+        floor(3, .project(200), hours: 7),                       // recon paper
+        floor(4, .tag(2), hours: 7),                             // family
+        floor(5, .task(8), hours: 4, weekdays: tueFri),          // gym
+        floor(6, .task(9), hours: 2, weekdays: weekends),        // stonks
+        floor(7, .task(6), hours: 4),                            // deep technical creative ⊂ recon
+        floor(8, .task(3), hours: 2, weekdays: monTue),           // KT ⊂ office
+    ]
+    let p = Planner.plan(plannerInput(targets, membership: m))
+
+    check(approx(p.requiredUpperSeconds / 3600, 71, 0.01),
+          "the naive sum is the 71h/week the SQL reported")
+    // office 35 + recon 7 + family 7 + gym 4 + stonks 2 = 55. vllm overlaps office and KT is inside
+    // it, deep-technical-creative is inside recon, so none of those three join the disjoint family.
+    check(approx(p.requiredLowerSeconds / 3600, 55, 0.01),
+          "and the disjoint lower bound is 55h — the figure that makes the verdict safe to state")
+    check(p.nestings.contains { $0.innerName == "a8" && $0.outerName == "a1" },
+          "KT is reported as already inside office")
+    check(p.nestings.contains { $0.innerName == "a7" && $0.outerName == "a3" },
+          "and deep technical creative as inside recon paper")
+}
+
 // MARK: - Focus block boundary
 
 func testDeepBlockBoundary() {
@@ -4434,6 +4732,14 @@ do {
     testDeviceLanes()
     testFeedbackPlatform()
     testTaskTags()
+    testSubjectMembership()
+    testPlannerBounds()
+    testPlannerNormalisation()
+    testPlannerPlacement()
+    testPlannerReservations()
+    testPlannerVerdicts()
+    testPlannerFrontier()
+    testPlannerRealShape()
     testDeepBlockBoundary()
     testAllocationWeekdays()
     testEditingKeepsWeekdays()

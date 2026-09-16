@@ -141,6 +141,59 @@ public struct Weekdays: Hashable, Sendable {
     }
 }
 
+/// How an allocation's total wants to be spread across the days it claims.
+///
+/// A total is not a plan. 7h a week can be an hour every day — a habit — or two long sessions, and
+/// those are different requests: the first needs an hour free on all seven days, the second needs
+/// two days with three unbroken hours. They can succeed and fail independently, so the planner can't
+/// answer "does this fit" without knowing which was meant.
+///
+/// `flexible` is what every allocation has always been, and stays the default so nothing changes for
+/// an allocation nobody has shaped.
+public enum TargetShape: Sendable, Hashable {
+    /// Any mix across the claimed days.
+    case flexible
+    /// At least this much on EACH claimed day. The habit case.
+    case everyDay(minSeconds: TimeInterval)
+    /// This many unbroken blocks of at least this long. The deep-work case.
+    case sessions(count: Int, minSeconds: TimeInterval)
+
+    /// Stored as three columns rather than a blob, so a peer on an older build reads the parts it
+    /// understands and SQL can be inspected by eye.
+    public var kindRaw: Int {
+        switch self {
+        case .flexible: return 0
+        case .everyDay: return 1
+        case .sessions: return 2
+        }
+    }
+
+    public var minSeconds: TimeInterval {
+        switch self {
+        case .flexible: return 0
+        case .everyDay(let m): return m
+        case .sessions(_, let m): return m
+        }
+    }
+
+    public var count: Int {
+        switch self {
+        case .sessions(let n, _): return n
+        default: return 0
+        }
+    }
+
+    /// Rebuilt from the columns. An unknown kind — a newer build's shape — reads as `flexible`
+    /// rather than being dropped or crashing: the allocation still works, it just isn't shaped here.
+    public init(kindRaw: Int, minSeconds: TimeInterval, count: Int) {
+        switch kindRaw {
+        case 1: self = .everyDay(minSeconds: max(0, minSeconds))
+        case 2: self = .sessions(count: max(1, count), minSeconds: max(0, minSeconds))
+        default: self = .flexible
+        }
+    }
+}
+
 public struct Target: Identifiable, Hashable, Sendable {
     public enum Direction: String, Sendable, CaseIterable {
         case atLeast, atMost
@@ -181,13 +234,16 @@ public struct Target: Identifiable, Hashable, Sendable {
     /// counts towards the total. Saying "I do this on weekdays" is a statement about how the hours
     /// are meant to be spread, not a refusal to count Sunday's work.
     public let weekdays: Weekdays
+    /// How the total wants to be spread. Read by the planner; the metrics page ignores it, because
+    /// how you MEANT to spread the hours doesn't change how many you recorded.
+    public let shape: TargetShape
 
     public var isLive: Bool { completedAt == nil }
 
     public init(id: Int64, subject: TargetSubject, seconds: TimeInterval,
                 direction: Direction, period: Period,
                 createdAt: Date = Date(), completedAt: Date? = nil, sortOrder: Int = 0,
-                weekdays: Weekdays = .all) {
+                weekdays: Weekdays = .all, shape: TargetShape = .flexible) {
         self.id = id
         self.subject = subject
         self.seconds = seconds
@@ -197,6 +253,7 @@ public struct Target: Identifiable, Hashable, Sendable {
         self.completedAt = completedAt
         self.sortOrder = sortOrder
         self.weekdays = weekdays
+        self.shape = shape
     }
 }
 

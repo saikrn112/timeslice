@@ -482,19 +482,19 @@ struct MetricsView: View {
         return out
     }
 
+    /// Thin adapter over Core's `SubjectMembership`, which owns the set logic — including what
+    /// "Inbox" and "untagged" mean — so the planner and this highlight can't disagree about which
+    /// tasks a tag covers.
     private func taskIDs(for focus: TimelineFocus) -> Set<Int64> {
         switch focus {
-        case .task(let id):
-            return [id]
-        case .group(let gid):
-            return Set(projectLookup.values.filter { $0.taskProjectID == gid }.map(\.id))
-        case .tag(let tid):
-            guard let tid else {
-                // The untagged bucket: tasks carrying no tags at all.
-                return Set(projectLookup.keys.filter { (tagIDsByTask[$0] ?? []).isEmpty })
-            }
-            return Set(projectLookup.keys.filter { (tagIDsByTask[$0] ?? []).contains(tid) })
+        case .task(let id): return [id]
+        case .group(let gid): return membership.taskIDs(inGroup: gid)
+        case .tag(let tid): return membership.taskIDs(withTag: tid)
         }
+    }
+
+    private var membership: SubjectMembership {
+        SubjectMembership(tasks: Array(projectLookup.values), tagIDsByTask: tagIDsByTask)
     }
 
     /// Whether a breakdown row overlaps the highlight. Intersection, not equality, so a group row
