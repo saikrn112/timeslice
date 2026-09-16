@@ -124,6 +124,13 @@ do {
             print("  \(item.name): \(hrs(item.doneSeconds)) of \(hrs(item.targetSeconds))"
                   + "  \(debt)  needs \(per) × \(item.remainingClaimedDays)  [\(item.standing)]")
             if !item.adviceIfUnreachable.isEmpty { print("        → \(item.adviceIfUnreachable)") }
+            if item.standing == .unreachable || item.debtSeconds > 60 {
+                print("        need \(hrs(item.remainingSeconds)) · room "
+                      + "\(hrs(item.availableOnRemainingDays)) on those days"
+                      + (item.blockers.isEmpty ? "" : "  ·  taken by "
+                         + item.blockers.map { "\($0.name) \(hrs($0.secondsOnThoseDays))" }
+                             .joined(separator: ", ")))
+            }
         }
     }
 

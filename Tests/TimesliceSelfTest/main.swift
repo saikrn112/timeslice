@@ -2361,6 +2361,30 @@ func testReplan() {
               "but the total counts 20h, not 25h: the inner hours are already inside the outer")
     }
 
+    // The "why can't I finish this" half: what is taking the room on an allocation's own days.
+    do {
+        let m2 = plannerWorld(taskGroups: [1: 10, 2: 20, 3: 30], taskTags: [:])
+        // A big weekday commitment, a small one that wants the same days, and 12h a day reserved so
+        // there is only 4h to fight over.
+        let big = floor(1, .project(10), hours: 18, weekdays: .weekdaysOnly)
+        let small = floor(2, .project(20), hours: 10, weekdays: .weekdaysOnly)
+        let reserved = [Reservation(id: 1, name: "life", weekdays: .weekdaysOnly,
+                                    secondsPerDay: 12 * 3600)]
+        let input2 = plannerInput([big, small], reservations: reserved, membership: m2)
+        let r = Replan.compute(plan: Planner.plan(input2), input: input2, actuals: [:],
+                               elapsedWeekdays: [1, 2, 3], remainingWeekdays: [4, 5, 6, 7])
+        let item = r.items.first { $0.name == "a2" }!
+        check(!item.blockers.isEmpty, "the row knows what else wants its days")
+        check(item.blockers.first?.name == "a1" || item.blockers.first?.name == "reserved",
+              "and names the biggest claimant, which is what there is to argue with")
+        check(item.blockers.contains { $0.name == "reserved" },
+              "reserved time counts as a competitor — it is the commonest reason a day has no room, "
+                  + "and leaving it out would blame the wrong thing")
+        check(item.blockers.allSatisfy { $0.secondsOnThoseDays > 0 },
+              "each blocker carries the hours it takes on those days, not its weekly total")
+        check(item.blockers.count <= 3, "capped, because a list of everything explains nothing")
+    }
+
     // The replan itself: the remaining days carry the catch-up, and only the days still to come appear.
     do {
         let r = Replan.compute(plan: plan, input: input, actuals: [:],

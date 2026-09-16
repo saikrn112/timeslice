@@ -248,3 +248,53 @@ struct PlannerGrid: View {
             max(0, min(6, weekday - 1))]
     }
 }
+
+/// Done against a target: a filled portion, and the shortfall left hollow.
+///
+/// The gap is the lag, drawn rather than described — a number beside it would be saying the same thing
+/// twice.
+struct ProgressPair: View {
+    let done: TimeInterval
+    let total: TimeInterval
+    let tint: Color
+
+    var body: some View {
+        GeometryReader { geo in
+            let fraction = total > 0 ? min(1, done / total) : 0
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.secondary.opacity(0.16))
+                Capsule().fill(tint).frame(width: max(2, geo.size.width * fraction))
+            }
+        }
+    }
+}
+
+/// What's still needed against the room its remaining days have, on one shared scale.
+///
+/// Two bars rather than a percentage, because the comparison IS the answer: a need bar longer than the
+/// room bar is why the thing can't be finished, and no wording explains that faster than the picture.
+struct NeedVersusRoom: View {
+    let need: TimeInterval
+    let room: TimeInterval
+    let blocked: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            // One scale for both, so their lengths are comparable — separately normalised bars would
+            // make an impossible gap look like a small one.
+            let span = max(need, room, 1)
+            let scale = geo.size.width / span
+            VStack(alignment: .leading, spacing: 3) {
+                bar(width: need * scale,
+                    color: blocked ? PlannerView.overColor : Color.orange)
+                bar(width: room * scale, color: Color.secondary.opacity(0.45))
+            }
+        }
+    }
+
+    private func bar(width: CGFloat, color: Color) -> some View {
+        RoundedRectangle(cornerRadius: 2).fill(color)
+            .frame(width: max(2, width), height: 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}

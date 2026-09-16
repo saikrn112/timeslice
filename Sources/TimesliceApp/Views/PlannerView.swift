@@ -39,6 +39,7 @@ struct PlannerView: View {
                     PlannerGrid(plan: plan, replan: replan, actuals: actuals,
                                 unallocated: unallocated, today: today,
                                 colorFor: colorHex(forTarget:), nameFor: name(forTarget:))
+                    if let replan { lagging(replan) }
                     chips(plan)
                 } else {
                     empty
@@ -120,6 +121,104 @@ struct PlannerView: View {
         }
     }
 
+    // MARK: - What's lagging, and why
+
+    /// One row per allocation that is behind or can't be finished, showing the two facts that explain
+    /// it: how much is still needed, and how much room its remaining days actually have.
+    ///
+    /// The grid shows THAT the week is full. This shows WHY a particular thing won't happen, which is a
+    /// different question and the one that leads to a decision. "Behind by 3h" is a symptom; "needs 10h,
+    /// has 6h of room, and office wants 28h of the same days" is something to argue with.
+    @ViewBuilder
+    private func lagging(_ replan: Replan) -> some View {
+        // Worst first: can't-finish above merely-behind, and within each, the biggest gap.
+        let rows = replan.items
+            .filter { $0.standing == .unreachable || $0.standing == .recoverable }
+            .sorted {
+                if ($0.standing == .unreachable) != ($1.standing == .unreachable) {
+                    return $0.standing == .unreachable
+                }
+                return $0.shortfallOnRemainingDays > $1.shortfallOnRemainingDays
+            }
+        if !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 7) {
+                Text(rows.contains { $0.standing == .unreachable }
+                     ? "Can't finish" : "Falling behind")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(rows.contains { $0.standing == .unreachable }
+                                     ? Self.overColor : .orange)
+                ForEach(rows, id: \.targetID) { item in
+                    laggingRow(item)
+                }
+            }
+        }
+    }
+
+    private func laggingRow(_ item: Replan.Item) -> some View {
+        let blocked = item.standing == .unreachable
+        return HStack(spacing: 10) {
+            Circle().fill(Color(hex: colorHex(forTarget: item.targetID)))
+                .frame(width: 8, height: 8)
+            Text(item.name).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
+                .frame(width: 140, alignment: .leading).help(item.name)
+
+            // Done against target. The gap IS the lag, so it needs no number beside it.
+            ProgressPair(done: item.doneSeconds, total: item.targetSeconds,
+                         tint: Color(hex: colorHex(forTarget: item.targetID)))
+                .frame(width: 110, height: 12)
+            Text("\(hours(item.doneSeconds))/\(hours(item.targetSeconds))")
+                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 74, alignment: .leading)
+
+            // The why, as two bars against one scale: what's still needed, and what room is left on the
+            // days it's allowed to use. Needed longer than room is the whole explanation.
+            NeedVersusRoom(need: item.remainingSeconds, room: item.availableOnRemainingDays,
+                           blocked: blocked)
+                .frame(width: 130, height: 22)
+            Text("need \(hours(item.remainingSeconds)) · room \(hours(item.availableOnRemainingDays))")
+                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
+                .foregroundStyle(blocked ? Self.overColor : .secondary)
+                .frame(width: 150, alignment: .leading)
+
+            // What is taking the room. Named, because "do more" is not advice.
+            if blocked, let top = item.blockers.first {
+                Text("\(top.name) wants \(hours(top.secondsOnThoseDays)) of those "
+                     + "\(item.remainingClaimedDays) day(s)")
+                    .font(.system(size: 10)).foregroundStyle(Self.overColor.opacity(0.9))
+                    .lineLimit(1)
+            } else if let per = item.requiredPerRemainingDay {
+                Text("\(hours(per))/day for \(item.remainingClaimedDays) day(s)")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .help(laggingTooltip(item))
+    }
+
+    private func laggingTooltip(_ item: Replan.Item) -> String {
+        var lines = ["\(item.name): \(hours(item.doneSeconds)) of \(hours(item.targetSeconds)) done"]
+        if item.debtSeconds > 60 {
+            lines.append("behind by \(hours(item.debtSeconds)) against an even spread")
+        }
+        lines.append("\(hours(item.remainingSeconds)) still needed, across "
+                     + "\(item.remainingClaimedDays) remaining day(s)")
+        lines.append("those days have \(hours(item.availableOnRemainingDays)) free in total")
+        if !item.blockers.isEmpty {
+            lines.append("")
+            lines.append("what's taking those days:")
+            for b in item.blockers {
+                lines.append("  \(b.name)  \(hours(b.secondsOnThoseDays))")
+            }
+        }
+        if !item.adviceIfUnreachable.isEmpty {
+            lines.append("")
+            lines.append(item.adviceIfUnreachable)
+        }
+        return lines.joined(separator: "\n")
+    }
+
     // MARK: - Chips
 
     /// Problems and notes as chips with tooltips, not prose. Each is a thing to act on; the reasoning
@@ -130,18 +229,6 @@ struct PlannerView: View {
             ForEach(Array(plan.unplaced.enumerated()), id: \.offset) { _, item in
                 chip(item.name, "won't fit", Self.overColor,
                      tooltip: "\(item.name) won't fit.\nWould fit if \(item.wouldFitIf).")
-            }
-            ForEach(replan?.unreachable ?? [], id: \.targetID) { item in
-                chip(item.name, "can't finish", Self.overColor,
-                     tooltip: "\(item.name): \(hours(item.doneSeconds)) of "
-                            + "\(hours(item.targetSeconds)).\n\(item.adviceIfUnreachable)")
-            }
-            ForEach(replan?.behind ?? [], id: \.targetID) { item in
-                chip(item.name, "behind \(hours(item.debtSeconds))", .orange,
-                     tooltip: "\(item.name): \(hours(item.doneSeconds)) of "
-                            + "\(hours(item.targetSeconds)).\nNeeds "
-                            + "\(hours(item.requiredPerRemainingDay ?? 0)) on each of "
-                            + "\(item.remainingClaimedDays) remaining day(s) to finish.")
             }
             ForEach(Array(plan.nestings.enumerated()), id: \.offset) { _, n in
                 chip(n.innerName, "inside \(n.outerName)", .secondary,

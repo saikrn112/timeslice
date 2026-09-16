@@ -51,6 +51,24 @@ public struct Replan: Sendable {
         public let standing: Standing
         /// What would have to change, when it can't be finished. Empty otherwise.
         public let adviceIfUnreachable: String
+        /// What is taking the room on this allocation's remaining days, largest first.
+        ///
+        /// The answer to "why can't I finish this". "Behind by 3h" tells you the symptom; "office wants
+        /// 28h of the same four days" tells you what to argue with. Without it the only honest advice
+        /// is "do more", which is not advice.
+        public let blockers: [Blocker]
+        /// How much of the shortfall is simply the day being full versus the allocation being large.
+        public var shortfallOnRemainingDays: TimeInterval {
+            max(0, remainingSeconds - availableOnRemainingDays)
+        }
+    }
+
+    /// Another allocation, or reserved time, competing for the same days.
+    public struct Blocker: Sendable, Hashable {
+        public let name: String
+        /// Hours it claims on the days in question — not its weekly total, which would overstate its
+        /// part in this particular problem.
+        public let secondsOnThoseDays: TimeInterval
     }
 
     public let items: [Item]
@@ -138,13 +156,30 @@ public struct Replan: Sendable {
                 standing = .onTrack
             }
 
+            // Who else wants those days. Reserved time counts as a competitor too — it is the most
+            // common reason a day has no room, and leaving it out would blame the wrong thing.
+            var claims: [String: TimeInterval] = [:]
+            var reservedOnThose: TimeInterval = 0
+            for weekday in remainingClaimed {
+                guard let day = plan.days.first(where: { $0.weekday == weekday }) else { continue }
+                reservedOnThose += day.reservedSeconds
+                for placement in day.placements where placement.targetID != target.id {
+                    claims[placement.name, default: 0] += placement.seconds
+                }
+            }
+            if reservedOnThose > 60 { claims["reserved"] = reservedOnThose }
+            let blockers = claims.sorted { ($0.value, $0.key) > ($1.value, $1.key) }
+                .prefix(3)
+                .map { Blocker(name: $0.key, secondsOnThoseDays: $0.value) }
+
             items.append(Item(targetID: target.id, name: name,
                               targetSeconds: target.weeklySeconds, doneSeconds: done,
                               expectedByNowSeconds: expected,
                               remainingClaimedDays: remainingClaimed.count,
                               requiredPerRemainingDay: perDay,
                               availableOnRemainingDays: available,
-                              standing: standing, adviceIfUnreachable: advice))
+                              standing: standing, adviceIfUnreachable: advice,
+                              blockers: Array(blockers)))
         }
 
         // The week as a whole: everything still owed against everything still free.
