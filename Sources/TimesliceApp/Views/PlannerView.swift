@@ -1,12 +1,18 @@
 import SwiftUI
 import TimesliceCore
 
-/// Whether the week is possible — as a picture, not a report.
+/// Whether the week is possible, and what to do about it today.
 ///
-/// The first version explained itself in paragraphs and tables, and it was unreadable. A week is a
-/// fixed number of hours and the only question is what claims them, so the page is one visual —
-/// `PlannerGrid`, the week as hour-cells — with a headline above it and chips below. Anything that used
-/// to be a sentence is now position, colour, or a tooltip.
+/// Three shapes were tried before this one, and the lesson from each was the same: every round ADDED a
+/// section, so the page grew instead of getting clearer. Paragraphs, then a per-day list plus a
+/// per-allocation table, then an hour-cell grid plus a lagging list plus chips. Three visuals that each
+/// answer part of a question are worse than one that answers all of it.
+///
+/// So the page is two things. A **today card** — what to do now, which is what most visits are actually
+/// asking and what every earlier version answered last or not at all. And `PlannerMatrix` — allocations
+/// down, days across — where reading a row says what you're behind on and reading down the column under
+/// its unfinished cells says why: the day is already full. The collision is spatial, so it costs no
+/// prose.
 ///
 /// Every figure comes from `Planner` and `Replan` in Core, so `swift run TimeslicePlan --db <path>`
 /// prints the same numbers and the page can be checked against arithmetic rather than by eye — which
@@ -36,11 +42,10 @@ struct PlannerView: View {
             VStack(alignment: .leading, spacing: 16) {
                 if let plan {
                     headline(plan)
-                    PlannerGrid(plan: plan, replan: replan, actuals: actuals,
-                                unallocated: unallocated, today: today,
-                                colorFor: colorHex(forTarget:), nameFor: name(forTarget:))
-                    if let replan { lagging(replan) }
-                    chips(plan)
+                    if let replan { todayCard(plan, replan) }
+                    PlannerMatrix(plan: plan, replan: replan, actuals: actuals, today: today,
+                                  colorFor: colorHex(forTarget:), nameFor: name(forTarget:))
+                    notes(plan)
                 } else {
                     empty
                 }
@@ -121,110 +126,79 @@ struct PlannerView: View {
         }
     }
 
-    // MARK: - What's lagging, and why
+    // MARK: - Today
 
-    /// One row per allocation that is behind or can't be finished, showing the two facts that explain
-    /// it: how much is still needed, and how much room its remaining days actually have.
+    /// What to do now.
     ///
-    /// The grid shows THAT the week is full. This shows WHY a particular thing won't happen, which is a
-    /// different question and the one that leads to a decision. "Behind by 3h" is a symptom; "needs 10h,
-    /// has 6h of room, and office wants 28h of the same days" is something to argue with.
+    /// The question most visits to this page are actually asking, and the one every previous version
+    /// answered last or not at all. It sits above the matrix because "am I over-committed" is a
+    /// question you ask once a month and "what should I be doing" is one you ask daily.
     @ViewBuilder
-    private func lagging(_ replan: Replan) -> some View {
-        // Worst first: can't-finish above merely-behind, and within each, the biggest gap.
-        let rows = replan.items
-            .filter { $0.standing == .unreachable || $0.standing == .recoverable }
-            .sorted {
-                if ($0.standing == .unreachable) != ($1.standing == .unreachable) {
-                    return $0.standing == .unreachable
+    private func todayCard(_ plan: Planner, _ replan: Replan) -> some View {
+        // Explicit types, and the row extracted below. Left inline, the type-checker gave up on
+        // this closure and silently tried the `ForEach($binding)` overload instead, whose error
+        // ("cannot convert [Placement] to Binding<C>") points nowhere near the actual problem.
+        let day: Planner.DayPlan? = plan.days.first { $0.weekday == today }
+        let wanted: [Planner.Placement] = (day?.placements ?? []).sorted { $0.seconds > $1.seconds }
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Text("Today").font(.system(size: 12, weight: .semibold))
+                if let day {
+                    Text(day.isOverCapacity
+                         ? "asking for \(hours(day.reservedSeconds + day.committedSeconds)) of "
+                           + hours(day.capacitySeconds)
+                         : "\(hours(day.freeSeconds)) free of \(hours(day.capacitySeconds))")
+                        .font(.system(size: 11))
+                        .foregroundStyle(day.isOverCapacity ? Self.overColor : .secondary)
                 }
-                return $0.shortfallOnRemainingDays > $1.shortfallOnRemainingDays
+                Spacer()
+                if replan.totalDebtSeconds > 60 {
+                    Text("\(hours(replan.totalDebtSeconds)) behind overall")
+                        .font(.system(size: 10)).foregroundStyle(.orange)
+                }
             }
-        if !rows.isEmpty {
-            VStack(alignment: .leading, spacing: 7) {
-                Text(rows.contains { $0.standing == .unreachable }
-                     ? "Can't finish" : "Falling behind")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(rows.contains { $0.standing == .unreachable }
-                                     ? Self.overColor : .orange)
-                ForEach(rows, id: \.targetID) { item in
-                    laggingRow(item)
+            if wanted.isEmpty {
+                Text("Nothing allocated to today.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            } else {
+                ForEach(wanted, id: \.targetID) { placement in
+                    todayRow(placement)
                 }
             }
         }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.secondary.opacity(0.08)))
     }
 
-    private func laggingRow(_ item: Replan.Item) -> some View {
-        let blocked = item.standing == .unreachable
-        return HStack(spacing: 10) {
-            Circle().fill(Color(hex: colorHex(forTarget: item.targetID)))
-                .frame(width: 8, height: 8)
-            Text(item.name).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
-                .frame(width: 140, alignment: .leading).help(item.name)
-
-            // Done against target. The gap IS the lag, so it needs no number beside it.
-            ProgressPair(done: item.doneSeconds, total: item.targetSeconds,
-                         tint: Color(hex: colorHex(forTarget: item.targetID)))
-                .frame(width: 110, height: 12)
-            Text("\(hours(item.doneSeconds))/\(hours(item.targetSeconds))")
+    /// One thing today wants: how much, how much of it is already done, and what's left.
+    ///
+    /// Doubles as "how is today going", which is why the card doesn't need a second section for it.
+    private func todayRow(_ placement: Planner.Placement) -> some View {
+        let already = (actuals[today] ?? [:])[placement.targetID] ?? 0
+        let left = max(0, placement.seconds - already)
+        return HStack(spacing: 8) {
+            Circle().fill(Color(hex: colorHex(forTarget: placement.targetID)))
+                .frame(width: 7, height: 7)
+            Text(placement.name).font(.system(size: 11)).lineLimit(1)
+                .frame(width: 130, alignment: .leading)
+            ProgressPair(done: already, total: placement.seconds,
+                         tint: Color(hex: colorHex(forTarget: placement.targetID)))
+                .frame(width: 120, height: 8)
+            Text(left > 60 ? "\(hours(left)) to go" : "done")
                 .font(.system(size: 10, design: .monospaced)).monospacedDigit()
-                .foregroundStyle(.secondary)
-                .frame(width: 74, alignment: .leading)
-
-            // The why, as two bars against one scale: what's still needed, and what room is left on the
-            // days it's allowed to use. Needed longer than room is the whole explanation.
-            NeedVersusRoom(need: item.remainingSeconds, room: item.availableOnRemainingDays,
-                           blocked: blocked)
-                .frame(width: 130, height: 22)
-            Text("need \(hours(item.remainingSeconds)) · room \(hours(item.availableOnRemainingDays))")
-                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
-                .foregroundStyle(blocked ? Self.overColor : .secondary)
-                .frame(width: 150, alignment: .leading)
-
-            // What is taking the room. Named, because "do more" is not advice.
-            if blocked, let top = item.blockers.first {
-                Text("\(top.name) wants \(hours(top.secondsOnThoseDays)) of those "
-                     + "\(item.remainingClaimedDays) day(s)")
-                    .font(.system(size: 10)).foregroundStyle(Self.overColor.opacity(0.9))
-                    .lineLimit(1)
-            } else if let per = item.requiredPerRemainingDay {
-                Text("\(hours(per))/day for \(item.remainingClaimedDays) day(s)")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
+                .foregroundStyle(left > 60 ? Color.primary : Color.green)
+                .frame(width: 80, alignment: .leading)
             Spacer(minLength: 0)
         }
-        .help(laggingTooltip(item))
-    }
-
-    private func laggingTooltip(_ item: Replan.Item) -> String {
-        var lines = ["\(item.name): \(hours(item.doneSeconds)) of \(hours(item.targetSeconds)) done"]
-        if item.debtSeconds > 60 {
-            lines.append("behind by \(hours(item.debtSeconds)) against an even spread")
-        }
-        lines.append("\(hours(item.remainingSeconds)) still needed, across "
-                     + "\(item.remainingClaimedDays) remaining day(s)")
-        lines.append("those days have \(hours(item.availableOnRemainingDays)) free in total")
-        if !item.blockers.isEmpty {
-            lines.append("")
-            lines.append("what's taking those days:")
-            for b in item.blockers {
-                lines.append("  \(b.name)  \(hours(b.secondsOnThoseDays))")
-            }
-        }
-        if !item.adviceIfUnreachable.isEmpty {
-            lines.append("")
-            lines.append(item.adviceIfUnreachable)
-        }
-        return lines.joined(separator: "\n")
     }
 
     // MARK: - Chips
 
-    /// Problems and notes as chips with tooltips, not prose. Each is a thing to act on; the reasoning
-    /// lives on hover, where it costs no page.
+    /// The few things the matrix genuinely can't say: allocations that never fit at all, nesting, and
+    /// the warning that no reservations are declared. Everything else the chips used to repeat is now
+    /// a row or a column.
     @ViewBuilder
-    private func chips(_ plan: Planner) -> some View {
+    private func notes(_ plan: Planner) -> some View {
         FlowRow(spacing: 6) {
             ForEach(Array(plan.unplaced.enumerated()), id: \.offset) { _, item in
                 chip(item.name, "won't fit", Self.overColor,
