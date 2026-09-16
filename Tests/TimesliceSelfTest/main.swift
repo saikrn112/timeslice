@@ -2067,22 +2067,33 @@ func testPlannerPlacement() {
         let p2 = Planner.plan(plannerInput([habit], reservations: tight, membership: m))
         check(p2.unplaced.first?.reason == .shapeImpossible,
               "and is impossible as a habit when one day has no hour to give")
-        check(p2.unplaced.first?.wouldFitIf.contains("of 7 days") == true,
-              "the explanation says how many days it does fit on")
+        check(p2.unplaced.first?.wouldFitIf.contains("of 7 days") == true
+                || p2.unplaced.first?.wouldFitIf.contains("freed up") == true,
+              "and the explanation offers a change: a smaller daily minimum, or freeing those days")
     }
 
-    // Sessions are not shredded into fragments.
+    // Sessions: the question is whether enough days have an unbroken run that long, not which days
+    // they land on. The planner deliberately stopped inventing a schedule — "office 16h on Monday"
+    // was arithmetically valid and useless — so what's checked is feasibility.
     do {
         let m = plannerWorld(taskGroups: [1: 10], taskTags: [:])
-        // 3h free per day, and two 3h sessions asked for.
+        // 3h free per day: two 3h sessions are possible.
         let reserved = [Reservation(id: 1, name: "life", secondsPerDay: 13 * 3600)]
         let target = floor(1, .project(10), hours: 6, shape: .sessions(count: 2, minSeconds: 3 * 3600))
-        let p = Planner.plan(plannerInput([target], reservations: reserved, membership: m))
-        check(p.unplaced.isEmpty, "two 3h sessions fit into days with 3h free")
-        let daysUsed = p.days.filter { $0.committedSeconds > 0 }
-        check(daysUsed.count == 2, "landing on exactly two days, not spread over six")
-        check(daysUsed.allSatisfy { approx($0.committedSeconds / 3600, 3, 0.01) },
-              "each taking a whole 3h block")
+        check(Planner.plan(plannerInput([target], reservations: reserved, membership: m))
+                .unplaced.isEmpty,
+              "two 3h sessions are fine when every day has 3h free")
+
+        // 90 minutes free per day cannot hold a 3h block, however many days there are. Without the
+        // room check this passed, because the weekly total fitted.
+        let cramped = [Reservation(id: 1, name: "life", secondsPerDay: 14.5 * 3600)]
+        let p = Planner.plan(plannerInput([floor(1, .project(10), hours: 6,
+                                                shape: .sessions(count: 2, minSeconds: 3 * 3600))],
+                                          reservations: cramped, membership: m))
+        check(p.unplaced.first?.reason == .shapeImpossible,
+              "but not when no day has an unbroken 3h in it, even though the total fits")
+        check(p.unplaced.first?.wouldFitIf.contains("free") == true,
+              "and the suggestion is about the daily room, not the weekly total")
     }
 
     // A shape that contradicts its own total.
@@ -2135,9 +2146,13 @@ func testPlannerVerdicts() {
         let tag = floor(2, .tag(99), hours: 60)           // tasks 2,3
         let p = Planner.plan(plannerInput([group, tag], membership: m2))
         check(p.requiredLowerSeconds / 3600 == 60 && p.requiredUpperSeconds / 3600 == 120,
-              "the bounds straddle the 112h capacity")
-        check(p.verdict == .uncertain,
-              "so the verdict says it depends on the overlap rather than inventing an answer")
+              "the bounds straddle the 112h capacity, and the range is what says the overlap matters")
+        // Spread evenly, 120h over seven days is 17.1h a day against 16h awake, so days are over too.
+        // The verdict takes the stronger reading: a week that cannot be laid out day by day is not
+        // "uncertain", whatever the weekly total says.
+        check(p.verdict == .oversubscribed,
+              "and the day-level check makes the verdict definite rather than hopeful")
+        check(!p.overloadedDays.isEmpty, "naming the days that are over")
     }
 
     // Nesting is named, so a commitment that is already counted can be shown as such.
@@ -2197,12 +2212,18 @@ func testPlannerRealShape() {
     ]
     let p = Planner.plan(plannerInput(targets, membership: m))
 
-    check(approx(p.requiredUpperSeconds / 3600, 71, 0.01),
-          "the naive sum is the 71h/week the SQL reported")
-    // office 35 + recon 7 + family 7 + gym 4 + stonks 2 = 55. vllm overlaps office and KT is inside
-    // it, deep-technical-creative is inside recon, so none of those three join the disjoint family.
+    // 71h is the sum of every floor, but KT (2h) sits inside office and deep-technical-creative (4h)
+    // inside recon paper, and an allocation inside another asks for nothing extra — its hours are
+    // already in the parent's total. Charging for them twice was what made the page report a nested
+    // allocation as "won't fit" while also saying its hours were already counted.
+    check(approx(p.requiredUpperSeconds / 3600, 65, 0.01),
+          "the upper bound excludes nested allocations: 71h of floors, 65h actually asked for")
+    // office 35 + recon 7 + family 7 + gym 4 + stonks 2 = 55; vllm partly overlaps office so it can't
+    // join a disjoint family.
     check(approx(p.requiredLowerSeconds / 3600, 55, 0.01),
           "and the disjoint lower bound is 55h — the figure that makes the verdict safe to state")
+    check(!p.unplaced.contains { $0.name == "a8" },
+          "a nested allocation is never reported as not fitting, which contradicted itself")
     check(p.nestings.contains { $0.innerName == "a8" && $0.outerName == "a1" },
           "KT is reported as already inside office")
     check(p.nestings.contains { $0.innerName == "a7" && $0.outerName == "a3" },

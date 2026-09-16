@@ -9,13 +9,20 @@ struct MainWindowView: View {
     var sync: SyncController? = nil
     var auth: GoogleAuth? = nil
 
-    // Screenshot mode can open straight to the Metrics tab (TIMESLICE_DEMO_TAB=metrics).
-    @State private var selectedTab: Tab =
-        ProcessInfo.processInfo.environment["TIMESLICE_DEMO_TAB"] == "metrics" ? .metrics : .projects
+    // Screenshot mode can open straight to a tab (TIMESLICE_DEMO_TAB=metrics|planner|tasks).
+    //
+    // Matched against the tab's own raw value lowercased, so adding a tab extends the hook for free
+    // rather than needing another branch here — which is how the iOS `start-tab` file works too.
+    @State private var selectedTab: Tab = {
+        let hint = ProcessInfo.processInfo.environment["TIMESLICE_DEMO_TAB"]?.lowercased()
+        return Tab.allCases.first { $0.rawValue.lowercased() == hint } ?? .projects
+    }()
 
     enum Tab: String, CaseIterable, Identifiable {
         case projects = "Tasks"
         case metrics = "Metrics"
+        /// Foresight, where Metrics is hindsight: whether the allocations can coexist at all.
+        case planner = "Planner"
         var id: String { rawValue }
     }
 
@@ -26,6 +33,7 @@ struct MainWindowView: View {
             switch selectedTab {
             case .projects: ProjectListView(appState: appState, engine: engine)
             case .metrics: MetricsView(appState: appState, engine: engine, settings: settings)
+            case .planner: PlannerView(appState: appState, settings: settings)
             }
         }
         .frame(minWidth: 640, minHeight: 460)
@@ -39,6 +47,7 @@ struct MainWindowView: View {
             HStack(spacing: 4) {
                 tabButton(.projects, icon: "checklist")
                 tabButton(.metrics, icon: "chart.bar.xaxis")
+                tabButton(.planner, icon: "calendar.badge.clock")
             }
 
             if selectedTab == .projects {

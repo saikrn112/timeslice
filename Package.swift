@@ -73,6 +73,17 @@ let package = Package(
                 .linkedLibrary("sqlite3"),
             ]
         ),
+        // Prints the planner's answer for a real database. Exists because the macOS UI can't be
+        // screenshotted headlessly, so the numbers on the Planner page need to be checkable another
+        // way — this runs the same `Planner` against the same database and prints what it computed.
+        .executableTarget(
+            name: "TimeslicePlan",
+            dependencies: ["TimesliceCore"],
+            path: "Tools/TimeslicePlan",
+            linkerSettings: [
+                .linkedLibrary("sqlite3"),
+            ]
+        ),
         // Self-test runner. XCTest/swift-testing bundles aren't available under Command Line
         // Tools (no Xcode), so core logic is verified by this executable via `swift run TimesliceSelfTest`.
         .executableTarget(

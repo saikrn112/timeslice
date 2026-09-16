@@ -146,12 +146,28 @@ public struct Planner: Sendable {
     /// `atMost` allocations. Listed, never counted: a ceiling is permission to stop, not work to do.
     public let ceilings: [Target]
     public let nestings: [Nesting]
+    /// Weekdays asking for more than they hold. The reason a week can total fine and still be
+    /// impossible, so it's a first-class output rather than something the view has to notice.
+    public let overloadedDays: [Int]
 
     // MARK: - Building
 
     public static func plan(_ input: Input) -> Planner {
-        let floors = input.targets.filter { $0.direction == .atLeast }
+        let allFloors = input.targets.filter { $0.direction == .atLeast }
         let ceilings = input.targets.filter { $0.direction == .atMost }
+        let nestings = nestings(floors: allFloors, input: input)
+
+        // An allocation entirely inside another asks for nothing extra: its hours are already part of
+        // the parent's total. Letting it claim capacity of its own double-counted the same work and
+        // then reported the child as "won't fit" — a contradiction, since the page also said its hours
+        // were already counted. It's still listed, just not charged for twice.
+        let nestedIDs = Set(allFloors.filter { inner in
+            allFloors.contains { outer in
+                inner.id != outer.id
+                    && input.membership.relation(inner.subject, outer.subject) == .containedIn
+            }
+        }.map(\.id))
+        let floors = allFloors.filter { !nestedIDs.contains($0.id) }
 
         // Every day of the week, with its reservations already taken.
         var days: [DayPlan] = (1...7).map { weekday in
@@ -167,168 +183,162 @@ public struct Planner: Sendable {
                            placements: [])
         }
 
-        var unplaced: [Unplaced] = []
-
-        // Ordered by how constrained each one is, so the tightest claims first. Placing a flexible
-        // allocation before a daily habit would let it take the very hour the habit needed.
-        let ordered = floors.sorted { a, b in
-            let rank = { (t: Target) -> Int in
-                switch t.shape {
-                case .everyDay: return 0
-                case .sessions: return 1
-                case .flexible: return 2
-                }
-            }
-            if rank(a) != rank(b) { return rank(a) < rank(b) }
-            // Then the biggest first: a large allocation has the fewest ways to fit.
-            if a.weeklySeconds != b.weeklySeconds { return a.weeklySeconds > b.weeklySeconds }
-            return a.id < b.id      // deterministic, so the same week always plans the same way
-        }
-
-        for target in ordered {
+        // Each allocation spread EVENLY over the days it claims, rather than packed greedily into
+        // whichever day happened to be emptiest.
+        //
+        // The greedy packer produced answers like "office: 16h on Monday, 16h on Tuesday, 3h on
+        // Wednesday" — arithmetically valid, and not a plan anyone would follow. Worse, it replaced
+        // the one figure that reads at a glance ("Tuesday is asking for 14 hours") with an arbitrary
+        // schedule. An even spread is deterministic, explainable in one sentence, and is what the
+        // question "is Tuesday possible?" actually needs.
+        for target in floors.sorted(by: { ($0.weeklySeconds, -Double($0.id)) >
+                                          ($1.weeklySeconds, -Double($1.id)) }) {
             let name = input.names[target.id] ?? "allocation"
-            let result = place(target, name: name, into: &days)
-            if let problem = result { unplaced.append(problem) }
+            let claimed = (1...7).filter { target.weekdays.effective.contains(weekday: $0) }
+            guard !claimed.isEmpty else { continue }
+            let perDay = target.weeklySeconds / Double(claimed.count)
+            for weekday in claimed {
+                guard let i = days.firstIndex(where: { $0.weekday == weekday }) else { continue }
+                days[i] = adding(perDay, of: target, name: name, to: days[i])
+            }
         }
+
+        // What can't work, judged per allocation against the load — no packing involved.
+        let unplaced = problems(floors: floors, days: days, input: input)
 
         let (lower, upper) = bounds(floors: floors, membership: input.membership)
         let capacity = input.wakingSecondsPerDay * 7
         let reserved = days.reduce(0.0) { $0 + $1.reservedSeconds }
         let free = max(0, capacity - reserved)
 
+        // A week can total comfortably and still be impossible, because weekday restrictions pile
+        // onto particular days. The first version only compared totals and cheerfully said "fits"
+        // while Monday and Tuesday were both at 16 of 16 hours.
+        let overDays = days.filter(\.isOverCapacity)
+
         let verdict: Verdict
-        if lower > free { verdict = .oversubscribed }
+        if lower > free || !overDays.isEmpty { verdict = .oversubscribed }
         else if upper > free { verdict = .uncertain }
         // "Tight" is a tenth of the week — about a day and a half of waking hours — with nothing
         // spare. Anything less than that absorbs no surprises at all.
-        else if free - upper < capacity * 0.1 { verdict = .tight }
+        else if free - upper < capacity * 0.1 || days.contains(where: { $0.freeSeconds < 3600 }) {
+            verdict = .tight
+        }
         else { verdict = .fits }
 
         return Planner(days: days, unplaced: unplaced,
                        requiredLowerSeconds: lower, requiredUpperSeconds: upper,
                        reservedSeconds: reserved, capacitySeconds: capacity,
-                       verdict: verdict, ceilings: ceilings,
-                       nestings: nestings(floors: floors, input: input))
+                       verdict: verdict, ceilings: ceilings, nestings: nestings,
+                       overloadedDays: overDays.map(\.weekday))
     }
 
     // MARK: - Placement
 
-    /// Put one allocation into the week, returning why it couldn't fit if it couldn't.
-    private static func place(_ target: Target, name: String,
-                              into days: inout [DayPlan]) -> Unplaced? {
-        let claimed = (1...7).filter { target.weekdays.effective.contains(weekday: $0) }
-        var remaining = target.weeklySeconds
-        guard remaining > 0 else { return nil }
+    /// What can't work, judged per allocation against the day loads.
+    ///
+    /// No packing: each allocation is asked three answerable questions, and every failure names a
+    /// specific change. The greedy version could only ever say "there was no room left by the time I
+    /// got here", which depended on the order it happened to try things and produced sentences like
+    /// "would fit if the weekly total were 0m".
+    static func problems(floors: [Target], days: [DayPlan], input: Input) -> [Unplaced] {
+        var out: [Unplaced] = []
+        for target in floors {
+            let name = input.names[target.id] ?? "allocation"
+            let claimed = (1...7).filter { target.weekdays.effective.contains(weekday: $0) }
+            guard !claimed.isEmpty, target.weeklySeconds > 0 else { continue }
+            let perDay = target.weeklySeconds / Double(claimed.count)
+            let dayFor = { (w: Int) in days.first { $0.weekday == w } }
 
-        switch target.shape {
-        case .everyDay(let minPerDay):
-            // The habit case, and the one that fails most informatively. Every claimed day must take
-            // the minimum; if one can't, the habit is impossible even when the weekly total would
-            // have fitted elsewhere — which is exactly the "I can't do an hour of research every
-            // day" question.
-            let short = claimed.filter { dayIndex(of: $0, days).map { days[$0].freeSeconds } ?? 0
-                                          < minPerDay }
-            if !short.isEmpty {
-                let best = largestFeasibleEveryDayMinimum(claimed: claimed, days: days)
-                let fits = claimed.count - short.count
-                return Unplaced(
+            // 1. Can its own days hold its own total, before anything else competes?
+            let ownCeiling = Double(claimed.count) * input.wakingSecondsPerDay
+            if target.weeklySeconds > ownCeiling + 1 {
+                out.append(Unplaced(
                     targetID: target.id, name: name,
-                    shortfallSeconds: Double(short.count) * minPerDay,
-                    reason: .shapeImpossible,
-                    wouldFitIf: best > 0
-                        ? "\(hoursText(best))/day instead of \(hoursText(minPerDay))/day "
-                          + "— it fits on \(fits) of \(claimed.count) days as asked"
-                        : "some of the day were freed up: \(fits) of \(claimed.count) days can take it")
+                    shortfallSeconds: target.weeklySeconds - ownCeiling,
+                    reason: .weekdaysTooNarrow,
+                    wouldFitIf: "it claimed more days — \(claimed.count) day(s) hold at most "
+                              + hoursText(ownCeiling)))
+                continue
             }
-            for weekday in claimed {
-                guard let i = dayIndex(of: weekday, days) else { continue }
-                let take = min(minPerDay, days[i].freeSeconds)
-                days[i] = adding(take, of: target, name: name, to: days[i])
-                remaining -= take
-            }
-            // The rest of the total spreads flexibly over the same days.
-            remaining = fill(remaining, of: target, name: name, over: claimed, in: &days)
-            return remaining > 60
-                ? Unplaced(targetID: target.id, name: name, shortfallSeconds: remaining,
-                           reason: .noSlack,
-                           wouldFitIf: "the weekly total were \(hoursText(target.weeklySeconds - remaining))")
-                : nil
 
-        case .sessions(let count, let minLength):
-            // Sessions want unbroken room, so they go to the days with the most left — a three-hour
-            // session split into six halves is not the thing that was asked for.
-            guard Double(count) * minLength <= target.weeklySeconds + 1 else {
-                return Unplaced(targetID: target.id, name: name,
-                                shortfallSeconds: Double(count) * minLength - target.weeklySeconds,
-                                reason: .shapeImpossible,
-                                wouldFitIf: "the total were at least "
-                                          + hoursText(Double(count) * minLength)
-                                          + " for \(count) sessions of \(hoursText(minLength))")
+            // How much of a day is available to THIS allocation: everything except what other things
+            // have already claimed. Deliberately not `freeSeconds`, which clamps at zero — on a day
+            // already over capacity that clamp reported the allocation's own share back to it as
+            // room, and a habit that plainly could not fit was passed as fine.
+            let roomFor = { (day: DayPlan) -> TimeInterval in
+                let mine = day.placements.first { $0.targetID == target.id }?.seconds ?? 0
+                return day.capacitySeconds - day.reservedSeconds - (day.committedSeconds - mine)
             }
-            var placedSessions = 0
-            for _ in 0..<count {
-                let candidates = claimed.compactMap { dayIndex(of: $0, days) }
-                    .filter { days[$0].freeSeconds >= minLength }
-                    .sorted { days[$0].freeSeconds > days[$1].freeSeconds }
-                guard let i = candidates.first else { break }
-                days[i] = adding(minLength, of: target, name: name, to: days[i])
-                remaining -= minLength
-                placedSessions += 1
-            }
-            if placedSessions < count {
-                let missing = count - placedSessions
-                return Unplaced(targetID: target.id, name: name,
-                                shortfallSeconds: Double(missing) * minLength,
-                                reason: .noSlack,
-                                wouldFitIf: "there were \(missing) more day(s) with "
-                                          + "\(hoursText(minLength)) free, or the sessions were shorter")
-            }
-            remaining = fill(remaining, of: target, name: name, over: claimed, in: &days)
-            return remaining > 60
-                ? Unplaced(targetID: target.id, name: name, shortfallSeconds: remaining,
-                           reason: .noSlack,
-                           wouldFitIf: "the weekly total were \(hoursText(target.weeklySeconds - remaining))")
-                : nil
 
-        case .flexible:
-            // Narrow weekdays can make a total impossible on its own, before any competition: 20h
-            // over one day cannot fit in a 16h day however empty the week is.
-            let ceiling = Double(claimed.count) * days.first!.capacitySeconds
-            if target.weeklySeconds > ceiling + 1 {
-                return Unplaced(targetID: target.id, name: name,
-                                shortfallSeconds: target.weeklySeconds - ceiling,
-                                reason: .weekdaysTooNarrow,
-                                wouldFitIf: "it claimed more days — \(claimed.count) day(s) hold at "
-                                          + "most \(hoursText(ceiling))")
+            // 2. If it wants to be a habit, can every claimed day take the daily minimum? Checked
+            //    BEFORE the general overload below, because it is the more specific diagnosis and the
+            //    question that started this feature: 7h a week is not 1h a day if Tuesday has no hour.
+            if case .everyDay(let minPerDay) = target.shape {
+                let rooms = claimed.compactMap { dayFor($0).map(roomFor) }
+                let short = rooms.filter { $0 < minPerDay - 1 }.count
+                if short > 0, let smallest = rooms.min() {
+                    out.append(Unplaced(
+                        targetID: target.id, name: name,
+                        shortfallSeconds: Double(short) * minPerDay,
+                        reason: .shapeImpossible,
+                        wouldFitIf: smallest > 60
+                            ? "the daily minimum were \(hoursText(smallest)) instead of "
+                              + "\(hoursText(minPerDay)) — it fits as asked on "
+                              + "\(claimed.count - short) of \(claimed.count) days"
+                            : "some of those days were freed up — "
+                              + "\(claimed.count - short) of \(claimed.count) can take it"))
+                    continue
+                }
             }
-            remaining = fill(remaining, of: target, name: name, over: claimed, in: &days)
-            return remaining > 60
-                ? Unplaced(targetID: target.id, name: name, shortfallSeconds: remaining,
-                           reason: .noSlack,
-                           wouldFitIf: "the weekly total were \(hoursText(target.weeklySeconds - remaining))")
-                : nil
+
+            // 3. Sessions: the total has to cover them, and enough days must have an unbroken run
+            //    that long. Without the second half, "2 × 3h" would pass on days with 90 minutes each.
+            if case .sessions(let count, let minLength) = target.shape {
+                if Double(count) * minLength > target.weeklySeconds + 1 {
+                    out.append(Unplaced(
+                        targetID: target.id, name: name,
+                        shortfallSeconds: Double(count) * minLength - target.weeklySeconds,
+                        reason: .shapeImpossible,
+                        wouldFitIf: "the total were at least \(hoursText(Double(count) * minLength)) for "
+                                  + "\(count) sessions of \(hoursText(minLength))"))
+                    continue
+                }
+                let roomyDays = claimed.compactMap { dayFor($0).map(roomFor) }
+                    .filter { $0 >= minLength - 1 }.count
+                if roomyDays < count {
+                    out.append(Unplaced(
+                        targetID: target.id, name: name,
+                        shortfallSeconds: Double(count - roomyDays) * minLength,
+                        reason: .shapeImpossible,
+                        wouldFitIf: "\(count) of its days had \(hoursText(minLength)) free — only "
+                                  + "\(roomyDays) do, so the sessions would have to be shorter or "
+                                  + "fewer"))
+                    continue
+                }
+            }
+
+            // 4. Otherwise: are the days it claims over capacity at all? Reported against the worst
+            //    one, because that is the day to fix.
+            let overloaded = claimed.compactMap { dayFor($0) }.filter(\.isOverCapacity)
+            if let worst = overloaded.max(by: { -$0.slackSeconds < -$1.slackSeconds }) {
+                let excess = -worst.slackSeconds
+                out.append(Unplaced(
+                    targetID: target.id, name: name,
+                    shortfallSeconds: min(excess, perDay),
+                    reason: .noSlack,
+                    wouldFitIf: "\(dayName(worst.weekday)) gave up \(hoursText(excess)) — it is asking "
+                              + "for \(hoursText(worst.reservedSeconds + worst.committedSeconds)) of "
+                              + "\(hoursText(worst.capacitySeconds))"))
+            }
         }
+        return out
     }
 
-    /// Spread `seconds` over the claimed days, returning what wouldn't fit.
-    ///
-    /// Fills the EMPTIEST day first, which concentrates rather than scatters: it keeps long unbroken
-    /// runs available instead of leaving every day with a fragment. That follows the app's own
-    /// measure — it counts focus blocks of thirty minutes or more, so a planner that shredded work
-    /// into ten-minute pieces would be planning for the thing the metrics call bad.
-    private static func fill(_ seconds: TimeInterval, of target: Target, name: String,
-                             over claimed: [Int], in days: inout [DayPlan]) -> TimeInterval {
-        var remaining = seconds
-        while remaining > 60 {
-            let candidates = claimed.compactMap { dayIndex(of: $0, days) }
-                .filter { days[$0].freeSeconds > 60 }
-                .sorted { days[$0].freeSeconds > days[$1].freeSeconds }
-            guard let i = candidates.first else { break }
-            let take = min(remaining, days[i].freeSeconds)
-            days[i] = adding(take, of: target, name: name, to: days[i])
-            remaining -= take
-        }
-        return max(0, remaining)
+    /// The biggest per-day habit every claimed day could take, alongside everything else on it.
+    public static func largestFeasibleEveryDayMinimum(claimed: [Int], days: [DayPlan]) -> TimeInterval {
+        let frees = claimed.compactMap { w in days.first { $0.weekday == w }?.freeSeconds }
+        return frees.min() ?? 0
     }
 
     private static func adding(_ seconds: TimeInterval, of target: Target, name: String,
@@ -349,15 +359,6 @@ public struct Planner: Sendable {
 
     private static func dayIndex(of weekday: Int, _ days: [DayPlan]) -> Int? {
         days.firstIndex { $0.weekday == weekday }
-    }
-
-    /// The biggest per-day habit that every claimed day could actually take.
-    ///
-    /// Answers "an hour a day doesn't fit — what does?" with a number rather than a shrug. It's the
-    /// minimum free time across the claimed days, because a habit is only as strong as its worst day.
-    public static func largestFeasibleEveryDayMinimum(claimed: [Int], days: [DayPlan]) -> TimeInterval {
-        let frees = claimed.compactMap { dayIndex(of: $0, days).map { days[$0].freeSeconds } }
-        return frees.min() ?? 0
     }
 
     // MARK: - Bounds
@@ -462,6 +463,12 @@ public extension Target {
                       period: period, createdAt: createdAt, completedAt: completedAt,
                       sortOrder: sortOrder, weekdays: weekdays, shape: shape)
     }
+}
+
+/// Sunday-first, matching `Weekdays`' bit order.
+private func dayName(_ weekday: Int) -> String {
+    ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][
+        max(0, min(6, weekday - 1))]
 }
 
 /// Hours, for the "would fit if" sentences. Deliberately coarse — the planner deals in hour-slabs,

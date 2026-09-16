@@ -472,7 +472,7 @@ struct TargetsSheet: View {
 ///
 /// Its own view so each row keeps its own draft text: a shared `@State` in the parent would reset
 /// every row's edit whenever any row saved.
-private struct HoursField: View {
+struct HoursField: View {
     let seconds: TimeInterval
     let onCommit: (TimeInterval) -> Void
 
