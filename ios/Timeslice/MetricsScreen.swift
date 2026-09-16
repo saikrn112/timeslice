@@ -45,6 +45,8 @@ struct MetricsScreen: View {
         /// a complete list that disagrees with the day's total.
         var sessionTotal = 0
         var budgets: [BudgetRows.Row] = []
+        /// Where the range's available hours stand: spent, owed to a commitment, free.
+        var capacity: Capacity.Breakdown?
         /// The neighbouring periods, for the card strip that browses them.
         var strip: [PeriodCard] = []
     }
@@ -265,28 +267,140 @@ struct MetricsScreen: View {
                 if isDay {
                     stat("Switches", "\(data.summary.switches)", .orange)
                     stat("Longest", Format.compact(data.summary.longestSessionSeconds), .teal)
-                    stat("Waking", percent(wakingRatio), .blue)
                 } else {
                     stat("Avg/day", hoursOnly(data.summary.avgPerActiveDay), .teal)
                     stat("Best day", hoursOnly(data.summary.bestDaySeconds), .blue)
                     stat("Active", "\(data.summary.activeDays)d", .orange)
                 }
             }
+
+            capacitySection
         }
         .padding(Theme.cardPadding + 2)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: Theme.cardRadius + 4).fill(Theme.card))
     }
 
-    /// Share of waking hours in the range that got tracked at all.
+    /// The range's waking hours, drawn as a whole and split three ways.
     ///
-    /// The denominator counts every CALENDAR day in the range, including ones with nothing recorded: a
-    /// day you tracked nothing is exactly when the gap should be widest, and using only active days
-    /// would hide that by shrinking the denominator to match.
-    private var wakingRatio: Double {
-        let days = max(1, (range.end.timeIntervalSince(range.start) / 86_400).rounded())
-        let awake = model.settings.wakingSeconds * days
-        return awake > 0 ? data.summary.totalSeconds / awake : 0
+    /// This replaces a bare "Waking 33%" stat. That figure was `tracked ÷ waking hours` with its
+    /// denominator never shown and no hint of what the other 67% was promised to — "I don't understand
+    /// this distribution at the top, where is it free from, still to do from". The percentage was true
+    /// and told you nothing you could act on.
+    ///
+    /// The bar is the whole period. Coloured segments are hours already spent, in each task's own
+    /// colour, so it doubles as the distribution of where the time went. The striped segment is time
+    /// still owed to a commitment, and the empty remainder is genuinely free.
+    ///
+    /// Every figure comes from `Capacity.breakdown`, including the de-duplication that stops a tag and
+    /// the project inside it from booking the same hour twice. Nothing here computes anything.
+    @ViewBuilder
+    private var capacitySection: some View {
+        if let cap = data.capacity, cap.capacitySeconds > 0 {
+            VStack(alignment: .leading, spacing: 5) {
+                GeometryReader { geo in
+                    HStack(spacing: 0) {
+                        // Spent hours, per task. Widths come straight from each task's share of
+                        // capacity, so the coloured run always ends where `tracked` says it does.
+                        ForEach(capacitySlices, id: \.id) { slice in
+                            Rectangle()
+                                .fill(Color(hex: slice.colorHex))
+                                .frame(width: geo.size.width * slice.fraction)
+                        }
+                        if cap.owedFraction > 0 {
+                            // Striped, not just paler: "done" and "still to do" are different in kind,
+                            // and a lighter shade of the same fill reads as less of the same thing.
+                            owedStripes
+                                .frame(width: geo.size.width * cap.owedFraction)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+                .frame(height: 11)
+                .background(Capsule().fill(Theme.track))
+                .clipShape(Capsule())
+
+                Text(capacityCaption)
+                    .font(Theme.captionSmall)
+                    .foregroundStyle(cap.isOvercommitted ? Color.orange : Color.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// One coloured run per task, largest first, as fractions of capacity.
+    ///
+    /// Built from `data.taskTotals` — the same figures the breakdown section lists, so the bar can't
+    /// disagree with the rows below it.
+    private var capacitySlices: [(id: Int64, colorHex: String, fraction: Double)] {
+        guard let cap = data.capacity, cap.capacitySeconds > 0 else { return [] }
+        return data.taskTotals
+            .filter { $0.seconds > 0 }
+            .map { total in
+                (id: total.project.id,
+                 colorHex: model.colorHex(for: total.project),
+                 fraction: total.seconds / cap.capacitySeconds)
+            }
+    }
+
+    /// Diagonal hatching for owed time, in the accent colour at low opacity.
+    private var owedStripes: some View {
+        Rectangle()
+            .fill(Color.accentColor.opacity(0.28))
+            .overlay(
+                GeometryReader { geo in
+                    Path { path in
+                        // A stripe every 5pt, slanted by the bar's height so the angle is consistent
+                        // however wide the segment is.
+                        let step: CGFloat = 5
+                        var x: CGFloat = -geo.size.height
+                        while x < geo.size.width + geo.size.height {
+                            path.move(to: CGPoint(x: x, y: geo.size.height))
+                            path.addLine(to: CGPoint(x: x + geo.size.height, y: 0))
+                            x += step
+                        }
+                    }
+                    .stroke(Color.accentColor.opacity(0.75), lineWidth: 1.4)
+                }
+            )
+    }
+
+    /// A plain noun for the period. `rangeUnitLabel` yields the pill's letter ("d", "w"), which reads as
+    /// nonsense mid-sentence — "more than the 16h waking in this d".
+    private var capacityPeriodNoun: String {
+        switch range.unit {
+        case .day: return "day"
+        case .week: return "week"
+        case .month: return "month"
+        case .sixMonths: return "six months"
+        case .year: return "year"
+        case .all: return "period"
+        }
+    }
+
+    /// "5h 12m done · 3h 18m still owed · 7h 30m free of 16h", or the overcommitted variant.
+    ///
+    /// Spelled out in words because the segments alone can't say which is which: three runs of colour
+    /// need a legend, and one sentence is a smaller price than three labels under an 11pt bar.
+    private var capacityCaption: String {
+        guard let cap = data.capacity else { return "" }
+        // `BudgetRows.duration(0)` is bare "0", which reads as a typo mid-sentence ("0 done · 9h 17m
+        // still owed"). Words, since an empty period is the common case first thing in the morning.
+        let done = cap.trackedSeconds > 0 ? "\(BudgetRows.duration(cap.trackedSeconds)) done"
+                                          : "nothing tracked yet"
+        let total = BudgetRows.duration(cap.capacitySeconds)
+        if cap.owedSeconds <= 0 {
+            return "\(done) · \(BudgetRows.duration(cap.freeSeconds)) free of \(total) waking"
+        }
+        let owed = BudgetRows.duration(cap.owedSeconds)
+        if cap.isOvercommitted {
+            let over = cap.trackedSeconds + cap.owedSeconds - cap.capacitySeconds
+            return "\(done) · \(owed) still owed — \(BudgetRows.duration(over)) more than the "
+                + "\(total) waking in this \(capacityPeriodNoun)"
+        }
+        return "\(done) · \(owed) still owed · \(BudgetRows.duration(cap.freeSeconds)) free "
+            + "of \(total) waking"
     }
 
     private func stat(_ label: String, _ value: String, _ tint: Color) -> some View {
@@ -1046,6 +1160,12 @@ struct MetricsScreen: View {
             targets: (try? store.listTargets()) ?? [], tasks: model.allTasks,
             groups: model.groups, tags: model.allTags, tagIDsByTask: tagIDsByTask,
             intervals: all, viewedRange: range, now: now)
+        // Built from the rows above and the summary's total, so the bar, the caption and the budget
+        // list below are three views of one calculation rather than three calculations.
+        d.capacity = Capacity.breakdown(
+            rows: d.budgets, wakingSecondsPerDay: model.settings.wakingSeconds, range: range,
+            trackedSeconds: d.summary.totalSeconds, tasks: model.allTasks,
+            tagIDsByTask: tagIDsByTask)
         // REUSE the existing strip unless the unit changed.
         //
         // Measured at 197 ms of a 214 ms rebuild — twelve dropped frames on every single swipe, because
