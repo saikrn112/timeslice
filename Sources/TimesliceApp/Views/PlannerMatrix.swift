@@ -1,6 +1,5 @@
 import SwiftUI
 import TimesliceCore
-import TimesliceUI
 
 /// The plan as one object: allocations down, days across.
 ///
@@ -23,12 +22,6 @@ struct PlannerMatrix: View {
     /// where what actually happened is the fact and the plan is only a memory of an intention.
     let actualTotals: [Int: TimeInterval]
     let today: Int
-    /// How far through the week we are, by waking hours. Drawn as a notch inside every row's bar, so
-    /// "behind" is the gap between the fill and the notch rather than a number to compare.
-    let paceFraction: Double
-    /// Allocation id → the allocation it sits inside, when it does. A tooltip rather than a chip: it's
-    /// an explanation for a surprising row, not a thing to act on.
-    let nestedIn: [Int64: String]
     let colorFor: (Int64) -> String
     let nameFor: (Int64) -> String
 
@@ -36,7 +29,7 @@ struct PlannerMatrix: View {
     /// Width of one day column. Wide enough for "12.5h" in the load row underneath.
     private static let dayWidth: CGFloat = 46
     private static let nameWidth: CGFloat = 118
-    private static let progressWidth: CGFloat = 96
+    private static let progressWidth: CGFloat = 74
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -138,17 +131,9 @@ struct PlannerMatrix: View {
             }
             .frame(width: Self.nameWidth, alignment: .leading)
 
-            // The figure sits inside the fill, and the notch says where it should be — the same
-            // two-tone bar the metrics allocation rows use, so one bar answers "how far" and "how far
-            // behind" without a second column. This replaced a separate stack of goal bars above the
-            // matrix that said the same thing twice.
-            InlineBar(fraction: row.target > 0 ? min(1, row.done / row.target) : 0,
-                      label: row.target > 0
-                             ? "\(Int(((row.done / row.target) * 100).rounded()))%" : "—",
-                      fill: Color(hex: colorFor(row.targetID)),
-                      height: 14,
-                      marker: paceFraction)
-                .frame(width: Self.progressWidth)
+            ProgressPair(done: row.done, total: row.target,
+                         tint: Color(hex: colorFor(row.targetID)))
+                .frame(width: Self.progressWidth, height: 7)
                 .padding(.trailing, 10)
 
             ForEach(plan.days, id: \.weekday) { day in
@@ -243,10 +228,6 @@ struct PlannerMatrix: View {
     private func tooltip(_ row: Row) -> String {
         guard let item = row.item else { return row.name }
         var lines = ["\(row.name): \(short(item.doneSeconds)) of \(short(item.targetSeconds))"]
-        if let outer = nestedIn[row.targetID] {
-            lines.append("inside \(outer) — these hours are already counted there, so it asks for "
-                         + "nothing extra")
-        }
         if item.debtSeconds > 60 {
             lines.append("behind by \(short(item.debtSeconds)) against an even spread")
         }
