@@ -19,6 +19,7 @@ let package = Package(
         // one type with one metadata contribution rather than a copy per target.
         .library(name: "TimesliceIntents", targets: ["TimesliceIntents"]),
         .executable(name: "TimesliceApp", targets: ["TimesliceApp"]),
+        .executable(name: "TimesliceWindowID", targets: ["TimesliceWindowID"]),
     ],
     dependencies: [
         // Global hotkeys are done with a hand-rolled Carbon RegisterEventHotKey wrapper
@@ -26,6 +27,9 @@ let package = Package(
         // package can't build under Command Line Tools (its #Preview macros need full Xcode).
     ],
     targets: [
+        // Window-id lookup for scripts/shot.sh. Tiny and dependency-free on purpose.
+        .executableTarget(name: "TimesliceWindowID", path: "Tools/TimesliceWindowID"),
+
         .target(
             name: "TimesliceCore",
             path: "Sources/TimesliceCore",

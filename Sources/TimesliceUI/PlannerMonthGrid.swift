@@ -1,6 +1,5 @@
 import SwiftUI
 import TimesliceCore
-import TimesliceUI
 
 /// The month as a month calendar: real weeks in real rows, each day a cell that fills up.
 ///
@@ -11,37 +10,63 @@ import TimesliceUI
 ///
 /// Which is the point the month view exists for: deciding how to play catch-up over the weeks ahead
 /// needs the weeks behind you visible in the same picture.
-struct PlannerMonthGrid: View {
-    struct Slice: Identifiable {
-        let id: Int64          // target id, or a negative sentinel for unallocated
-        let hours: Double
-        let colorHex: String
+public struct PlannerMonthGrid: View {
+    public struct Slice: Identifiable {
+        public let id: Int64          // target id, or a negative sentinel for unallocated
+        public let hours: Double
+        public let colorHex: String
+
+        public init(id: Int64, hours: Double, colorHex: String) {
+            self.id = id
+            self.hours = hours
+            self.colorHex = colorHex
+        }
     }
 
-    struct DayCell: Identifiable {
-        let date: Date
-        let dayOfMonth: Int
+    public struct DayCell: Identifiable {
+        public let date: Date
+        public let dayOfMonth: Int
         /// False for the leading/trailing days that fill the first and last rows.
-        let inMonth: Bool
-        let isToday: Bool
-        let isPast: Bool
-        let reservedHours: Double
+        public let inMonth: Bool
+        public let isToday: Bool
+        public let isPast: Bool
+        public let reservedHours: Double
         /// Tracked hours by allocation, largest first.
-        let tracked: [Slice]
+        public let tracked: [Slice]
         /// What the plan still wants on this day. Zero for days that have gone.
-        let plannedHours: Double
-        var id: Date { date }
+        public let plannedHours: Double
+        public var id: Date { date }
+
+        public init(date: Date, dayOfMonth: Int, inMonth: Bool, isToday: Bool, isPast: Bool,
+                    reservedHours: Double, tracked: [Slice], plannedHours: Double) {
+            self.date = date
+            self.dayOfMonth = dayOfMonth
+            self.inMonth = inMonth
+            self.isToday = isToday
+            self.isPast = isPast
+            self.reservedHours = reservedHours
+            self.tracked = tracked
+            self.plannedHours = plannedHours
+        }
     }
 
-    let weeks: [[DayCell]]
-    let wakingHours: Double
-    let highlight: Int64?
-    var onPick: (Int64) -> Void = { _ in }
+    public let weeks: [[DayCell]]
+    public let wakingHours: Double
+    public let highlight: Int64?
+    public var onPick: (Int64) -> Void
+
+    public init(weeks: [[DayCell]], wakingHours: Double, highlight: Int64?,
+                onPick: @escaping (Int64) -> Void = { _ in }) {
+        self.weeks = weeks
+        self.wakingHours = wakingHours
+        self.highlight = highlight
+        self.onPick = onPick
+    }
 
     private static let dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
     private static let cellHeight: CGFloat = 62
 
-    var body: some View {
+    public var body: some View {
         VStack(spacing: 3) {
             HStack(spacing: 3) {
                 ForEach(Self.dayNames, id: \.self) { name in
@@ -69,8 +94,10 @@ struct PlannerMonthGrid: View {
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
                 if day.plannedHours > 0.02 {
-                    Hatch(color: .accentColor)
-                        .frame(height: barHeight(day.plannedHours))
+                    Hatch(color: day.plannedHours + day.reservedHours > wakingHours
+                          ? PlannerPalette.over : .accentColor)
+                        .frame(height: plannedHeight(day))
+                        .opacity(0.7)
                 }
                 ForEach(day.tracked) { slice in
                     Rectangle()
@@ -91,9 +118,16 @@ struct PlannerMonthGrid: View {
                     .foregroundStyle(day.isToday ? Color.accentColor
                                      : Color.secondary.opacity(day.inMonth ? 1 : 0.55))
                 if tracked > 0.02 {
-                    Text(PlannerCalendar.short(tracked))
+                    Text(PlannerWeekGrid.short(tracked))
                         .font(.system(size: 9, design: .monospaced))
                         .foregroundStyle(.tertiary)
+                } else if day.plannedHours > 0.02 {
+                    // Without this, thirty future cells of identical hatching said nothing. The figure
+                    // is what separates a Tuesday asking for 14h from a Sunday asking for 5h.
+                    Text("\(PlannerWeekGrid.short(day.plannedHours)) planned")
+                        .font(.system(size: 9))
+                        .foregroundStyle(day.plannedHours + day.reservedHours > wakingHours
+                                         ? PlannerPalette.over : Color.secondary.opacity(0.6))
                 }
             }
             .padding(3)
@@ -108,19 +142,24 @@ struct PlannerMonthGrid: View {
         max(1, Self.cellHeight * CGFloat(min(1, hours / max(1, wakingHours))))
     }
 
+    /// Planned hours, but never more of the cell than the day actually has left after what's reserved.
+    private func plannedHeight(_ day: DayCell) -> CGFloat {
+        barHeight(min(day.plannedHours, max(0, wakingHours - day.reservedHours)))
+    }
+
     private func tooltip(_ day: DayCell, tracked: Double) -> String {
         let f = DateFormatter()
         f.dateFormat = "EEEE d MMM"
         var lines = [f.string(from: day.date)]
         for slice in day.tracked where slice.hours > 0.02 {
-            lines.append("  \(PlannerCalendar.short(slice.hours))")
+            lines.append("  \(PlannerWeekGrid.short(slice.hours))")
         }
-        lines.append("tracked \(PlannerCalendar.short(tracked)) of \(Int(wakingHours))h awake")
+        lines.append("tracked \(PlannerWeekGrid.short(tracked)) of \(Int(wakingHours))h awake")
         if day.reservedHours > 0.02 {
-            lines.append("reserved \(PlannerCalendar.short(day.reservedHours))")
+            lines.append("reserved \(PlannerWeekGrid.short(day.reservedHours))")
         }
         if day.plannedHours > 0.02 {
-            lines.append("still wanted \(PlannerCalendar.short(day.plannedHours))")
+            lines.append("still wanted \(PlannerWeekGrid.short(day.plannedHours))")
         }
         return lines.joined(separator: "\n")
     }

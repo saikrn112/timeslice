@@ -22,6 +22,15 @@ enum DemoData {
         ProcessInfo.processInfo.environment["TIMESLICE_SEED_DEMO"] == "1"
     }
 
+    /// A capture run: open the window, change nothing, and ask for nothing.
+    ///
+    /// `scripts/shot.sh` sets this. It has to suppress the Accessibility explainer, because that sheet
+    /// is modal and sits over the window being photographed — the first attempt at a screenshot loop
+    /// produced a picture of the permission dialog four times before anyone looked at the file.
+    static var isCaptureRun: Bool {
+        ProcessInfo.processInfo.environment["TIMESLICE_OPEN_WINDOW"] == "1"
+    }
+
     /// A separate DB file so seeding never clobbers the user's real timeslice.db.
     static var databaseURL: URL {
         TimeslicePaths.defaultSupportDirectoryURL().appendingPathComponent("timeslice-demo.db")

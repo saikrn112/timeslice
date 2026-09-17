@@ -115,6 +115,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let first = appState.projects.first { engine.switchTo(projectID: first.id) }
             appState.reload()
             showMainWindow()
+        } else if ProcessInfo.processInfo.environment["TIMESLICE_OPEN_WINDOW"] == "1" {
+            // Open the window and touch nothing else. `scripts/shot.sh` uses this to photograph the
+            // real UI with real data; the demo path above would seed rows and START A TIMER, which
+            // against a live database is a data change disguised as a screenshot.
+            showMainWindow()
         }
     }
 
@@ -235,7 +240,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Requires Accessibility permission. If not yet granted, guide the user, then poll.
         // Only a screenshot run skips this — the modal would sit on top of the window being
         // captured. Plain demo mode still prompts, so hotkeys can be tested against demo data.
-        if !hotkeys.register() && !DemoData.isScreenshotRun && !DemoData.isSandboxRun {
+        if !hotkeys.register() && !DemoData.isScreenshotRun && !DemoData.isSandboxRun
+            && !DemoData.isCaptureRun {
             promptForAccessibility()
             pollForAccessibility()
         }

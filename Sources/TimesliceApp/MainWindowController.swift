@@ -15,6 +15,15 @@ final class MainWindowController {
     /// empty space.
     private static var defaultContentSize: NSSize {
         let usable = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
+        // Explicit size for a capture run: the Planner is seven columns wide and 720pt makes every one
+        // of them too narrow to judge, which is not a fair look at the design.
+        if let want = ProcessInfo.processInfo.environment["TIMESLICE_WINDOW_SIZE"] {
+            let parts = want.lowercased().split(separator: "x").compactMap { Double($0) }
+            if parts.count == 2 {
+                return NSSize(width: min(parts[0], usable.width - 20),
+                              height: min(parts[1], usable.height - 20))
+            }
+        }
         let wantsShort = DemoData.isScreenshotRun
             && ProcessInfo.processInfo.environment["TIMESLICE_DEMO_TAB"] != "metrics"
         return NSSize(width: min(720, usable.width - 40),
