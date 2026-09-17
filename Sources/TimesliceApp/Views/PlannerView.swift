@@ -55,6 +55,9 @@ struct PlannerView: View {
         .environment["TIMESLICE_PLANNER_OFFSET"] ?? "") ?? 0
     /// Per allocation, seconds tracked inside the viewed period.
     @State private var periodActuals: [Int64: TimeInterval] = [:]
+    /// weekday → the tasks that no allocation covers. Feeds the double-click into Metrics, which can only
+    /// highlight "unallocated" by naming those tasks one by one.
+    @State private var unallocatedTaskIDs: [Int: [Int64]] = [:]
     /// Every second tracked inside the viewed period, allocation or not — the bar's "tracked" segment.
     @State private var periodTracked: TimeInterval = 0
     @State private var showReservations = false
@@ -213,8 +216,17 @@ struct PlannerView: View {
             guard let next = cal.date(byAdding: .day, value: 1, to: day) else { break }
             day = next
         }
-        let subject = targets.first { $0.id == targetID }?.subject
-        appState.metricsHandoff = AppState.MetricsHandoff(day: day, subject: subject)
+        // "Unallocated" isn't a subject, so it hands over the tasks themselves — the only way Metrics can
+        // highlight exactly the sessions that made up that grey block.
+        let subjects: [TargetSubject]
+        if targetID == -2 {
+            subjects = (unallocatedTaskIDs[weekday] ?? []).map { .task($0) }
+        } else if let subject = targets.first(where: { $0.id == targetID })?.subject {
+            subjects = [subject]
+        } else {
+            subjects = []
+        }
+        appState.metricsHandoff = AppState.MetricsHandoff(day: day, subjects: subjects)
     }
 
     private func pick(_ id: Int64) {
@@ -284,8 +296,13 @@ struct PlannerView: View {
                 }
             }
             if highlight != nil {
-                Button("show all") { highlight = nil }
-                    .buttonStyle(.link).font(.system(size: 9))
+                // Clears it on BOTH pages: it set the shared filter, so it has to unset it, or Metrics
+                // would still be filtered by an allocation this page says it isn't showing.
+                Button("clear filter") {
+                    highlight = nil
+                    appState.sharedFilter.subject = nil
+                }
+                .buttonStyle(.link).font(.system(size: 9))
             }
             Spacer()
         }
@@ -529,23 +546,18 @@ struct PlannerView: View {
                 } else {
                     // Plain words. "Still owed", "short" and "came up short" are the vocabulary of a
                     // ledger, and this is a page you glance at.
-                    HStack(spacing: 5) {
-                        Text("to do").font(.system(size: 10)).foregroundStyle(.secondary)
-                        Text(hours(budget.stillToDo))
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundStyle(budget.stillToDo > budget.freeLeft ? Self.overColor
-                                                                                : .orange)
-                        Text("of").font(.system(size: 10)).foregroundStyle(.secondary)
-                        Text(hours(budget.freeLeft))
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                        Text("left").font(.system(size: 10)).foregroundStyle(.secondary)
-                    }
-                    .help("\(hours(budget.freeLeft)) is the available hours on the days still to come, "
-                          + "with today counted only from now.\nNothing is held back for work outside "
-                          + "your allocations — that would be a guess about what you're going to do.")
-                    if budget.tracked > 60 { figure("done", budget.tracked, .accentColor) }
+                    // The same four words a finished period uses, plus the two only a live one has. The
+                    // headline says what it MEANS; these say what it is, and neither repeats the other.
+                    let goal = targets.filter { $0.direction == .atLeast }
+                        .reduce(0.0) { $0 + $1.weeklySeconds * unit.weeks }
+                    figure("goal", goal, .secondary)
+                    figure("done", periodActuals.values.reduce(0, +), .accentColor)
+                    figure("to do", budget.stillToDo,
+                           budget.stillToDo > budget.freeLeft ? Self.overColor : .orange)
+                    figure("free", budget.freeLeft, .secondary)
+                        .help("Available hours on the days still to come, with today counted only from "
+                              + "now.\nNothing is held back for work outside your allocations — that "
+                              + "would be a guess about what you're going to do.")
                 }
             }
 
@@ -635,15 +647,15 @@ struct PlannerView: View {
         if unit == .month {
             let budget = periodBudget()
             if budget.stillToDo > budget.freeLeft + 60 {
-                return "\(hours(budget.stillToDo)) to do, only "
-                     + "\(hours(budget.freeLeft)) free left this month"
+                return "Over by \(hours(budget.stillToDo - budget.freeLeft)) this month"
             }
             if offset > 0 {
                 return budget.stillToDo > 60
                     ? "That month came up \(hours(budget.stillToDo)) short"
                     : "That month held together"
             }
-            return "The month still fits"
+            let spare = budget.freeLeft - budget.stillToDo
+            return spare > 3600 ? "Fits, \(hours(spare)) spare this month" : "Fits, only just"
         }
         // Says what the comparison IS. "Not finishable" was a conclusion with its reasoning hidden,
         // which is exactly the kind of number nobody can argue with or trust.
@@ -652,7 +664,7 @@ struct PlannerView: View {
         // by a few hours — and the card said "The week fits" directly above "to do 43.1h of 42h left".
         let budget = periodBudget()
         if budget.stillToDo > budget.freeLeft + 60 {
-            return "\(hours(budget.stillToDo)) to do, only \(hours(budget.freeLeft)) free left"
+            return "Over by \(hours(budget.stillToDo - budget.freeLeft))"
         }
         // A day over capacity outranks the weekly total: saying "the week fits" above a grid with a
         // 2.2h red cap on Friday is the page arguing with itself.
@@ -667,7 +679,9 @@ struct PlannerView: View {
             }
         }
         switch plan.verdict {
-        case .fits: return "The week fits"
+        case .fits:
+            let spare = budget.freeLeft - budget.stillToDo
+            return spare > 3600 ? "Fits, \(hours(spare)) spare" : "Fits, only just"
         case .tight: return "Fits, only just"
         case .oversubscribed where !plan.overloadedDays.isEmpty:
             return "\(dayList(plan.overloadedDays)) over capacity"
@@ -765,6 +779,7 @@ struct PlannerView: View {
         // weekday → allocation id (or -2 for unallocated) → task name → seconds. Feeds the blob tooltips,
         // so hovering "unallocated 2.4h" can say which tasks that actually was.
         var breakdown: [Int: [Int64: [String: TimeInterval]]] = [:]
+        var uncovered: [Int: Set<Int64>] = [:]
         let taskNamesByID = Dictionary(tasks.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
         for interval in intervals {
             let start = max(interval.start, week.start)
@@ -793,10 +808,12 @@ struct PlannerView: View {
             if !claimed {
                 otherByDay[weekday, default: 0] += seconds
                 breakdown[weekday, default: [:]][-2, default: [:]][taskName, default: 0] += seconds
+                uncovered[weekday, default: []].insert(interval.projectID)
             }
         }
         actuals = byDay
         unallocated = otherByDay
+        unallocatedTaskIDs = uncovered.mapValues { Array($0) }
         actualTotals = totalByDay
 
         // The viewed window's own totals, which is what the goal rows read. Separate from the weekly
@@ -1081,7 +1098,7 @@ struct PlannerView: View {
 
     /// Open a specific date in Metrics, with nothing pinned. The month view's double-click.
     private func openInMetrics(day: Date) {
-        appState.metricsHandoff = AppState.MetricsHandoff(day: day, subject: nil)
+        appState.metricsHandoff = AppState.MetricsHandoff(day: day, subjects: [])
     }
 
     private func name(for target: Target, tasks: [Project]? = nil) -> String {

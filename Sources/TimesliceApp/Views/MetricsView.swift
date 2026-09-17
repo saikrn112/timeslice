@@ -63,10 +63,17 @@ struct MetricsView: View {
 
     /// Publish the current selection so the Planner opens on the same thing.
     ///
+    /// One field per call, and that matters: publishing BOTH from a range change read `pinnedFocuses`
+    /// before SwiftUI had applied the adoption that set it, so arriving here wiped the allocation you had
+    /// picked in the Planner — the filter vanished on the way back.
+    ///
     /// Only the FIRST pinned allocation travels: "these two combined" is a question the Planner can't ask,
     /// and silently dropping the second one there would be worse than not carrying it.
-    private func publishSharedFilter() {
+    private func publishSharedDay() {
         appState.sharedFilter.day = range.start
+    }
+
+    private func publishSharedSubject() {
         appState.sharedFilter.subject = pinnedFocuses.first.flatMap(Self.subject(for:))
     }
 
@@ -90,14 +97,10 @@ struct MetricsView: View {
     /// returning to this tab later doesn't yank the range back to a day you have finished with.
     private func applyHandoff(_ handoff: AppState.MetricsHandoff) {
         range = DateRange.resolve(unit: .day, anchor: handoff.day, earliest: earliest)
-        switch handoff.subject {
-        case .task(let id): pinnedFocuses = [.task(id)]
-        case .project(let id): pinnedFocuses = [.group(id)]
-        case .tag(let id): pinnedFocuses = [.tag(id)]
-        case nil: pinnedFocuses = []
-        }
+        pinnedFocuses = handoff.subjects.map(Self.focus(for:))
         appState.metricsHandoff = nil
-        publishSharedFilter()
+        publishSharedDay()
+        publishSharedSubject()
     }
 
     /// The highlights actually in effect. PINS win over hover: once you've clicked something you're
@@ -188,8 +191,8 @@ struct MetricsView: View {
                     .onChange(of: appState.metricsHandoff) { _, handoff in
                         if let handoff { applyHandoff(handoff) }
                     }
-                    .onChange(of: range) { _, _ in publishSharedFilter() }
-                    .onChange(of: pinnedFocuses) { _, _ in publishSharedFilter() }
+                    .onChange(of: range) { _, _ in publishSharedDay() }
+                    .onChange(of: pinnedFocuses) { _, _ in publishSharedSubject() }
                 tiles
                 // Budgets report against their OWN period (a weekly one always shows this week), so
                 // each row states its period. That per-row label is what keeps them from reading as

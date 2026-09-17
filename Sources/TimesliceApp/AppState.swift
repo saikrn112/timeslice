@@ -35,8 +35,10 @@ final class AppState: ObservableObject {
     /// Metrics page already answers properly for a given day.
     struct MetricsHandoff: Equatable {
         let day: Date
-        /// nil asks only for the day, which is what an unallocated blob means.
-        let subject: TargetSubject?
+        /// What to pin. A LIST, because "unallocated" is not one subject — it's every task no allocation
+        /// covers, and Metrics can express that only as a multi-selection of those tasks. Empty asks for
+        /// the day alone.
+        let subjects: [TargetSubject]
     }
     @Published var metricsHandoff: MetricsHandoff?
 

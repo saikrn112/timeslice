@@ -30,7 +30,14 @@ if [ -f "$SRC" ]; then
   [ -f "$SRC-shm" ] && cp "$SRC-shm" "$SHOT_DB-shm"
 fi
 
-TIMESLICE_DEMO_TAB="$TAB" TIMESLICE_WINDOW_SIZE="${W}x${H}" \
+# WAKING=5 renders the page as if the waking day were five hours, against the copied database only.
+EXTRA=()
+if [ -n "${WAKING:-}" ]; then
+  EXTRA+=(TIMESLICE_WAKING_HOURS="$WAKING")
+fi
+
+env "${EXTRA[@]+"${EXTRA[@]}"}" \
+  TIMESLICE_DEMO_TAB="$TAB" TIMESLICE_WINDOW_SIZE="${W}x${H}" \
   TIMESLICE_PLANNER_UNIT="${PLANNER_UNIT:-week}" \
   TIMESLICE_PLANNER_OFFSET="${PLANNER_OFFSET:-0}" \
   TIMESLICE_OPEN_WINDOW=1 TIMESLICE_DB_PATH="$SHOT_DB" TIMESLICE_SANDBOX_ROLE=shot \

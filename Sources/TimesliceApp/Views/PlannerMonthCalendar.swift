@@ -48,25 +48,80 @@ struct PlannerMonthCalendar: View {
     var onOpen: (Date) -> Void = { _ in }
 
     private static let dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-    private static let cellHeight: CGFloat = 50
+    private static let cubeGap: CGFloat = 2
+    private static let headerHeight: CGFloat = 13
+    private static let cellPadding: CGFloat = 5
+
+    /// Hours in the longest day of the month, which is what the grid has to be able to hold.
+    ///
+    /// Taken from the data rather than assumed, because the waking day is a setting: at 5h a single row of
+    /// cubes is right and two would be an empty half; at 24h three rows are needed. A fixed layout left a
+    /// band of dead space under every cell at 14h and would have squashed the cubes at 24h.
+    private var hoursInLongestDay: Int {
+        let longest = weeks.flatMap { $0 }
+            .map { capacityHours - $0.unavailableHours }
+            .max() ?? capacityHours
+        return Int(max(1, longest.rounded()))
+    }
+
+    /// Columns and rows for that many cubes: at most three rows, and never so many columns that a cube
+    /// becomes a speck.
+    private var shape: (columns: Int, rows: Int) {
+        let hours = hoursInLongestDay
+        let columns: Int
+        switch hours {
+        case ...6: columns = max(1, hours)          // one row, one cube per hour
+        case ...12: columns = 6
+        case ...16: columns = 8
+        default: columns = 8
+        }
+        return (columns, max(1, Int((Double(hours) / Double(columns)).rounded(.up))))
+    }
 
     var body: some View {
-        VStack(spacing: 4) {
-            HStack(spacing: 4) {
-                ForEach(Self.dayNames, id: \.self) { name in
-                    Text(name).font(.system(size: 10)).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
-                }
-            }
-            ForEach(Array(weeks.enumerated()), id: \.offset) { _, week in
+        // One GeometryReader for the whole grid, so a cube's size — and therefore the cell's height — is
+        // known before the cells are laid out. Sizing per-cell left leftover height that showed as a band.
+        GeometryReader { geo in
+            let shape = self.shape
+            let cellWidth = (geo.size.width - Self.cubeGap * 6) / 7
+            let content = cellWidth - Self.cellPadding * 2
+            let side = max(4, min(11, (content - Self.cubeGap * CGFloat(shape.columns - 1))
+                                       / CGFloat(shape.columns)))
+            let cellHeight = Self.headerHeight + 3 + side * CGFloat(shape.rows)
+                + Self.cubeGap * CGFloat(shape.rows - 1) + Self.cellPadding * 2
+
+            VStack(spacing: 4) {
                 HStack(spacing: 4) {
-                    ForEach(week) { cell($0) }
+                    ForEach(Self.dayNames, id: \.self) { name in
+                        Text(name).font(.system(size: 10)).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                ForEach(Array(weeks.enumerated()), id: \.offset) { _, week in
+                    HStack(spacing: 4) {
+                        ForEach(week) { day in
+                            cell(day, shape: shape, side: side, height: cellHeight)
+                        }
+                    }
                 }
             }
         }
+        .frame(height: gridHeight)
     }
 
-    private func cell(_ day: DayCell) -> some View {
+    /// The height the whole grid needs, so the enclosing card doesn't have to guess.
+    private var gridHeight: CGFloat {
+        // Recomputed from a nominal cube size; the GeometryReader above refines the cubes, and the rows are
+        // what the height depends on.
+        let shape = self.shape
+        let side: CGFloat = 11
+        let cellHeight = Self.headerHeight + 3 + side * CGFloat(shape.rows)
+            + Self.cubeGap * CGFloat(shape.rows - 1) + Self.cellPadding * 2
+        return 18 + CGFloat(weeks.count) * (cellHeight + 4)
+    }
+
+    private func cell(_ day: DayCell, shape: (columns: Int, rows: Int), side: CGFloat,
+                      height: CGFloat) -> some View {
         let tracked = day.tracked.reduce(0) { $0 + $1.hours }
         let towards = day.tracked.filter { $0.id >= 0 }.reduce(0) { $0 + $1.hours }
         let short = day.wantedHours - towards
@@ -106,12 +161,12 @@ struct PlannerMonthCalendar: View {
             //
             // Its LENGTH is how full the day got, its SEGMENTS are what filled it, and the notch is what
             // the day's allocations wanted — so short, met and overshot are all one glance.
-            cubes(day)
+            cubes(day, shape: shape, side: side)
 
             Spacer(minLength: 0)
         }
-        .padding(5)
-        .frame(height: Self.cellHeight)
+        .padding(Self.cellPadding)
+        .frame(height: height)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background {
             RoundedRectangle(cornerRadius: 5)
@@ -137,39 +192,26 @@ struct PlannerMonthCalendar: View {
     /// One cube is one available hour, filled in order by what you actually did, faint for the hours that
     /// went nowhere. The bracket marks where the day's allocations wanted to reach, so short and met are
     /// visible without a figure.
-    private func cubes(_ day: DayCell) -> some View {
+    private func cubes(_ day: DayCell, shape: (columns: Int, rows: Int),
+                       side: CGFloat) -> some View {
         let available = Int(max(1, (capacityHours - day.unavailableHours).rounded()))
         let filled = cubeCounts(day, total: available)
         let wanted = min(available, Int(day.wantedHours.rounded()))
-        let columns = min(8, max(5, Int((Double(available) / 2).rounded(.up))))
-        let rows = rowCount(available, columns: columns)
-        // Sized from the space it's given rather than a fixed 8pt, so the grid reaches both edges. At a
-        // fixed size it left a dead band down the right and along the bottom of every cell, which read as
-        // uneven padding rather than as a grid.
-        return GeometryReader { geo in
-            let gap: CGFloat = 2
-            let side = max(4, min((geo.size.width - gap * CGFloat(columns - 1)) / CGFloat(columns),
-                                  (geo.size.height - gap * CGFloat(rows - 1)) / CGFloat(rows)))
-            VStack(alignment: .leading, spacing: gap) {
-                ForEach(0..<rows, id: \.self) { row in
-                    HStack(spacing: gap) {
-                        ForEach(0..<columns, id: \.self) { column in
-                            let index = row * columns + column
-                            if index < available {
-                                cube(index: index, filled: filled, wanted: wanted, side: side)
-                            } else {
-                                Color.clear.frame(width: side, height: side)
-                            }
+        return VStack(alignment: .leading, spacing: Self.cubeGap) {
+            ForEach(0..<shape.rows, id: \.self) { row in
+                HStack(spacing: Self.cubeGap) {
+                    ForEach(0..<shape.columns, id: \.self) { column in
+                        let index = row * shape.columns + column
+                        if index < available {
+                            cube(index: index, filled: filled, wanted: wanted, side: side)
+                        } else {
+                            // A shorter day than the longest one: the cube simply isn't there.
+                            Color.clear.frame(width: side, height: side)
                         }
                     }
                 }
             }
-            .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
         }
-    }
-
-    private func rowCount(_ available: Int, columns: Int) -> Int {
-        max(1, Int((Double(available) / Double(columns)).rounded(.up)))
     }
 
     /// Cube index → the allocation that owns it, or nil for an hour nothing was tracked in.
@@ -235,11 +277,6 @@ struct PlannerMonthCalendar: View {
             }
         }
         return out
-    }
-
-    private func height(_ hours: Double) -> CGFloat {
-        guard capacityHours > 0 else { return 0 }
-        return max(1, (Self.cellHeight - 6) * CGFloat(min(hours, capacityHours) / capacityHours))
     }
 
     private func tooltip(_ day: DayCell, tracked: Double, towards: Double) -> String {

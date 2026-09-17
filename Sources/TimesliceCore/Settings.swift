@@ -82,6 +82,14 @@ public final class AppSettings: ObservableObject {
 
     public var wakingSeconds: TimeInterval { wakingHours * 3600 }
 
+    /// A capture run can ask for a different waking day without touching your settings, so "what does the
+    /// planner look like at 5h, or 24h" is answerable from a screenshot rather than by reasoning.
+    static var wakingHoursOverride: Double? {
+        guard let raw = ProcessInfo.processInfo.environment["TIMESLICE_WAKING_HOURS"],
+              let hours = Double(raw), hours > 0 else { return nil }
+        return hours
+    }
+
     /// How far non-matching items fade while something is highlighted, as a percentage.
     /// 0 = no dimming at all (matches are picked out only by what tints), 90 = nearly invisible.
     /// SYNCED, though it's only cosmetic: a highlight that dims by 85% here and 40% there makes the
@@ -155,7 +163,13 @@ public final class AppSettings: ObservableObject {
         autoPauseMinutes = defaults.object(forKey: Keys.autoPauseMinutes) as? Int ?? 60
         idleNudgeMinutes = defaults.object(forKey: Keys.idleNudgeMinutes) as? Int ?? 15
         promptsEnabled = defaults.object(forKey: Keys.promptsEnabled) as? Bool ?? true
-        wakingHours = defaults.object(forKey: Keys.wakingHours) as? Double ?? 16
+        // A capture run can ask for a different waking day without touching your settings, so "what does
+        // this look like at 5h, or 24h" is answerable from a screenshot rather than by reasoning.
+        if let hours = Self.wakingHoursOverride {
+            wakingHours = hours
+        } else {
+            wakingHours = defaults.object(forKey: Keys.wakingHours) as? Double ?? 16
+        }
         highlightDimPercent = defaults.object(forKey: Keys.highlightDimPercent) as? Int ?? 85
         // A sandbox run can point both instances at one folder without touching real settings.
         deviceLabel = defaults.string(forKey: Keys.deviceLabel) ?? ""
@@ -230,7 +244,10 @@ public final class AppSettings: ObservableObject {
            let n = Int(row.value), n != deepBlockMinutes {
             deepBlockMinutes = n
         }
-        if let row = (try? store.settingValue(Keys.wakingHours)) ?? nil,
+        // The capture override wins over the stored value: adopting from the database put the real 14h
+        // straight back, so `WAKING=5 scripts/shot.sh` silently rendered the ordinary page.
+        if Self.wakingHoursOverride == nil,
+           let row = (try? store.settingValue(Keys.wakingHours)) ?? nil,
            let n = Double(row.value), n != wakingHours {
             wakingHours = n
         }
