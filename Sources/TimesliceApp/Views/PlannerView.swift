@@ -1,5 +1,6 @@
 import SwiftUI
 import TimesliceCore
+import TimesliceUI
 
 /// Whether the week is possible, and what to do about it today.
 ///
@@ -36,6 +37,15 @@ struct PlannerView: View {
     /// meant to be.
     @State private var actualTotals: [Int: TimeInterval] = [:]
     @State private var today = 1
+    /// Week or month. The allocation is a RATE, and the unit only changes the window it's read
+    /// through — the same trick the metrics allocation rows use for their second column of bars. So
+    /// "did I catch up on the weeks I missed" is a month-view question about the same numbers, not a
+    /// second set of goals with their own bookkeeping.
+    @State private var unit: PlanUnit = .week
+    /// How many periods back from the current one. 0 is now; 1 is last week or last month.
+    @State private var offset = 0
+    /// Per allocation, seconds tracked inside the viewed period.
+    @State private var periodActuals: [Int64: TimeInterval] = [:]
     @State private var showReservations = false
     @State private var showAllocations = false
 
@@ -43,17 +53,26 @@ struct PlannerView: View {
     /// thing across both pages.
     static let overColor = Color(red: 0.90, green: 0.30, blue: 0.32)
 
+    enum PlanUnit: String, CaseIterable, Identifiable {
+        case week = "Week", month = "Month"
+        var id: String { rawValue }
+        /// Nominal length, used to pro-rate a weekly allocation onto the window. A month is four weeks
+        /// here for the same reason `Target.Period` calls it 30 days: an allocation is an intention,
+        /// and a calendar-exact month would make the same one read differently in February.
+        var weeks: Double { self == .week ? 1 : 4 }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if let plan {
+                    periodBar
                     headline(plan)
-                    if let replan { todayCard(plan, replan) }
+                    goalRows(plan)
+                    if unit == .week, let replan { todayCard(plan, replan) }
                     PlannerMatrix(plan: plan, replan: replan, actuals: actuals,
                                   actualTotals: actualTotals, today: today,
-                                  colorFor: colorHex(forTarget:), nameFor: name(forTarget:),
-                                  adjust: adjust(targetID:by:),
-                                  widenDays: widenDays(targetID:))
+                                  colorFor: colorHex(forTarget:), nameFor: name(forTarget:))
                     notes(plan)
                 } else {
                     empty
@@ -77,6 +96,167 @@ struct PlannerView: View {
                 rebuild()
             }
         }
+    }
+
+    // MARK: - Goals
+
+    /// One row per allocation, read through the viewed window, worst lag first.
+    ///
+    /// This is the part that gets looked at constantly, so it's the part that has to answer in one
+    /// glance: how far through this allocation am I, and how far through should I be. The bar carries
+    /// its own percentage in the same two-tone way the metrics allocation bars do — the figure sits
+    /// inside the fill, so a row needs no second column to be readable.
+    ///
+    /// The window is the whole trick. An allocation is a RATE, so month view reads the same 35h/week
+    /// office as 140h and a skipped week shows up as being behind on the month. No separate monthly
+    /// goals, no debt bookkeeping.
+    @ViewBuilder
+    private func goalRows(_ plan: Planner) -> some View {
+        let rows = goalRowData(plan)
+        VStack(spacing: 3) {
+            ForEach(rows, id: \.id) { row in
+                HStack(spacing: 8) {
+                    Circle().fill(Color(hex: row.colorHex)).frame(width: 8, height: 8)
+                    Text(row.name).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
+                        .frame(width: 140, alignment: .leading).help(row.name)
+
+                    InlineBar(fraction: min(1, row.fraction),
+                              label: "\(Int((row.fraction * 100).rounded()))%",
+                              fill: Color(hex: row.colorHex),
+                              height: 15,
+                              // Where you SHOULD be by now, as a notch. The gap between the fill and
+                              // the notch is the lag, without a number for it.
+                              marker: row.paceFraction)
+                        .frame(maxWidth: .infinity)
+
+                    Text("\(hours(row.done)) of \(hours(row.target))")
+                        .font(.system(size: 11, design: .monospaced)).monospacedDigit()
+                        .frame(width: 104, alignment: .trailing)
+                    Text(row.trailing)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(row.lagging ? Self.overColor : Color.secondary)
+                        .frame(width: 96, alignment: .leading)
+                }
+                .help(row.tooltip)
+            }
+        }
+    }
+
+    private struct GoalRow: Identifiable {
+        let id: Int64
+        let name: String
+        let colorHex: String
+        let done: TimeInterval
+        let target: TimeInterval
+        /// Where the pace notch goes: how far through the window we are.
+        let paceFraction: Double
+        let trailing: String
+        let lagging: Bool
+        let tooltip: String
+        var fraction: Double { target > 0 ? done / target : 0 }
+    }
+
+    private func goalRowData(_ plan: Planner) -> [GoalRow] {
+        let floors = targets.filter { $0.direction == .atLeast }
+        let elapsed = elapsedFractionOfPeriod()
+        return floors.map { target -> GoalRow in
+            // The allocation's weekly rate, pro-rated onto the window. Four weeks in month view, so a
+            // 35h/week office reads as 140h and a missed week is visible as month-level lag.
+            let scaled = target.weeklySeconds * unit.weeks
+            let done = periodActuals[target.id] ?? 0
+            let shouldBe = scaled * elapsed
+            let behind = max(0, shouldBe - done)
+            return GoalRow(
+                id: target.id, name: name(for: target),
+                colorHex: BudgetRows.colorHex(for: target.subject, tasks: appState.projects,
+                                              groups: appState.taskProjects, tags: appState.allTags),
+                done: done, target: scaled, paceFraction: elapsed,
+                trailing: behind > 60 ? "behind \(hours(behind))"
+                          : (done >= scaled ? "met" : "on pace"),
+                lagging: behind > 60,
+                tooltip: "\(name(for: target)): \(hours(done)) of \(hours(scaled)) this "
+                       + "\(unit.rawValue.lowercased())\n"
+                       + "should be at \(hours(shouldBe)) by now "
+                       + "(\(Int((elapsed * 100).rounded()))% through)\n"
+                       + (behind > 60 ? "behind by \(hours(behind))" : "on pace"))
+        }
+        // Worst first: this page exists to say where you're lagging.
+        .sorted {
+            if $0.lagging != $1.lagging { return $0.lagging }
+            return ($0.paceFraction - $0.fraction) > ($1.paceFraction - $1.fraction)
+        }
+    }
+
+    /// How far through the viewed window we are, by waking hours rather than by wall clock — being
+    /// three days into a week is 43% of the calendar but not necessarily 43% of the hours you had.
+    private func elapsedFractionOfPeriod() -> Double {
+        guard let window = periodWindow() else { return 1 }
+        if offset > 0 { return 1 }              // a window in the past is fully elapsed
+        let total = window.end.timeIntervalSince(window.start)
+        guard total > 0 else { return 1 }
+        return min(1, max(0, Date().timeIntervalSince(window.start) / total))
+    }
+
+    // MARK: - Period
+
+    /// Week or month, and which one. Deliberately the same shape as the metrics range pills, because
+    /// it means the same thing.
+    private var periodBar: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 4) {
+                ForEach(PlanUnit.allCases) { candidate in
+                    Button {
+                        unit = candidate
+                        offset = 0
+                        rebuild()
+                    } label: {
+                        Text(candidate.rawValue)
+                            .font(.system(size: 12, weight: unit == candidate ? .semibold : .regular))
+                            .foregroundStyle(unit == candidate ? Color.accentColor : Color.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            Divider().frame(height: 12)
+            Button {
+                offset += 1
+                rebuild()
+            } label: { Image(systemName: "chevron.left") }
+                .buttonStyle(.plain).foregroundStyle(.secondary)
+            Text(periodLabel).font(.system(size: 12, weight: .medium))
+                .frame(minWidth: 150, alignment: .leading)
+            Button {
+                offset = max(0, offset - 1)
+                rebuild()
+            } label: { Image(systemName: "chevron.right") }
+                .buttonStyle(.plain)
+                .foregroundStyle(offset == 0 ? Color.secondary.opacity(0.3) : .secondary)
+                .disabled(offset == 0)
+            Spacer()
+        }
+    }
+
+    private var periodLabel: String {
+        guard let window = periodWindow() else { return "" }
+        let f = DateFormatter()
+        if unit == .month {
+            f.dateFormat = "MMMM yyyy"
+            return f.string(from: window.start)
+        }
+        f.dateFormat = "d MMM"
+        let end = window.end.addingTimeInterval(-1)
+        return offset == 0 ? "This week · \(f.string(from: window.start))"
+                           : "\(f.string(from: window.start)) – \(f.string(from: end))"
+    }
+
+    /// The viewed window. Weeks and months both come from `Calendar`, so they line up with what the
+    /// metrics page calls a week.
+    private func periodWindow() -> DateInterval? {
+        let cal = Calendar.current
+        let component: Calendar.Component = unit == .week ? .weekOfYear : .month
+        guard let anchor = cal.date(byAdding: component, value: -offset, to: Date()),
+              let interval = cal.dateInterval(of: component, for: anchor) else { return nil }
+        return interval
     }
 
     // MARK: - Headline
@@ -366,34 +546,28 @@ struct PlannerView: View {
         unallocated = otherByDay
         actualTotals = totalByDay
 
+        // The viewed window's own totals, which is what the goal rows read. Separate from the weekly
+        // figures above because the window can be a month, or a week that has already gone.
+        if let window = periodWindow() {
+            let inWindow = (try? store.intervals(from: window.start, to: window.end)) ?? []
+            var scoped: [Int64: TimeInterval] = [:]
+            for interval in inWindow {
+                let start = max(interval.start, window.start)
+                let end = min(interval.end ?? now, window.end)
+                guard end > start else { continue }
+                let seconds = end.timeIntervalSince(start)
+                for (id, ids) in idsBySubject where ids.contains(interval.projectID) {
+                    scoped[id, default: 0] += seconds
+                }
+            }
+            periodActuals = scoped
+        }
+
         replan = Replan.compute(plan: built, input: input, actuals: weekTotals,
                                 elapsedWeekdays: Array(1..<today),
                                 remainingWeekdays: Array(today...7),
                                 fractionOfTodayLeft: Replan.fractionOfDayLeft(
                                     now: now, wakingSeconds: settings.wakingSeconds, calendar: cal))
-    }
-
-    // MARK: - Acting on it
-
-    /// Change an allocation's weekly total and re-plan, from the row that showed the problem.
-    ///
-    /// Writes immediately rather than staging a draft: the step is an hour, the previous value is one
-    /// click back, and a confirm step on something this reversible is friction pretending to be safety.
-    /// Passes the existing weekdays and shape through — `setTarget` upserts every column it's given, and
-    /// omitting them is how editing hours once silently reset a weekday selection.
-    private func adjust(targetID: Int64, by delta: TimeInterval) {
-        guard let target = targets.first(where: { $0.id == targetID }) else { return }
-        let seconds = max(1800, target.seconds + delta)
-        _ = try? appState.storeForEditing.setTarget(
-            subject: target.subject, seconds: seconds, direction: target.direction,
-            period: target.period, weekdays: target.weekdays, shape: target.shape)
-        rebuild()
-    }
-
-    /// The commonest fix for "no days left": stop restricting it to weekdays that have passed.
-    private func widenDays(targetID: Int64) {
-        try? appState.storeForEditing.setTargetWeekdays(id: targetID, .all)
-        rebuild()
     }
 
     private func name(for target: Target, tasks: [Project]? = nil) -> String {
