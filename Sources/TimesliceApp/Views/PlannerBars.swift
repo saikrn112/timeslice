@@ -109,3 +109,35 @@ struct WeekBudgetBar: View {
         return "\(Int((seconds / 60).rounded()))m"
     }
 }
+
+/// Today, as a strip: how much of the day has gone, and how much of it was tracked.
+///
+/// Exists because nothing else on the page knew what time it was. At 11pm the card cheerfully offered
+/// "1.7h to go" — a plan in the morning and a fiction at night, with no way to tell which you were
+/// looking at. A day that is nearly spent should look nearly spent.
+struct DayClockBar: View {
+    /// How much of the waking day has passed, 0…1.
+    let elapsedFraction: Double
+    /// How much of the waking day was tracked, 0…1.
+    let trackedFraction: Double
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let elapsed = min(1, max(0, elapsedFraction))
+            let tracked = min(elapsed, max(0, trackedFraction))
+            ZStack(alignment: .leading) {
+                // What's still to come.
+                Capsule().fill(Color.primary.opacity(0.08))
+                // Everything before now, whether it was used or not.
+                Capsule().fill(Color.secondary.opacity(0.28)).frame(width: w * elapsed)
+                // The part of it that was actually tracked.
+                Capsule().fill(Color.accentColor.opacity(0.75)).frame(width: w * tracked)
+                // Now.
+                Rectangle().fill(Color.primary.opacity(0.7))
+                    .frame(width: 1.5)
+                    .offset(x: w * elapsed)
+            }
+        }
+    }
+}
