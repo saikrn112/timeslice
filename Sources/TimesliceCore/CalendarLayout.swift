@@ -77,32 +77,86 @@ public struct CalendarLayout {
         return out.filter { $0.hours > 1.0 / 60 }
     }
 
+    /// A span with the thing it belongs to, for merging runs of the same thing.
+    public struct Keyed: Sendable, Equatable {
+        public let key: Int64
+        public var span: Span
+        public init(key: Int64, span: Span) {
+            self.key = key
+            self.span = span
+        }
+    }
+
+    /// Join consecutive spans that belong to the same thing and are effectively continuous, so one
+    /// sitting looks like one block.
+    ///
+    /// A week of real tracking is ~150 intervals, because switching between two tasks in the same
+    /// allocation, or pausing for two minutes, starts a new row. Drawn literally that is confetti, and
+    /// it hides the shape of the day it is meant to show.
+    ///
+    /// Merging is done in **clock order across all keys**, not per key, which is the part that's easy to
+    /// get wrong: office 9–10, vllm 10:02–10:30, office 10:35–11 must stay three blocks. Merging office
+    /// with itself first would bridge 9–11 straight through the vllm block and draw two allocations in
+    /// the same place. Only neighbours in time can join.
+    public static func runs(_ items: [Keyed], maxGapHours: Double) -> [Keyed] {
+        let sorted = items.filter { $0.span.hours > 0 }.sorted { $0.span.start < $1.span.start }
+        var out: [Keyed] = []
+        for item in sorted {
+            if let last = out.last, last.key == item.key,
+               item.span.start - last.span.end <= maxGapHours {
+                out[out.count - 1].span.end = max(last.span.end, item.span.end)
+            } else {
+                out.append(item)
+            }
+        }
+        return out
+    }
+
     /// Lay owed items into the gaps, in the order given, splitting where a gap runs out.
+    ///
+    /// - Parameters:
+    ///   - minPiece: never carve a piece smaller than this, unless it's all that's left of the item.
+    ///     A planner that scatters twelve-minute fragments is planning the thing this app's own metrics
+    ///     call bad, and it reads as noise rather than as intent.
+    ///   - largestGapsFirst: place into the roomiest gaps before the earliest ones, so an owed hour
+    ///     lands as one session where a session is possible.
     ///
     /// Caller order is the priority order: whatever matters most should be first, because the earliest
     /// gaps are the ones that survive contact with a day. Anything that doesn't fit comes back in
     /// `unplaced`, keyed by item, which is what the column's overflow marker draws.
-    public static func pack(_ items: [Item],
-                            into gaps: [Span]) -> (pieces: [Piece], unplaced: [Int64: Double]) {
+    public static func pack(_ items: [Item], into gaps: [Span], minPiece: Double = 0,
+                            largestGapsFirst: Bool = false)
+                            -> (pieces: [Piece], unplaced: [Int64: Double]) {
         var remaining = gaps.filter { $0.hours > 1.0 / 60 }
+        if largestGapsFirst { remaining.sort { $0.hours > $1.hours } }
         var pieces: [Piece] = []
         var unplaced: [Int64: Double] = [:]
 
         for item in items where item.hours > 1.0 / 60 {
             var left = item.hours
-            while left > 1.0 / 60, let gap = remaining.first {
+            var index = 0
+            while left > 1.0 / 60, index < remaining.count {
+                let gap = remaining[index]
+                // A gap too small to hold a worthwhile piece is skipped rather than filled with a
+                // sliver — unless the sliver is the whole of what's left, which is a real answer.
+                if gap.hours < minPiece, left >= minPiece {
+                    index += 1
+                    continue
+                }
                 let take = min(left, gap.hours)
                 pieces.append(Piece(id: item.id,
                                     span: Span(start: gap.start, end: gap.start + take)))
                 left -= take
                 if take >= gap.hours - 1.0 / 60 {
-                    remaining.removeFirst()
+                    remaining.remove(at: index)
                 } else {
-                    remaining[0].start += take
+                    remaining[index].start += take
+                    index += 1
                 }
             }
             if left > 1.0 / 60 { unplaced[item.id] = left }
         }
-        return (pieces, unplaced)
+        // Chronological, whatever order they were placed in — the caller draws them on a clock.
+        return (pieces.sorted { $0.span.start < $1.span.start }, unplaced)
     }
 }

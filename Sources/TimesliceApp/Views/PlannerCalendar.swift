@@ -107,7 +107,7 @@ struct PlannerCalendar: View {
     }
 
     private var hourMarks: [Double] {
-        stride(from: Self.bandStart, through: Self.bandEnd, by: 2).map { $0 }
+        stride(from: Self.bandStart, through: Self.bandEnd, by: 3).map { $0 }
     }
 
     static func hourLabel(_ hour: Double) -> String {
@@ -189,8 +189,11 @@ struct PlannerCalendar: View {
 
         guard !day.owed.isEmpty else { return out }
         let gaps = CalendarLayout.gaps(band: band, busy: busy)
+        // Half an hour minimum, into the roomiest gaps first. Earliest-first with no minimum scattered
+        // twelve-minute slivers through every crack in the day — which is both unreadable and a plan for
+        // the fragmented work this app's own focus metric counts against you. Sessions, not confetti.
         let packed = CalendarLayout.pack(day.owed.map { CalendarLayout.Item(id: $0.id, hours: $0.hours) },
-                                         into: gaps)
+                                         into: gaps, minPiece: 0.5, largestGapsFirst: true)
         let byID = Dictionary(uniqueKeysWithValues: day.owed.map { ($0.id, $0) })
         out.ghosts = packed.pieces.compactMap { piece in
             byID[piece.id].map { ($0, piece.span) }
@@ -206,7 +209,9 @@ struct PlannerCalendar: View {
                       : Color.primary.opacity(day.isPast ? 0.02 : 0.035))
             // Two-hourly rules, so a block's position is readable without tracing to the axis.
             ForEach(Array(hourMarks.enumerated()), id: \.offset) { _, hour in
-                Rectangle().fill(Color.primary.opacity(hour == 24 ? 0.16 : 0.06))
+                // Midnight gets a real line; the rest are barely there. Rules you notice compete with
+                // the blocks, and the blocks are the content.
+                Rectangle().fill(Color.primary.opacity(hour == 24 ? 0.14 : 0.04))
                     .frame(height: hour == 24 ? 1 : 0.5)
                     .offset(y: y(for: hour))
             }
@@ -220,8 +225,10 @@ struct PlannerCalendar: View {
             Hatch(color: .secondary)
                 .frame(height: height(reserved.hours))
                 .overlay(alignment: .topLeading) {
-                    Text("reserved").font(.system(size: 8))
-                        .foregroundStyle(.secondary).padding(2)
+                    if reserved.hours > 0.8 {
+                        Text("reserved").font(.system(size: 8))
+                            .foregroundStyle(.secondary).padding(2)
+                    }
                 }
                 .offset(y: y(for: reserved.start))
         }
@@ -251,7 +258,7 @@ struct PlannerCalendar: View {
             }
             .frame(height: height(span.hours))
             .overlay(alignment: .topLeading) {
-                if span.hours > 0.55 {
+                if span.hours > 0.8 {
                     Text(item.name)
                         .font(.system(size: 9))
                         .foregroundStyle(tint)
@@ -275,7 +282,7 @@ struct PlannerCalendar: View {
             .fill(tint.opacity(unallocated ? 0.30 : 0.92))
             .frame(height: height(hours))
             .overlay(alignment: .topLeading) {
-                if hours > 0.55 {
+                if hours > 0.8 {
                     Text(block.name)
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(unallocated ? Color.secondary : Color.white)

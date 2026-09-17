@@ -85,19 +85,17 @@ struct PlannerView: View {
                 if let plan {
                     periodBar
                     headline(plan)
-                    // Rail on the left, calendar on the right. The rail is the allocation list — what
-                    // you're chasing — and doubles as the colour legend for the grid beside it, so the
-                    // two halves are one object rather than two summaries of the same week.
-                    HStack(alignment: .top, spacing: 12) {
-                        rail(plan)
-                        if unit == .week {
-                            PlannerCalendar(days: calendarDays, nowHour: nowHour,
-                                            highlight: highlight) { pick($0) }
-                        } else {
-                            PlannerMonthGrid(weeks: monthWeeks,
-                                             wakingHours: settings.wakingSeconds / 3600,
-                                             highlight: highlight) { pick($0) }
-                        }
+                    // The allocation strip sits ABOVE the grid, not beside it. As a left-hand rail it
+                    // took a fifth of the width from the thing the page is for, which made a calendar
+                    // of narrow columns feel cluttered by something that isn't even the calendar.
+                    railStrip(plan)
+                    if unit == .week {
+                        PlannerCalendar(days: calendarDays, nowHour: nowHour,
+                                        highlight: highlight) { pick($0) }
+                    } else {
+                        PlannerMonthGrid(weeks: monthWeeks,
+                                         wakingHours: settings.wakingSeconds / 3600,
+                                         highlight: highlight) { pick($0) }
                     }
                     legend
                     warnings(plan)
@@ -138,19 +136,13 @@ struct PlannerView: View {
     /// office as 140h and a skipped week shows up as being behind on the month. No separate monthly
     /// goals, no debt bookkeeping.
     @ViewBuilder
-    private func rail(_ plan: Planner) -> some View {
+    private func railStrip(_ plan: Planner) -> some View {
         let rows = goalRowData(plan)
-        VStack(alignment: .leading, spacing: 3) {
-            // Aligns with the calendar's day-name header.
-            Text("ALLOCATIONS")
-                .font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
-                .frame(height: 22)
+        FlowRow(spacing: 8) {
             ForEach(rows, id: \.id) { row in
-                railRow(row)
+                railRow(row).frame(width: 196)
             }
-            Spacer(minLength: 0)
         }
-        .frame(width: 232)
     }
 
     private func railRow(_ row: GoalRow) -> some View {
@@ -681,14 +673,16 @@ struct PlannerView: View {
             let weekday = cal.component(.weekday, from: date)
             let dayStart = cal.startOfDay(for: date)
 
-            var blocks: [PlannerCalendar.TrackedBlock] = []
+            // Grouped by ALLOCATION, then merged across gaps under ten minutes. A week is ~150 raw
+            // intervals because every task switch and every short pause starts a new row; drawn
+            // literally that's confetti, and a planner made of confetti hides the shape of the week.
+            // Blocks are named after the allocation for the same reason: this page is about goals, and
+            // the task name is a level of detail the tooltip can carry.
+            var keyed: [CalendarLayout.Keyed] = []
             for seg in Aggregations.daySegments(intervals: intervals, day: date, calendar: cal) {
-                let targetID = owner(seg.projectID)
-                blocks.append(PlannerCalendar.TrackedBlock(
-                    id: seg.id, startHour: seg.startHour, endHour: seg.endHour,
-                    name: taskNames[seg.projectID] ?? "?",
-                    colorHex: targetID.map(colorHex(forTarget:)) ?? "#8E8E93",
-                    targetID: targetID))
+                keyed.append(CalendarLayout.Keyed(key: owner(seg.projectID) ?? -1,
+                                                  span: CalendarLayout.Span(start: seg.startHour,
+                                                                            end: seg.endHour)))
             }
             // Work that ran past midnight belongs to the evening it started in, so the small hours of
             // the NEXT day are drawn at the bottom of this column at +24. Without this a session from
@@ -696,14 +690,22 @@ struct PlannerView: View {
             if let next = cal.date(byAdding: .day, value: 1, to: date) {
                 for seg in Aggregations.daySegments(intervals: intervals, day: next, calendar: cal)
                 where seg.startHour < PlannerCalendar.bandEnd - 24 {
-                    let targetID = owner(seg.projectID)
-                    blocks.append(PlannerCalendar.TrackedBlock(
-                        id: -seg.id, startHour: seg.startHour + 24,
-                        endHour: min(PlannerCalendar.bandEnd, seg.endHour + 24),
-                        name: taskNames[seg.projectID] ?? "?",
-                        colorHex: targetID.map(colorHex(forTarget:)) ?? "#8E8E93",
-                        targetID: targetID))
+                    keyed.append(CalendarLayout.Keyed(
+                        key: owner(seg.projectID) ?? -1,
+                        span: CalendarLayout.Span(start: seg.startHour + 24,
+                                                  end: min(PlannerCalendar.bandEnd,
+                                                           seg.endHour + 24))))
                 }
+            }
+            var blocks: [PlannerCalendar.TrackedBlock] = []
+            for (index, run) in CalendarLayout.runs(keyed, maxGapHours: 10.0 / 60).enumerated() {
+                let allocated = run.key >= 0
+                blocks.append(PlannerCalendar.TrackedBlock(
+                    id: Int64(weekday * 1000 + index),
+                    startHour: run.span.start, endHour: run.span.end,
+                    name: allocated ? name(forTarget: run.key) : "other",
+                    colorHex: allocated ? colorHex(forTarget: run.key) : "#8E8E93",
+                    targetID: allocated ? run.key : nil))
             }
 
             let reserved = reservations

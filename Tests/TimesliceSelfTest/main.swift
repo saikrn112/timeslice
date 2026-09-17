@@ -3589,6 +3589,57 @@ func testCalendarLayout() {
     check(noRoom.pieces.isEmpty, "no gaps means nothing placed")
     check(abs((noRoom.unplaced[5] ?? 0) - 2) < 0.001, "no gaps reports the full shortfall")
 
+    // Runs: a two-minute pause shouldn't become two blocks; a real break should.
+    func keyed(_ k: Int64, _ a: Double, _ b: Double) -> L.Keyed {
+        L.Keyed(key: k, span: L.Span(start: a, end: b))
+    }
+    check(L.runs([keyed(1, 9, 10), keyed(1, 10.03, 11), keyed(1, 14, 15)],
+                 maxGapHours: 10.0 / 60) == [keyed(1, 9, 11), keyed(1, 14, 15)],
+          "runs join across short gaps and keep real breaks")
+    check(L.runs([keyed(1, 14, 15), keyed(1, 9, 10)], maxGapHours: 0)
+          == [keyed(1, 9, 10), keyed(1, 14, 15)], "runs sort before joining")
+    check(L.runs([keyed(1, 9, 10), keyed(2, 10.01, 11)], maxGapHours: 0.5)
+          == [keyed(1, 9, 10), keyed(2, 10.01, 11)], "runs never join different keys")
+    // The bug this ordering exists to prevent: merging per key would bridge 9–11 through the block
+    // between, drawing two allocations in the same place.
+    check(L.runs([keyed(1, 9, 10), keyed(2, 10.03, 10.5), keyed(1, 10.6, 11)],
+                 maxGapHours: 10.0 / 60).count == 3,
+          "a run cannot bridge over another key's block")
+
+    // A minimum piece keeps a plan from being scattered as slivers across every crack in the day.
+    let coarse = L.pack([L.Item(id: 1, hours: 2)],
+                        into: [L.Span(start: 8, end: 8.3), L.Span(start: 9, end: 12)],
+                        minPiece: 0.5)
+    check(coarse.pieces.count == 1, "a gap below the minimum piece is skipped")
+    check(coarse.pieces.first?.span == L.Span(start: 9, end: 11),
+          "the piece lands in the gap that could hold it")
+
+    // …but the tail of an item is placed even when it's smaller than the minimum, because 10 minutes
+    // left really is 10 minutes left.
+    let tail = L.pack([L.Item(id: 1, hours: 0.2)], into: [L.Span(start: 8, end: 8.3)],
+                      minPiece: 0.5)
+    check(tail.pieces.count == 1 && tail.unplaced.isEmpty,
+          "a remainder below the minimum still gets placed")
+
+    // Largest-gap-first turns an owed hour into one session rather than two fragments.
+    let roomy = L.pack([L.Item(id: 1, hours: 2)],
+                       into: [L.Span(start: 8, end: 9), L.Span(start: 12, end: 16)],
+                       largestGapsFirst: true)
+    check(roomy.pieces.count == 1, "largest-first places in one piece when it can")
+    check(roomy.pieces.first?.span == L.Span(start: 12, end: 14),
+          "largest-first uses the roomiest gap")
+    check(L.pack([L.Item(id: 1, hours: 2)],
+                 into: [L.Span(start: 8, end: 9), L.Span(start: 12, end: 16)]).pieces.count == 2,
+          "earliest-first still splits, so the flag is what changed it")
+
+    // Pieces come back in clock order regardless of which gap was filled first, because the caller
+    // draws them on a clock and an out-of-order list would stack them wrongly.
+    let ordered = L.pack([L.Item(id: 1, hours: 5)],
+                         into: [L.Span(start: 8, end: 10), L.Span(start: 12, end: 16)],
+                         largestGapsFirst: true)
+    check(ordered.pieces.map(\.span.start) == ordered.pieces.map(\.span.start).sorted(),
+          "pieces are returned in clock order")
+
     // Sub-minute slivers are not places. Drawing them implies you could do something there.
     let sliver = L.gaps(band: band, busy: [L.Span(start: 8, end: 23.999)])
     check(sliver.isEmpty, "sub-minute gaps are dropped")
