@@ -51,7 +51,8 @@ struct PlannerView: View {
     @State private var unit: PlanUnit = ProcessInfo.processInfo
         .environment["TIMESLICE_PLANNER_UNIT"]?.lowercased() == "month" ? .month : .week
     /// How many periods back from the current one. 0 is now; 1 is last week or last month.
-    @State private var offset = 0
+    @State private var offset = Int(ProcessInfo.processInfo
+        .environment["TIMESLICE_PLANNER_OFFSET"] ?? "") ?? 0
     /// Per allocation, seconds tracked inside the viewed period.
     @State private var periodActuals: [Int64: TimeInterval] = [:]
     /// Every second tracked inside the viewed period, allocation or not — the bar's "tracked" segment.
@@ -66,11 +67,7 @@ struct PlannerView: View {
     /// page, because "where does THIS one actually land" is the question a week of overlapping colours
     /// can't answer at a glance.
     @State private var highlight: Int64?
-    /// Allocation id → the colour it's drawn in, made distinct.
-    ///
-    /// `BudgetRows.colorHex` answers per subject, and three of the real allocations are tags that share
-    /// one colour — recon paper, deep technical creative and family all came out the same red, which on a
-    /// calendar of coloured blocks means the colours carry no information at all.
+    /// Allocation id → the colour it is drawn in, made distinct.
     @State private var targetColors: [Int64: String] = [:]
 
     /// The red used for over-capacity, matching the metrics selection overlay so one colour means one
@@ -92,6 +89,8 @@ struct PlannerView: View {
                 if let plan {
                     periodBar
                     headline(plan)
+                    // Cards, and the same ones Metrics is built from: a section on one page and a
+                    // section on another should be the same object, not a near-miss.
                     section("Allocations",
                             subtitle: "click one to trace it through the "
                                       + unit.rawValue.lowercased(),
@@ -151,17 +150,21 @@ struct PlannerView: View {
     @ViewBuilder
     private func railStrip(_ plan: Planner) -> some View {
         let rows = goalRowData(plan)
-        // A fixed two-column grid, because a FlowRow of chips wrapped into a ragged shape whose bars
-        // were squeezed to fifty points — narrow enough that "0%" spilled out of its own pill. Two
-        // columns of aligned rows costs the same vertical space and reads as a table instead of debris.
-        let columns = [GridItem(.adaptive(minimum: 268), spacing: 18)]
-        LazyVGrid(columns: columns, alignment: .leading, spacing: 2) {
+        // Adaptive columns: at the app's default 720pt this is two, and on a wide window three or four.
+        // Fixed columns overflowed the window instead of reflowing.
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 268), spacing: 18)],
+                  alignment: .leading, spacing: 2) {
             ForEach(rows, id: \.id) { row in
                 railRow(row)
             }
         }
     }
 
+    /// One allocation: what it wants, how far along it is, and what's left.
+    ///
+    /// A dot, not a coloured play button. Nine tinted play circles read as nine status lights — the row
+    /// looked like an error list. Starting a task is what the Tasks page is for; clicking here traces the
+    /// allocation through the grid, which is the thing only this page can do.
     private func railRow(_ row: GoalRow) -> some View {
         let selected = highlight == row.id
         return HStack(spacing: 7) {
@@ -174,8 +177,6 @@ struct PlannerView: View {
                       height: 13,
                       marker: row.paceFraction)
                 .frame(maxWidth: .infinity)
-            // What's left, not what's behind: on a planning page the actionable figure is the one you
-            // still have to find room for.
             Text(hours(max(0, row.target - row.done)))
                 .font(.system(size: 10, design: .monospaced)).monospacedDigit()
                 .foregroundStyle(row.lagging ? Color.orange : Color.secondary.opacity(0.75))
@@ -228,6 +229,162 @@ struct PlannerView: View {
         }
     }
 
+    /// Hours since midnight, for the calendar's now-line.
+    private var nowHour: Double {
+        let cal = Calendar.current
+        let now = Date()
+        return now.timeIntervalSince(cal.startOfDay(for: now)) / 3600
+    }
+
+    private struct GoalRow: Identifiable {
+        let id: Int64
+        let name: String
+        let colorHex: String
+        let done: TimeInterval
+        let target: TimeInterval
+        /// Where the pace notch goes: how far through the window we are.
+        let paceFraction: Double
+        let trailing: String
+        let lagging: Bool
+        let tooltip: String
+        var fraction: Double { target > 0 ? done / target : 0 }
+    }
+
+    private func goalRowData(_ plan: Planner) -> [GoalRow] {
+        let floors = targets.filter { $0.direction == .atLeast }
+        let elapsed = elapsedFractionOfPeriod()
+        return floors.map { target -> GoalRow in
+            // The allocation's weekly rate, pro-rated onto the window. Four weeks in month view, so a
+            // 35h/week office reads as 140h and a missed week is visible as month-level lag.
+            let scaled = target.weeklySeconds * unit.weeks
+            let done = periodActuals[target.id] ?? 0
+            let shouldBe = scaled * elapsed
+            let behind = max(0, shouldBe - done)
+            return GoalRow(
+                id: target.id, name: name(for: target),
+                colorHex: colorHex(forTarget: target.id),
+                done: done, target: scaled, paceFraction: elapsed,
+                trailing: behind > 60 ? "behind \(hours(behind))"
+                          : (done >= scaled ? "met" : "on pace"),
+                lagging: behind > 60,
+                tooltip: "\(name(for: target)): \(hours(done)) of \(hours(scaled)) this "
+                       + "\(unit.rawValue.lowercased())\n"
+                       + "should be at \(hours(shouldBe)) by now "
+                       + "(\(Int((elapsed * 100).rounded()))% through)\n"
+                       + (behind > 60 ? "behind by \(hours(behind))" : "on pace"))
+        }
+        // Worst first: this page exists to say where you're lagging.
+        .sorted {
+            if $0.lagging != $1.lagging { return $0.lagging }
+            return ($0.paceFraction - $0.fraction) > ($1.paceFraction - $1.fraction)
+        }
+    }
+
+    /// How far through the viewed window we are, by waking hours rather than by wall clock — being
+    /// three days into a week is 43% of the calendar but not necessarily 43% of the hours you had.
+    private func elapsedFractionOfPeriod() -> Double {
+        guard let window = periodWindow() else { return 1 }
+        if offset > 0 { return 1 }              // a window in the past is fully elapsed
+        let total = window.end.timeIntervalSince(window.start)
+        guard total > 0 else { return 1 }
+        return min(1, max(0, Date().timeIntervalSince(window.start) / total))
+    }
+
+    // MARK: - Period
+
+    /// Week or month, and which one. Deliberately the same shape as the metrics range pills, because
+    /// it means the same thing.
+    private var periodBar: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 4) {
+                ForEach(PlanUnit.allCases) { candidate in
+                    let selected = unit == candidate
+                    Button {
+                        unit = candidate
+                        offset = 0
+                        rebuild()
+                    } label: {
+                        Text(candidate.rawValue)
+                            .font(.system(size: 11, weight: selected ? .bold : .medium,
+                                          design: .rounded))
+                            .foregroundStyle(selected ? Color.white : Color.secondary)
+                            .frame(minWidth: 44)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(selected ? Color.accentColor
+                                                       : Color.secondary.opacity(0.14)))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            Spacer(minLength: 8)
+            HStack(spacing: 8) {
+                Button { offset += 1; rebuild() } label: { Image(systemName: "chevron.left") }
+                    .buttonStyle(.borderless)
+                Text(periodLabel)
+                    .font(.system(.subheadline, design: .rounded)).fontWeight(.medium)
+                    .frame(minWidth: 150)
+                    .multilineTextAlignment(.center)
+                Button { offset = max(0, offset - 1); rebuild() } label: {
+                    Image(systemName: "chevron.right")
+                }
+                .buttonStyle(.borderless)
+                .disabled(offset == 0)
+                Button("Today") { offset = 0; rebuild() }
+                    .buttonStyle(.link)
+                    .disabled(offset == 0)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        // The same pills, stepper and card as `RangeFilterBar` on the Metrics page. Two controls that
+        // both mean "which period am I looking at" should not look like two different ideas.
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
+    private var periodLabel: String {
+        guard let window = periodWindow() else { return "" }
+        let f = DateFormatter()
+        if unit == .month {
+            f.dateFormat = "MMMM yyyy"
+            return f.string(from: window.start)
+        }
+        f.dateFormat = "d MMM"
+        let end = window.end.addingTimeInterval(-1)
+        return "\(f.string(from: window.start)) – \(f.string(from: end))"
+    }
+
+    /// The viewed window. Weeks and months both come from `Calendar`, so they line up with what the
+    /// metrics page calls a week.
+    private func periodWindow() -> DateInterval? {
+        let cal = Calendar.current
+        let component: Calendar.Component = unit == .week ? .weekOfYear : .month
+        guard let anchor = cal.date(byAdding: component, value: -offset, to: Date()),
+              let interval = cal.dateInterval(of: component, for: anchor) else { return nil }
+        return interval
+    }
+
+    /// The card + header the Metrics page is built from, copied in shape deliberately.
+    private func section<Content: View, Accessory: View>(
+        _ title: String, subtitle: String?,
+        @ViewBuilder accessory: () -> Accessory,
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.headline)
+                    if let subtitle {
+                        Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                accessory()
+            }
+            content()
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
     private var calendarSubtitle: String {
         unit == .week
             ? "each column is a waking day · solid is tracked, dashed is still owed"
@@ -239,6 +396,202 @@ struct PlannerView: View {
         let waking = settings.wakingSeconds
         let left = Replan.fractionOfDayLeft(now: Date(), wakingSeconds: waking) * waking
         return max(0, waking - left) / 3600
+    }
+
+    // MARK: - Headline
+
+    /// The verdict, the arithmetic behind it, and what is actually at risk.
+    ///
+    /// The previous version of this card said "The week fits", restated the 55–65h range, and then listed
+    /// four chips of permanent facts — nesting, a ceiling, a warning. None of it changed from day to day,
+    /// none of it named a problem, and it managed to say "fits" on a week with a day 2.2h over capacity.
+    ///
+    /// What replaced it is the three things the grid below cannot say: which day is the binding one, the
+    /// week's totals against one denominator, and which allocations are going to be missed and why.
+    @ViewBuilder
+    private func headline(_ plan: Planner) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Circle().fill(verdictColor(plan.verdict)).frame(width: 9, height: 9)
+                Text(verdictLine(plan))
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(verdictColor(plan.verdict))
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("Reserve…") { showReservations = true }
+                    .buttonStyle(.link).font(.system(size: 11))
+                Button("Allocations…") { showAllocations = true }
+                    .buttonStyle(.link).font(.system(size: 11))
+            }
+
+            // Three numbers, one denominator. The old line mixed a weekly range with nothing to compare
+            // it against, which is how "55h–65h" ended up meaning nothing.
+            let budget = periodBudget()
+            HStack(spacing: 14) {
+                figure("still owed", budget.stillToDo, .orange)
+                figure("free left", budget.freeLeft, .secondary)
+                figure(budget.freeLeft >= budget.stillToDo ? "spare" : "short",
+                       abs(budget.freeLeft - budget.stillToDo),
+                       budget.freeLeft >= budget.stillToDo ? .green : Self.overColor)
+                if budget.tracked > 60 { figure("tracked", budget.tracked, .accentColor) }
+            }
+
+            atRisk
+            if reservations.isEmpty {
+                Text("Nothing is reserved, so this assumes every waking hour is available — meals, "
+                     + "commute and getting ready never become tasks. Reserve… makes it real.")
+                    .font(.caption).foregroundStyle(Self.overColor.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
+    private func figure(_ label: String, _ seconds: TimeInterval, _ tint: Color) -> some View {
+        HStack(spacing: 4) {
+            Text(label).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(hours(seconds))
+                .font(.system(size: 12, weight: .semibold, design: .rounded)).monospacedDigit()
+                .foregroundStyle(tint)
+        }
+    }
+
+    /// What is going to be missed, and the reason — which is nearly always that the days it claims are
+    /// gone, not that the week is full. Naming it is the difference between a number you can act on and
+    /// one you can only feel bad about.
+    @ViewBuilder
+    private var atRisk: some View {
+        if let replan, unit == .week, offset == 0 {
+            let stuck = replan.items
+                .filter { $0.standing == .unreachable || $0.shortfallOnRemainingDays > 60 }
+                .sorted { $0.remainingSeconds > $1.remainingSeconds }
+                .prefix(3)
+            if !stuck.isEmpty {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("at risk").font(.system(size: 10)).foregroundStyle(.secondary)
+                    FlowRow(spacing: 6) {
+                        ForEach(Array(stuck), id: \.targetID) { item in
+                            chip(item.name, riskReason(item), Self.overColor,
+                                 tooltip: item.adviceIfUnreachable.isEmpty
+                                     ? "\(hours(item.remainingSeconds)) left, and its remaining days "
+                                       + "hold \(hours(item.availableOnRemainingDays))."
+                                     : item.adviceIfUnreachable)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func riskReason(_ item: Replan.Item) -> String {
+        if item.remainingClaimedDays == 0 { return "no days left" }
+        if item.remainingClaimedDays == 1 { return "\(hours(item.remainingSeconds)) on one day" }
+        return "\(hours(item.shortfallOnRemainingDays)) won't fit"
+    }
+
+    private struct PeriodBudget {
+        var capacity: TimeInterval = 0
+        var elapsed: TimeInterval = 0
+        var tracked: TimeInterval = 0
+        var stillToDo: TimeInterval = 0
+        var freeLeft: TimeInterval = 0
+        var reservedLeft: TimeInterval = 0
+    }
+
+    /// The viewed window's hours: the bar's whole length and every segment in it.
+    ///
+    /// Walks the window's actual dates instead of assuming seven days, so a month works — and a 28-day
+    /// one too. Reservations are counted per weekday as it walks, which is the only way to keep "no
+    /// commute on Sundays" right over a window longer than a week.
+    private func periodBudget() -> PeriodBudget {
+        var out = PeriodBudget()
+        guard let window = periodWindow() else { return out }
+        let cal = Calendar.current
+        let now = Date()
+        let waking = settings.wakingSeconds
+        let startOfToday = cal.startOfDay(for: now)
+        let fractionLeftToday = Replan.fractionOfDayLeft(now: now, wakingSeconds: waking,
+                                                         calendar: cal)
+
+        var cursor = cal.startOfDay(for: window.start)
+        while cursor < window.end {
+            let weekday = cal.component(.weekday, from: cursor)
+            let reserved = min(waking, reservations
+                .filter { $0.weekdays.effective.contains(weekday: weekday) }
+                .reduce(0.0) { $0 + $1.secondsPerDay })
+            out.capacity += waking
+
+            if cursor < startOfToday {
+                out.elapsed += waking            // gone entirely
+            } else if cursor == startOfToday {
+                out.elapsed += waking * (1 - fractionLeftToday)
+                out.freeLeft += max(0, waking - reserved) * fractionLeftToday
+                out.reservedLeft += reserved * fractionLeftToday
+            } else {
+                out.freeLeft += max(0, waking - reserved)
+                out.reservedLeft += reserved
+            }
+            guard let next = cal.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+
+        out.tracked = periodTracked
+        // What the allocations still want inside this window, at the window's own scale.
+        out.stillToDo = targets.filter { $0.direction == .atLeast }.reduce(0.0) { sum, target in
+            sum + max(0, target.weeklySeconds * unit.weeks - (periodActuals[target.id] ?? 0))
+        }
+        return out
+    }
+
+    /// The verdict as one clause. The paragraph that used to follow it is gone: what it explained is
+    /// visible in the grid, and the numbers beside it carry the arithmetic.
+    private func verdictLine(_ plan: Planner) -> String {
+        // Month view gets a MONTH verdict. `Planner` and `Replan` are week-scoped, so showing their answer
+        // under a month grid said "the week fits" about four weeks of days — answering a different
+        // question than the page is asking.
+        if unit == .month {
+            let budget = periodBudget()
+            if budget.stillToDo > budget.freeLeft + 60 {
+                return "\(hours(budget.stillToDo)) still wanted, "
+                     + "\(hours(budget.freeLeft)) of free hours left this month"
+            }
+            if offset > 0 {
+                return budget.stillToDo > 60
+                    ? "That month came up \(hours(budget.stillToDo)) short"
+                    : "That month held together"
+            }
+            return "The month still fits"
+        }
+        // Says what the comparison IS. "Not finishable" was a conclusion with its reasoning hidden,
+        // which is exactly the kind of number nobody can argue with or trust.
+        if let replan, replan.weekIsLost {
+            return "\(hours(replan.remainingNeedSeconds)) still to do, only "
+                 + "\(hours(replan.remainingCapacitySeconds)) of free hours left in the week"
+        }
+        // A day over capacity outranks the weekly total: saying "the week fits" above a grid with a
+        // 2.2h red cap on Friday is the page arguing with itself.
+        if !plan.overloadedDays.isEmpty {
+            let worst = plan.overloadedDays
+                .compactMap { day in plan.days.first { $0.weekday == day } }
+                .max { -$0.slackSeconds < -$1.slackSeconds }
+            if let worst {
+                return "\(dayList([worst.weekday])) is \(hours(-worst.slackSeconds)) over"
+                     + (plan.overloadedDays.count > 1
+                        ? ", and \(plan.overloadedDays.count - 1) other day(s)" : "")
+            }
+        }
+        switch plan.verdict {
+        case .fits: return "The week fits"
+        case .tight: return "Fits, only just"
+        case .oversubscribed where !plan.overloadedDays.isEmpty:
+            return "\(dayList(plan.overloadedDays)) over capacity"
+        case .oversubscribed:
+            let free = max(0, plan.capacitySeconds - plan.reservedSeconds)
+            return "Over by \(hours(plan.requiredLowerSeconds - free))"
+        case .uncertain: return "Fits only if allocations share work"
+        }
     }
 
     /// The task the play button should start for an allocation.
@@ -257,39 +610,6 @@ struct PlannerView: View {
     }
 
     // MARK: - Chips
-
-    /// The few things the matrix genuinely can't say: allocations that never fit at all, nesting, and
-    /// the warning that no reservations are declared. Everything else the chips used to repeat is now
-    /// a row or a column.
-    @ViewBuilder
-    private func warnings(_ plan: Planner) -> some View {
-        FlowRow(spacing: 6) {
-            ForEach(Array(plan.unplaced.enumerated()), id: \.offset) { _, item in
-                chip(item.name, "won't fit", Self.overColor,
-                     tooltip: "\(item.name) won't fit.\nWould fit if \(item.wouldFitIf).")
-            }
-            ForEach(Array(plan.nestings.enumerated()), id: \.offset) { _, n in
-                chip(n.innerName, "inside \(n.outerName)", .secondary,
-                     tooltip: "\(n.innerName) (\(hours(n.innerSeconds))) sits inside "
-                            + "\(n.outerName) (\(hours(n.outerSeconds))), so its hours are already "
-                            + "counted there and it asks for nothing extra.")
-            }
-            if reservations.isEmpty {
-                // The one warning worth keeping visible: without reservations the verdict is the
-                // optimistic one, because only about a third of a waking day ever gets tracked.
-                chip("nothing reserved", "verdict is optimistic", Self.overColor,
-                     tooltip: "No non-negotiables are declared, so this assumes all "
-                            + "\(hours(plan.capacitySeconds)) of the week is available. Meals, "
-                            + "commute and getting ready never become tasks — declare them with "
-                            + "Reserve… for a real answer.")
-            }
-            ForEach(plan.ceilings, id: \.id) { t in
-                chip(name(for: t), "limit \(hours(t.seconds))/\(t.period.rawValue)", .secondary,
-                     tooltip: "A ceiling — permission to stop, not work to do, so it isn't counted "
-                            + "against the week.")
-            }
-        }
-    }
 
     private func chip(_ title: String, _ detail: String, _ tint: Color,
                       tooltip: String) -> some View {
@@ -408,9 +728,15 @@ struct PlannerView: View {
         }
         let taskNames = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0.name) })
 
+        // Allocations wholly inside another. Their hours are already in the parent's, so they must not
+        // be drawn as blobs of their own.
+        let nested = Set(built.nestings.compactMap { nesting in
+            targets.first { name(for: $0, tasks: tasks) == nesting.innerName }?.id
+        })
+
         if unit == .week {
             calendarDays = buildWeekColumns(week: periodWindow() ?? week, replan: computed,
-                                            calendar: cal)
+                                            nested: nested, calendar: cal)
             monthWeeks = []
         } else {
             calendarDays = []
@@ -420,13 +746,15 @@ struct PlannerView: View {
 
     /// Seven day containers for the viewed week.
     ///
-    /// Sums, not positions: one blob per allocation per day. That is the whole simplification — the
-    /// clock version had to place 150 intervals a week and then explain the resulting mess.
+    /// Sums, not clock positions: one blob per allocation per day. Owed hours come from the replan, which
+    /// has already spread each shortfall over the days that are actually left — so ten hours of office
+    /// today shrinks the dashed office blobs on the days after it, without anything here knowing that.
     ///
-    /// Owed hours come from the replan, which has already spread each shortfall across the days that are
-    /// actually left, so a Monday that went wrong shows up as taller dashed blobs later in the week
-    /// rather than as a sentence about Monday.
+    /// Nested allocations contribute no blob of their own. `deep technical creative` lives inside
+    /// `recon paper`, so drawing both would count the same hours twice and inflate the day — it was
+    /// adding 1.3h to every remaining day and pushing Friday over capacity on work already counted.
     private func buildWeekColumns(week: DateInterval, replan: Replan,
+                                  nested: Set<Int64>,
                                   calendar cal: Calendar) -> [PlannerWeekGrid.DayInput] {
         let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
         let startOfToday = cal.startOfDay(for: Date())
@@ -448,30 +776,32 @@ struct PlannerView: View {
                                                   colorHex: "#8E8E93", kind: .reserved))
             }
 
-            // Then what was tracked, biggest first so the day reads top-down by size.
+            // Then what was tracked, biggest first.
             for (id, seconds) in (actuals[weekday] ?? [:]).sorted(by: { $0.value > $1.value })
-            where seconds > 60 {
+            where seconds > 60 && !nested.contains(id) {
                 blobs.append(PlannerWeekGrid.Blob(targetID: id, name: name(forTarget: id),
                                                   hours: seconds / 3600,
                                                   colorHex: colorHex(forTarget: id), kind: .tracked))
             }
             if let other = unallocated[weekday], other > 60 {
-                blobs.append(PlannerWeekGrid.Blob(targetID: -2, name: "unallocated", hours: other / 3600,
+                blobs.append(PlannerWeekGrid.Blob(targetID: -2, name: "unallocated",
+                                                  hours: other / 3600,
                                                   colorHex: "#8E8E93", kind: .unallocated))
             }
 
-            // Then what is still owed — only on days that are still to come, and only in the week that
-            // is actually current. A past week owes nothing; it is simply what happened.
+            // Then what is still owed — only on days still to come, and only in the current week. A past
+            // week owes nothing; it is simply what happened.
             if dayStart >= startOfToday, offset == 0,
                let planned = replan.replannedDays.first(where: { $0.weekday == weekday }) {
                 let byID = Dictionary(planned.placements.map { ($0.targetID, $0) },
                                       uniquingKeysWith: { a, _ in a })
-                for id in owedOrder {
+                for id in owedOrder where !nested.contains(id) {
                     guard let placement = byID[id], placement.seconds > 60 else { continue }
                     let done = (actuals[weekday] ?? [:])[id] ?? 0
                     let left = max(0, placement.seconds - done) / 3600
                     guard left > 1.0 / 60 else { continue }
-                    blobs.append(PlannerWeekGrid.Blob(targetID: id, name: name(forTarget: id), hours: left,
+                    blobs.append(PlannerWeekGrid.Blob(targetID: id, name: name(forTarget: id),
+                                                      hours: left,
                                                       colorHex: colorHex(forTarget: id), kind: .owed))
                 }
             }
@@ -567,10 +897,13 @@ struct PlannerView: View {
                                   groups: appState.taskProjects, tags: appState.allTags)
     }
 
-    /// Assign each allocation a colour that isn't already taken, by shading the duplicates.
+    /// Give each allocation a colour nothing else is using.
     ///
-    /// Deterministic and stable: it walks the allocations in id order, so a colour doesn't move around
-    /// as the sort order of the rows changes.
+    /// `BudgetRows.colorHex` answers per subject, and three of the real allocations are tags sharing one
+    /// colour — recon paper, deep technical creative and family all came out the same red, so on a grid of
+    /// coloured blobs the colour carried no information. Duplicates take the next unused hue from
+    /// `Palette`, which is what Tasks and Metrics colour by, rather than a lighter shade of the same red:
+    /// two shades of one colour still read as one thing.
     private func assignColors() {
         var used: Set<String> = []
         var out: [Int64: String] = [:]
@@ -579,10 +912,6 @@ struct PlannerView: View {
                                            groups: appState.taskProjects, tags: appState.allTags)
             var candidate = base
             var step = 0
-            // A different HUE from the shared palette, not a lighter version of the same one. Two shades
-            // of the same red still read as "the same thing" on a grid of coloured blocks, which is the
-            // problem being solved. Palette is what Tasks and Metrics colour by, so the page stays in
-            // the app's own vocabulary.
             while used.contains(candidate.lowercased()), step < Palette.colors.count + 6 {
                 candidate = Palette.color(forIndex: step)
                 step += 1
@@ -591,16 +920,6 @@ struct PlannerView: View {
             out[target.id] = candidate
         }
         targetColors = out
-    }
-
-    /// Scale a hex colour's channels, clamped. Cheap, and enough to tell two reds apart.
-    private static func shade(_ hex: String, by factor: Double) -> String {
-        let cleaned = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
-        guard cleaned.count == 6, let value = Int(cleaned, radix: 16) else { return hex }
-        let channels = [(value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF]
-            .map { Int((Double($0) * factor).rounded()) }
-            .map { max(24, min(235, $0)) }
-        return String(format: "#%02X%02X%02X", channels[0], channels[1], channels[2])
     }
 
     // MARK: - Chrome

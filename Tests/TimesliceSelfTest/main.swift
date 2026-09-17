@@ -2476,6 +2476,41 @@ func testReplan() {
               },
               "each carrying the catch-up figure rather than the original 1.43h")
     }
+
+    // Catch-up follows the ROOM, not an equal split. This is the difference between a planner that
+    // reports "Friday is 2.2h over" while Saturday sits half empty, and one that uses Saturday.
+    do {
+        let m = plannerWorld(taskGroups: [1: 10], taskTags: [:])
+        let target = floor(1, .project(10), hours: 12)          // all seven days
+        // Friday nearly full, Saturday nearly empty.
+        let reserved = [Reservation(id: 1, name: "friday thing", weekdays: Weekdays(rawValue: 32),
+                                    secondsPerDay: 14 * 3600)]
+        let input = plannerInput([target], reservations: reserved, membership: m)
+        let plan = Planner.plan(input)
+        let r = Replan.compute(plan: plan, input: input, actuals: [:],
+                               elapsedWeekdays: [1, 2, 3, 4], remainingWeekdays: [5, 6, 7])
+        let friday = r.replannedDays.first { $0.weekday == 6 }!
+        let saturday = r.replannedDays.first { $0.weekday == 7 }!
+        check(friday.committedSeconds < saturday.committedSeconds,
+              "the day with less room is given less of the catch-up")
+        check(friday.committedSeconds <= friday.capacitySeconds - friday.reservedSeconds + 60,
+              "and never more than it can actually hold")
+        check(approx(r.replannedDays.reduce(0) { $0 + $1.committedSeconds } / 3600, 12, 0.05),
+              "with the whole remaining need still placed somewhere")
+    }
+
+    // An allocation whose own days are gone can't be rescued by a free day it doesn't claim — the
+    // honest answer, and the reason a day can still read as over capacity.
+    do {
+        let m = plannerWorld(taskGroups: [1: 10], taskTags: [:])
+        let weekdaysOnly = floor(1, .project(10), hours: 20, weekdays: .weekdaysOnly)
+        let input = plannerInput([weekdaysOnly], membership: m)
+        let r = Replan.compute(plan: Planner.plan(input), input: input, actuals: [:],
+                               elapsedWeekdays: [1, 2, 3, 4, 5], remainingWeekdays: [6, 7])
+        let saturday = r.replannedDays.first { $0.weekday == 7 }
+        check(saturday?.placements.isEmpty ?? false,
+              "Saturday stays empty for a Mon-Fri allocation however much room it has")
+    }
 }
 
 // MARK: - Focus block boundary

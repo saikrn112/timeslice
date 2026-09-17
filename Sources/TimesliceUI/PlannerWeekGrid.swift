@@ -151,6 +151,17 @@ public struct PlannerWeekGrid: View {
                                           : Color.primary.opacity(0.08), lineWidth: 1)
                     }
 
+                // What the empty part of the column MEANS, which differs by day: hours nobody has
+                // claimed yet on a day still coming, versus hours that went by untracked on one that
+                // has gone. Same emptiness, opposite implications, and it was unlabelled either way.
+                if capacityHours - total > 1.2 {
+                    Text("\(Self.short(capacityHours - total)) \(day.isPast ? "untracked" : "free")")
+                        .font(.system(size: compact ? 8 : 9))
+                        .foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity)
+                        .offset(y: -height(total) - 12)
+                }
+
                 VStack(spacing: 1) {
                     // A VStack given more height than its content CENTRES it, so every day's stack was
                     // floating in the middle of its container instead of resting on the floor — which is
@@ -230,7 +241,13 @@ public struct PlannerWeekGrid: View {
             case .tracked:
                 RoundedRectangle(cornerRadius: 3).fill(tint.opacity(0.9))
             case .unallocated:
-                RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.26))
+                // Tracked, but against nothing you allocated. Distinct from both a solid allocation blob
+                // and from empty space, because it is neither — it's usually where the plan went.
+                RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.30))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(Color.secondary.opacity(0.5), lineWidth: 1)
+                    }
             case .owed:
                 // Dashed, with the colour on the edge rather than in the fill: a low-alpha tint of a
                 // dark hue vanished against the column and left a label floating over nothing.
@@ -244,13 +261,13 @@ public struct PlannerWeekGrid: View {
                     .clipShape(RoundedRectangle(cornerRadius: 3))
             }
 
-            if h > 14 {
+            if h > 9 {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(blob.name)
                         .font(.system(size: compact ? 8 : 9,
                                       weight: blob.kind == .tracked ? .medium : .regular))
                         .lineLimit(1).truncationMode(.tail)
-                    if h > 30 {
+                    if h > 26 {
                         Text(Self.short(blob.hours))
                             .font(.system(size: compact ? 8 : 9, design: .monospaced))
                             .opacity(0.7)

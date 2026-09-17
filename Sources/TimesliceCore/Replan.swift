@@ -209,23 +209,84 @@ public struct Replan: Sendable {
             .compactMap { w in plan.days.first { $0.weekday == w } }
             .reduce(0.0) { $0 + usable($1) }
 
-        // The remaining days, reloaded: each allocation's leftover spread over its own remaining days,
-        // which is the "replan" — the same even-spread rule the week plan uses, applied to what's left.
+        // The remaining days, reloaded — and this is where catch-up actually gets decided.
+        //
+        // Not an even spread. An even spread put every allocation's leftover equally on each of its own
+        // remaining days, which piled work onto a day that was already full while the next day sat half
+        // empty: Friday came out 2.2h over capacity with Saturday holding 3h of free time that anything
+        // claiming Saturday could have used. Even-spreading is the right rule for a whole week, where no
+        // day has a history yet; mid-week it ignores the thing that has changed.
+        //
+        // So: worst-off allocation first, each one's leftover distributed across its claimed remaining
+        // days in proportion to the room actually left on them, and never more than a day can hold.
+        // What still doesn't fit stays unplaced rather than being drawn into an impossible day — the
+        // per-allocation `standing` above is where that shortfall is reported.
+        //
+        // It cannot fix everything, and shouldn't pretend to: an allocation that claims Mon–Fri has only
+        // Friday left however much room Saturday has. That is a fact about the allocation's own weekdays,
+        // and the honest answer is to say the day is over capacity.
+        var roomLeft: [Int: TimeInterval] = [:]
+        for weekday in remainingWeekdays {
+            guard let base = plan.days.first(where: { $0.weekday == weekday }) else { continue }
+            roomLeft[weekday] = usable(base)
+        }
+        var byDay: [Int: [Planner.Placement]] = [:]
+        for item in items.sorted(by: { $0.debtSeconds > $1.debtSeconds })
+        where item.remainingSeconds > 60 {
+            guard let target = floors.first(where: { $0.id == item.targetID }) else { continue }
+            let claimed = remainingWeekdays.filter {
+                target.weekdays.effective.contains(weekday: $0)
+            }
+            guard !claimed.isEmpty else { continue }
+            var need = item.remainingSeconds
+
+            // Two passes: proportional to free room, then a sweep for whatever rounding or capping left
+            // over. Without the second pass a day that filled up would silently drop hours.
+            let totalRoom = claimed.reduce(0.0) { $0 + max(0, roomLeft[$1] ?? 0) }
+            // The proportion is taken against the ORIGINAL need, not the shrinking remainder. Using the
+            // remainder made each day's share smaller than the last — four equal days split 10h as
+            // 2.5/1.9/1.4/1.1 instead of 2.5 each — which looks like a deliberate taper and isn't one.
+            let want = need
+            if totalRoom > 0 {
+                for weekday in claimed {
+                    let room = max(0, roomLeft[weekday] ?? 0)
+                    let share = min(room, want * (room / totalRoom))
+                    guard share > 60 else { continue }
+                    byDay[weekday, default: []].append(
+                        Planner.Placement(targetID: item.targetID, name: item.name, seconds: share))
+                    roomLeft[weekday] = room - share
+                    need -= share
+                }
+            }
+            if need > 60 {
+                for weekday in claimed where need > 60 {
+                    let room = max(0, roomLeft[weekday] ?? 0)
+                    guard room > 60 else { continue }
+                    let extra = min(room, need)
+                    if let index = byDay[weekday]?.firstIndex(where: { $0.targetID == item.targetID }) {
+                        let existing = byDay[weekday]![index]
+                        byDay[weekday]![index] = Planner.Placement(targetID: existing.targetID,
+                                                                   name: existing.name,
+                                                                   seconds: existing.seconds + extra)
+                    } else {
+                        byDay[weekday, default: []].append(
+                            Planner.Placement(targetID: item.targetID, name: item.name,
+                                              seconds: extra))
+                    }
+                    roomLeft[weekday] = room - extra
+                    need -= extra
+                }
+            }
+        }
+
         var replanned: [Planner.DayPlan] = []
         for weekday in remainingWeekdays {
             guard let base = plan.days.first(where: { $0.weekday == weekday }) else { continue }
-            var placements: [Planner.Placement] = []
-            for item in items where item.remainingSeconds > 60 {
-                guard let target = floors.first(where: { $0.id == item.targetID }),
-                      target.weekdays.effective.contains(weekday: weekday),
-                      let perDay = item.requiredPerRemainingDay else { continue }
-                placements.append(Planner.Placement(targetID: item.targetID, name: item.name,
-                                                    seconds: perDay))
-            }
             replanned.append(Planner.DayPlan(weekday: weekday,
                                              capacitySeconds: base.capacitySeconds,
                                              reservedSeconds: base.reservedSeconds,
-                                             placements: placements))
+                                             placements: (byDay[weekday] ?? [])
+                                                 .sorted { $0.seconds > $1.seconds }))
         }
 
         return Replan(items: items, remainingNeedSeconds: need,
