@@ -8,7 +8,26 @@ final class AppState: ObservableObject {
     private let store: IntervalStore
     let engine: TimerEngine
 
-    /// A request from the Planner to open Metrics on a particular day, with an allocation highlighted.
+    /// The selection the Planner and Metrics SHARE: which allocation you're looking at, and which day.
+    ///
+    /// Two pages asking about the same thing should not each keep their own answer. Picking `office` in the
+    /// Planner and switching to Metrics used to land on an unfiltered page, and stepping back a week in one
+    /// left the other where it was — so comparing "what did I plan" with "what happened" meant setting the
+    /// same filter twice.
+    ///
+    /// Deliberately just these two fields. Metrics' multi-select stays local to Metrics, because "these two
+    /// allocations combined" is a question the Planner can't ask and shouldn't inherit.
+    struct SharedFilter: Equatable {
+        var subject: TargetSubject?
+        /// Any day inside the period being looked at. Each page resolves it to its own granularity.
+        var day: Date?
+    }
+    @Published var sharedFilter = SharedFilter()
+
+    /// A one-shot request to switch to Metrics and show a specific day.
+    ///
+    /// Separate from `sharedFilter` because it carries an INTENT to navigate, not just state: the tab only
+    /// changes when this is set, so adopting a shared selection can't yank you off the page you're on.
     ///
     /// Lives here because it crosses two tabs that don't know about each other: the Planner sets it,
     /// `MainWindowView` switches tab when it appears, and `MetricsView` consumes and clears it. The

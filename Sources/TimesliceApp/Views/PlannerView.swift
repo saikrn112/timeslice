@@ -121,7 +121,11 @@ struct PlannerView: View {
             }
             .padding(18)
         }
-        .onAppear(perform: rebuild)
+        .onAppear {
+            adoptSharedFilter()
+            rebuild()
+            publishWindow()
+        }
         .onReceive(NotificationCenter.default.publisher(for: TimesliceNotifications.dataDidChange)) { _ in
             rebuild()
         }
@@ -215,6 +219,38 @@ struct PlannerView: View {
 
     private func pick(_ id: Int64) {
         highlight = (highlight == id) ? nil : id
+        // Publish it, so Metrics is already filtered when you switch tabs.
+        appState.sharedFilter.subject = highlight.flatMap { picked in
+            targets.first { $0.id == picked }?.subject
+        }
+    }
+
+    /// Take up the shared selection and period. Called on appear, so arriving from Metrics lands on the
+    /// same allocation and the same week you were looking at there.
+    private func adoptSharedFilter() {
+        let filter = appState.sharedFilter
+        if let subject = filter.subject,
+           let match = targets.first(where: { $0.subject == subject }) {
+            highlight = match.id
+        } else if filter.subject == nil {
+            highlight = nil
+        }
+        if let day = filter.day, let cal = Optional(Calendar.current) {
+            let component: Calendar.Component = unit == .week ? .weekOfYear : .month
+            let now = Date()
+            if let currentStart = cal.dateInterval(of: component, for: now)?.start,
+               let targetStart = cal.dateInterval(of: component, for: day)?.start,
+               let steps = cal.dateComponents([component == .weekOfYear ? .weekOfYear : .month],
+                                              from: targetStart, to: currentStart)
+                   .value(for: component == .weekOfYear ? .weekOfYear : .month) {
+                offset = max(0, steps)
+            }
+        }
+    }
+
+    /// Publish the window being viewed, so Metrics follows the arrows.
+    private func publishWindow() {
+        appState.sharedFilter.day = periodWindow()?.start
     }
 
     /// What the two block styles mean, once, in nine words. The alternative is a tooltip nobody hovers
@@ -345,6 +381,7 @@ struct PlannerView: View {
                         unit = candidate
                         offset = 0
                         rebuild()
+                        publishWindow()
                     } label: {
                         Text(candidate.rawValue)
                             .font(.system(size: 11, weight: selected ? .bold : .medium,
@@ -360,18 +397,20 @@ struct PlannerView: View {
             }
             Spacer(minLength: 8)
             HStack(spacing: 8) {
-                Button { offset += 1; rebuild() } label: { Image(systemName: "chevron.left") }
+                Button { offset += 1; rebuild(); publishWindow() } label: {
+                    Image(systemName: "chevron.left")
+                }
                     .buttonStyle(.borderless)
                 Text(periodLabel)
                     .font(.system(.subheadline, design: .rounded)).fontWeight(.medium)
                     .frame(minWidth: 150)
                     .multilineTextAlignment(.center)
-                Button { offset = max(0, offset - 1); rebuild() } label: {
+                Button { offset = max(0, offset - 1); rebuild(); publishWindow() } label: {
                     Image(systemName: "chevron.right")
                 }
                 .buttonStyle(.borderless)
                 .disabled(offset == 0)
-                Button("Today") { offset = 0; rebuild() }
+                Button("Today") { offset = 0; rebuild(); publishWindow() }
                     .buttonStyle(.link)
                     .disabled(offset == 0)
             }

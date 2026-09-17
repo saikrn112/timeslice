@@ -49,6 +49,43 @@ struct MetricsView: View {
     /// the range — that's the point of pinning, and what makes the same question askable across
     /// day / week / month / 6m.
     @State private var pinnedFocuses: [TimelineFocus] = []
+    /// Take up the selection the Planner published: the same allocation, and a range covering the same
+    /// period. Adopted on appear only, so it can't fight with you while you're using the page.
+    private func adoptSharedFilter() {
+        let filter = appState.sharedFilter
+        if let day = filter.day, !range.contains(day) {
+            range = DateRange.resolve(unit: range.unit, anchor: day, earliest: earliest)
+        }
+        if let subject = filter.subject {
+            pinnedFocuses = [Self.focus(for: subject)]
+        }
+    }
+
+    /// Publish the current selection so the Planner opens on the same thing.
+    ///
+    /// Only the FIRST pinned allocation travels: "these two combined" is a question the Planner can't ask,
+    /// and silently dropping the second one there would be worse than not carrying it.
+    private func publishSharedFilter() {
+        appState.sharedFilter.day = range.start
+        appState.sharedFilter.subject = pinnedFocuses.first.flatMap(Self.subject(for:))
+    }
+
+    private static func focus(for subject: TargetSubject) -> TimelineFocus {
+        switch subject {
+        case .task(let id): return .task(id)
+        case .project(let id): return .group(id)
+        case .tag(let id): return .tag(id)
+        }
+    }
+
+    private static func subject(for focus: TimelineFocus) -> TargetSubject? {
+        switch focus {
+        case .task(let id): return .task(id)
+        case .group(let id): return id.map { .project($0) }
+        case .tag(let id): return id.map { .tag($0) }
+        }
+    }
+
     /// Consumes the Planner's request to show one day, with an allocation pinned. Cleared once applied so
     /// returning to this tab later doesn't yank the range back to a day you have finished with.
     private func applyHandoff(_ handoff: AppState.MetricsHandoff) {
@@ -60,6 +97,7 @@ struct MetricsView: View {
         case nil: pinnedFocuses = []
         }
         appState.metricsHandoff = nil
+        publishSharedFilter()
     }
 
     /// The highlights actually in effect. PINS win over hover: once you've clicked something you're
@@ -143,11 +181,15 @@ struct MetricsView: View {
                 // section above it cost more in coherence than it bought in precision.
                 RangeFilterBar(range: $range, earliest: earliest)
                     .onAppear {
+                        // A navigation request wins over the shared selection: it carries an intent.
                         if let handoff = appState.metricsHandoff { applyHandoff(handoff) }
+                        else { adoptSharedFilter() }
                     }
                     .onChange(of: appState.metricsHandoff) { _, handoff in
                         if let handoff { applyHandoff(handoff) }
                     }
+                    .onChange(of: range) { _, _ in publishSharedFilter() }
+                    .onChange(of: pinnedFocuses) { _, _ in publishSharedFilter() }
                 tiles
                 // Budgets report against their OWN period (a weekly one always shows this week), so
                 // each row states its period. That per-row label is what keeps them from reading as

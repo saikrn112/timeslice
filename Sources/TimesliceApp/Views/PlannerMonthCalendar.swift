@@ -48,7 +48,7 @@ struct PlannerMonthCalendar: View {
     var onOpen: (Date) -> Void = { _ in }
 
     private static let dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-    private static let cellHeight: CGFloat = 66
+    private static let cellHeight: CGFloat = 50
 
     var body: some View {
         VStack(spacing: 4) {
@@ -81,12 +81,23 @@ struct PlannerMonthCalendar: View {
                     .padding(.horizontal, day.isToday ? 4 : 0)
                     .padding(.vertical, day.isToday ? 1 : 0)
                     .background { if day.isToday { Capsule().fill(Color.accentColor) } }
-                if tracked > 0.02 {
+                Spacer(minLength: 0)
+                // Done against wanted, which is the day's whole verdict as two numbers. The cubes show
+                // what it was made of; this says whether it was enough.
+                if day.wantedHours > 0.02 {
+                    HStack(spacing: 0) {
+                        Text(Self.short(towards))
+                            .foregroundStyle(missed ? PlannerPalette.over
+                                             : (towards > 0.02 ? Color.primary : .secondary))
+                        Text("/\(Self.short(day.wantedHours))")
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.system(size: 9, design: .monospaced))
+                } else if tracked > 0.02 {
                     Text(Self.short(tracked))
                         .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(missed ? PlannerPalette.over : .secondary)
+                        .foregroundStyle(.secondary)
                 }
-                Spacer(minLength: 0)
             }
 
             // ONE bar, not a band per allocation. At 95pt wide a stack of full-width rows spends the whole
@@ -97,13 +108,6 @@ struct PlannerMonthCalendar: View {
             // the day's allocations wanted — so short, met and overshot are all one glance.
             cubes(day)
 
-            // What the day mostly was. A number says how much and nothing about what.
-            if let biggest = day.tracked.max(by: { $0.hours < $1.hours }), biggest.hours > 0.25 {
-                Text(biggest.name)
-                    .font(.system(size: 8))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.tail)
-            }
             Spacer(minLength: 0)
         }
         .padding(5)
@@ -138,19 +142,29 @@ struct PlannerMonthCalendar: View {
         let filled = cubeCounts(day, total: available)
         let wanted = min(available, Int(day.wantedHours.rounded()))
         let columns = min(8, max(5, Int((Double(available) / 2).rounded(.up))))
-        return VStack(alignment: .leading, spacing: 2) {
-            ForEach(0..<rowCount(available, columns: columns), id: \.self) { row in
-                HStack(spacing: 2) {
-                    ForEach(0..<columns, id: \.self) { column in
-                        let index = row * columns + column
-                        if index < available {
-                            cube(index: index, filled: filled, wanted: wanted)
-                        } else {
-                            Color.clear.frame(width: 8, height: 8)
+        let rows = rowCount(available, columns: columns)
+        // Sized from the space it's given rather than a fixed 8pt, so the grid reaches both edges. At a
+        // fixed size it left a dead band down the right and along the bottom of every cell, which read as
+        // uneven padding rather than as a grid.
+        return GeometryReader { geo in
+            let gap: CGFloat = 2
+            let side = max(4, min((geo.size.width - gap * CGFloat(columns - 1)) / CGFloat(columns),
+                                  (geo.size.height - gap * CGFloat(rows - 1)) / CGFloat(rows)))
+            VStack(alignment: .leading, spacing: gap) {
+                ForEach(0..<rows, id: \.self) { row in
+                    HStack(spacing: gap) {
+                        ForEach(0..<columns, id: \.self) { column in
+                            let index = row * columns + column
+                            if index < available {
+                                cube(index: index, filled: filled, wanted: wanted, side: side)
+                            } else {
+                                Color.clear.frame(width: side, height: side)
+                            }
                         }
                     }
                 }
             }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
         }
     }
 
@@ -184,12 +198,12 @@ struct PlannerMonthCalendar: View {
         return out
     }
 
-    private func cube(index: Int, filled: [Int64?], wanted: Int) -> some View {
+    private func cube(index: Int, filled: [Int64?], wanted: Int, side: CGFloat) -> some View {
         let owner = index < filled.count ? filled[index] : nil
         let dim = owner != nil && highlight != nil && highlight != owner
         return RoundedRectangle(cornerRadius: 1.5)
             .fill(fill(for: owner).opacity(dim ? 0.12 : 1))
-            .frame(width: 8, height: 8)
+            .frame(width: side, height: side)
             .overlay {
                 // The target boundary, drawn on the last cube the allocations wanted — a hair of a line, so
                 // it reads as a mark on the grid rather than another object in it.
