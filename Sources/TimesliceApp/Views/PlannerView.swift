@@ -50,7 +50,9 @@ struct PlannerView: View {
     /// second set of goals with their own bookkeeping.
     @State private var unit: PlanUnit = ProcessInfo.processInfo
         .environment["TIMESLICE_PLANNER_UNIT"]?.lowercased() == "month" ? .month : .week
-    /// How many periods back from the current one. 0 is now; 1 is last week or last month.
+    /// How many periods back from the current one. 0 is now, 1 is last week, and NEGATIVE is ahead —
+    /// which is how you look at a week that hasn't happened. Nothing is tracked there, so what you see is
+    /// the plan as designed.
     @State private var offset = Int(ProcessInfo.processInfo
         .environment["TIMESLICE_PLANNER_OFFSET"] ?? "") ?? 0
     /// Per allocation, seconds tracked inside the viewed period.
@@ -58,8 +60,19 @@ struct PlannerView: View {
     /// weekday → the tasks that no allocation covers. Feeds the double-click into Metrics, which can only
     /// highlight "unallocated" by naming those tasks one by one.
     @State private var unallocatedTaskIDs: [Int: [Int64]] = [:]
+    /// Allocations wholly inside another. Their hours are already counted in the parent's, so every total
+    /// on this page has to leave them out — the headline did and the figures beside it didn't, which is how
+    /// "the plan fits, 33h spare" ended up above "spare 27.5h".
+    @State private var nestedIDs: Set<Int64> = []
     /// Every second tracked inside the viewed period, allocation or not — the bar's "tracked" segment.
     @State private var periodTracked: TimeInterval = 0
+    /// Show the plan as designed rather than what happened.
+    ///
+    /// Two things asked for the same view: "can I see next week" and "can I see how the intended plan
+    /// looked". A week ahead has nothing tracked in it, so it can only ever show the intention — and once
+    /// that exists, being able to see it for THIS week is the same code with the actuals ignored.
+    @State private var showIntended = ProcessInfo.processInfo
+        .environment["TIMESLICE_PLANNER_INTENDED"] == "1"
     @State private var showReservations = false
     @State private var showAllocations = false
     /// Built once per rebuild rather than per redraw: the calendar needs every interval placed at its
@@ -102,11 +115,17 @@ struct PlannerView: View {
                     }
                     section(unit == .week ? "How full each day is" : "Month, day by day",
                             subtitle: calendarSubtitle,
-                            accessory: { legend }) {
+                            accessory: {
+                                HStack(spacing: 10) {
+                                    if unit == .week { intendedToggle }
+                                    legend
+                                }
+                            }) {
                         if unit == .week {
                             PlannerWeekGrid(days: calendarDays,
                                             capacityHours: settings.wakingSeconds / 3600,
-                                            elapsedHoursToday: offset == 0 ? elapsedHoursToday : nil,
+                                                            elapsedHoursToday: offset == 0 && !showIntended
+                                                ? elapsedHoursToday : nil,
                                             highlight: highlight,
                                             onPick: { pick($0) },
                                             onOpen: { openInMetrics(targetID: $0, weekday: $1) })
@@ -279,9 +298,11 @@ struct PlannerView: View {
         HStack(spacing: 12) {
             // The month grid has no owed blobs and no hatching, so it doesn't get their keys. A legend
             // naming things that aren't on screen is worse than none.
-            legendKey(filled: true, unit == .week ? "tracked" : "done")
+            if !(unit == .week && (showIntended || isFuture)) {
+                legendKey(filled: true, unit == .week ? "tracked" : "done")
+            }
             if unit == .week {
-                legendKey(filled: false, "still to fit")
+                legendKey(filled: false, showIntended || isFuture ? "planned" : "still to fit")
             } else {
                 // One cube is one hour; the outlined one is where the day's allocations wanted to reach.
                 HStack(spacing: 4) {
@@ -430,11 +451,11 @@ struct PlannerView: View {
                     .font(.system(.subheadline, design: .rounded)).fontWeight(.medium)
                     .frame(minWidth: 150)
                     .multilineTextAlignment(.center)
-                Button { offset = max(0, offset - 1); rebuild(); publishWindow() } label: {
+                Button { offset = max(-8, offset - 1); rebuild(); publishWindow() } label: {
                     Image(systemName: "chevron.right")
                 }
                 .buttonStyle(.borderless)
-                .disabled(offset == 0)
+                .disabled(offset <= -8)
                 Button("Today") { offset = 0; rebuild(); publishWindow() }
                     .buttonStyle(.link)
                     .disabled(offset == 0)
@@ -455,11 +476,13 @@ struct PlannerView: View {
         }
         f.dateFormat = "d MMM"
         let end = window.end.addingTimeInterval(-1)
-        return "\(f.string(from: window.start)) – \(f.string(from: end))"
+        let dates = "\(f.string(from: window.start)) – \(f.string(from: end))"
+        if offset == -1 { return "Next week · \(dates)" }
+        return offset < 0 ? "In \(-offset) weeks · \(dates)" : dates
     }
 
     /// The viewed window. Weeks and months both come from `Calendar`, so they line up with what the
-    /// metrics page calls a week.
+    /// metrics page calls a week. A negative offset is ahead of now.
     private func periodWindow() -> DateInterval? {
         let cal = Calendar.current
         let component: Calendar.Component = unit == .week ? .weekOfYear : .month
@@ -492,9 +515,39 @@ struct PlannerView: View {
     }
 
     private var calendarSubtitle: String {
-        unit == .week
-            ? "each column is a waking day · solid is tracked, dashed is still owed"
-            : "one cube is one hour of the day"
+        guard unit == .week else { return "one cube is one hour of the day" }
+        if isFuture { return "nothing tracked yet — this is the plan as designed" }
+        return showIntended
+            ? "the plan as designed, ignoring what actually happened"
+            : "each column is a waking day · solid is tracked, dashed is still owed"
+    }
+
+    /// True when the window being viewed hasn't happened yet.
+    private var isFuture: Bool { offset < 0 }
+
+    /// Actual against intended. Hidden for a future week, which has only one answer.
+    @ViewBuilder
+    private var intendedToggle: some View {
+        if !isFuture {
+            HStack(spacing: 3) {
+                ForEach([false, true], id: \.self) { intended in
+                    let selected = showIntended == intended
+                    Button {
+                        showIntended = intended
+                        rebuild()
+                    } label: {
+                        Text(intended ? "intended" : "actual")
+                            .font(.system(size: 9, weight: selected ? .bold : .regular,
+                                          design: .rounded))
+                            .foregroundStyle(selected ? Color.white : Color.secondary)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Capsule().fill(selected ? Color.accentColor
+                                                       : Color.secondary.opacity(0.14)))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
     }
 
     /// Waking hours already gone today: where the "now" rule sits in a column measured in hours.
@@ -534,20 +587,24 @@ struct PlannerView: View {
             // it against, which is how "55h–65h" ended up meaning nothing.
             let budget = periodBudget()
             HStack(spacing: 14) {
-                if offset > 0 {
+                if isFuture || (showIntended && unit == .week) {
+                    figure("goal", goalSeconds, .secondary)
+                    figure("available", max(0, budget.capacity - unavailableInWindow()), .secondary)
+                    let available = max(0, budget.capacity - unavailableInWindow())
+                    figure("unclaimed", max(0, available - goalSeconds),
+                           available >= goalSeconds ? .green : Self.overColor)
+                } else if offset > 0 {
                     // A finished period is a different question. "Still owed 42.2h · free left 0h ·
                     // short 42.2h" printed the same number twice and offered hours that no longer exist.
                     //
                     // All three figures are ALLOCATION hours: `budget.tracked` counts every tracked
                     // second including work no allocation covers, so adding it to what's owed produced a
                     // "wanted" of 73.6h for a week whose allocations only ask for 71h.
-                    let wanted = targets.filter { $0.direction == .atLeast }
-                        .reduce(0.0) { $0 + $1.weeklySeconds * unit.weeks }
                     let towards = periodActuals.values.reduce(0, +)
-                    figure("goal", wanted, .secondary)
+                    figure("goal", goalSeconds, .secondary)
                     figure("done", towards, .accentColor)
-                    figure("missed", max(0, wanted - towards),
-                           wanted - towards > 60 ? Self.overColor : .green)
+                    figure("missed", max(0, goalSeconds - towards),
+                           goalSeconds - towards > 60 ? Self.overColor : .green)
                     if budget.tracked - towards > 60 {
                         figure("other work", budget.tracked - towards, .secondary)
                     }
@@ -556,9 +613,7 @@ struct PlannerView: View {
                     // ledger, and this is a page you glance at.
                     // The same four words a finished period uses, plus the two only a live one has. The
                     // headline says what it MEANS; these say what it is, and neither repeats the other.
-                    let goal = targets.filter { $0.direction == .atLeast }
-                        .reduce(0.0) { $0 + $1.weeklySeconds * unit.weeks }
-                    figure("goal", goal, .secondary)
+                    figure("goal", goalSeconds, .secondary)
                     figure("done", periodActuals.values.reduce(0, +), .accentColor)
                     figure("to do", budget.stillToDo,
                            budget.stillToDo > budget.freeLeft ? Self.overColor : .orange)
@@ -573,6 +628,34 @@ struct PlannerView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
+    /// What the allocations ask for over the viewed window, with nested ones left out because their hours
+    /// are already inside their parent's.
+    private var goalSeconds: TimeInterval {
+        targets
+            .filter { $0.direction == .atLeast && !nestedIDs.contains($0.id) }
+            .reduce(0.0) { $0 + $1.weeklySeconds * unit.weeks }
+    }
+
+    /// Hours the viewed window never has, whatever day it is — the per-weekday shortfalls added up.
+    ///
+    /// `PeriodBudget.reservedLeft` only counts the days still to come, which is right for "what can I still
+    /// do" and wrong for "how big is this week", the question a future or intended week asks.
+    private func unavailableInWindow() -> TimeInterval {
+        guard let window = periodWindow() else { return 0 }
+        let cal = Calendar.current
+        var total: TimeInterval = 0
+        var cursor = cal.startOfDay(for: window.start)
+        while cursor < window.end {
+            let weekday = cal.component(.weekday, from: cursor)
+            total += min(settings.wakingSeconds, reservations
+                .filter { $0.weekdays.effective.contains(weekday: weekday) }
+                .reduce(0.0) { $0 + $1.secondsPerDay })
+            guard let next = cal.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+        return total
     }
 
     private func figure(_ label: String, _ seconds: TimeInterval, _ tint: Color) -> some View {
@@ -632,9 +715,11 @@ struct PlannerView: View {
 
         out.tracked = periodTracked
         // What the allocations still want inside this window, at the window's own scale.
-        out.stillToDo = targets.filter { $0.direction == .atLeast }.reduce(0.0) { sum, target in
-            sum + max(0, target.weeklySeconds * unit.weeks - (periodActuals[target.id] ?? 0))
-        }
+        out.stillToDo = targets
+            .filter { $0.direction == .atLeast && !nestedIDs.contains($0.id) }
+            .reduce(0.0) { sum, target in
+                sum + max(0, target.weeklySeconds * unit.weeks - (periodActuals[target.id] ?? 0))
+            }
         return out
     }
 
@@ -644,13 +729,28 @@ struct PlannerView: View {
         // Month view gets a MONTH verdict. `Planner` and `Replan` are week-scoped, so showing their answer
         // under a month grid said "the week fits" about four weeks of days — answering a different
         // question than the page is asking.
+        if isFuture || (showIntended && unit == .week) {
+            // A week that hasn't happened has no progress to report; the only question is whether the plan
+            // it would start from is possible at all.
+            if !plan.overloadedDays.isEmpty {
+                let worst = plan.overloadedDays
+                    .compactMap { day in plan.days.first { $0.weekday == day } }
+                    .max { -$0.slackSeconds < -$1.slackSeconds }
+                if let worst {
+                    return "\(dayList([worst.weekday])) would be "
+                         + "\(hours(-worst.slackSeconds)) over"
+                }
+            }
+            let free = max(0, plan.capacitySeconds - plan.reservedSeconds)
+            let spare = free - plan.requiredUpperSeconds
+            return spare > 3600 ? "The plan fits, \(hours(spare)) unclaimed"
+                                : "The plan barely fits"
+        }
         if offset > 0 {
             // What happened, in the plainest form available: two numbers and no verb nobody uses.
-            let wanted = targets.filter { $0.direction == .atLeast }
-                .reduce(0.0) { $0 + $1.weeklySeconds * unit.weeks }
             let towards = periodActuals.values.reduce(0, +)
-            guard wanted > 60 else { return "Nothing was allocated then" }
-            return "Did \(hours(towards)) of \(hours(wanted))"
+            guard goalSeconds > 60 else { return "Nothing was allocated then" }
+            return "Did \(hours(towards)) of \(hours(goalSeconds))"
         }
         if unit == .month {
             let budget = periodBudget()
@@ -663,7 +763,8 @@ struct PlannerView: View {
                     : "That month held together"
             }
             let spare = budget.freeLeft - budget.stillToDo
-            return spare > 3600 ? "Fits, \(hours(spare)) spare this month" : "Fits, only just"
+            return spare > 3600 ? "Fits, \(hours(spare)) unclaimed this month"
+                                : "Fits, only just"
         }
         // Says what the comparison IS. "Not finishable" was a conclusion with its reasoning hidden,
         // which is exactly the kind of number nobody can argue with or trust.
@@ -689,7 +790,7 @@ struct PlannerView: View {
         switch plan.verdict {
         case .fits:
             let spare = budget.freeLeft - budget.stillToDo
-            return spare > 3600 ? "Fits, \(hours(spare)) spare" : "Fits, only just"
+            return spare > 3600 ? "Fits, \(hours(spare)) unclaimed" : "Fits, only just"
         case .tight: return "Fits, only just"
         case .oversubscribed where !plan.overloadedDays.isEmpty:
             return "\(dayList(plan.overloadedDays)) over capacity"
@@ -858,6 +959,7 @@ struct PlannerView: View {
         let nested = Set(built.nestings.compactMap { nesting in
             targets.first { name(for: $0, tasks: tasks) == nesting.innerName }?.id
         })
+        nestedIDs = nested
 
         // Who else counts an allocation's hours. With the grid attributing an hour to the most specific
         // allocation, `vllm` work no longer appears under `office` in the columns — while office's progress
@@ -942,6 +1044,10 @@ struct PlannerView: View {
         let startOfToday = cal.startOfDay(for: Date())
         let owedOrder = replan.items.sorted { $0.debtSeconds > $1.debtSeconds }.map(\.targetID)
 
+        func intendedDay(_ weekday: Int) -> Planner.DayPlan? {
+            plan?.days.first { $0.weekday == weekday }
+        }
+
         var out: [PlannerWeekGrid.DayInput] = []
         for offsetDays in 0..<7 {
             guard let date = cal.date(byAdding: .day, value: offsetDays, to: week.start) else { break }
@@ -971,7 +1077,7 @@ struct PlannerView: View {
                                                          : [])))
             }
             if let other = dayOther[weekday], other > 60 {
-                blobs.append(PlannerWeekGrid.Blob(targetID: -2, name: "unallocated",
+                blobs.append(PlannerWeekGrid.Blob(targetID: -2, name: "off-plan",
                                                   hours: other / 3600,
                                                   colorHex: "#8E8E93", kind: .unallocated,
                                                   detail: detailLines(breakdown[weekday]?[-2])))
@@ -979,7 +1085,7 @@ struct PlannerView: View {
 
             // Then what is still owed — only on days still to come, and only in the current week. A past
             // week owes nothing; it is simply what happened.
-            if dayStart >= startOfToday, offset == 0,
+            if dayStart >= startOfToday, offset == 0, !showIntended,
                let planned = replan.replannedDays.first(where: { $0.weekday == weekday }) {
                 let byID = Dictionary(planned.placements.map { ($0.targetID, $0) },
                                       uniquingKeysWith: { a, _ in a })
@@ -994,10 +1100,27 @@ struct PlannerView: View {
                 }
             }
 
+            // The plan as designed: the even spread over each allocation's own claimed days, with no
+            // reference to what happened. This is the whole of a future week, and the "intended" view of
+            // any other one — the same numbers `Planner` used to decide whether the week fits at all.
+            if showIntended || isFuture {
+                blobs = blobs.filter { $0.kind == .reserved }
+                for placement in intendedDay(weekday)?.placements
+                    .sorted(by: { $0.seconds > $1.seconds }) ?? []
+                where placement.seconds > 60 && !nested.contains(placement.targetID) {
+                    blobs.append(PlannerWeekGrid.Blob(
+                        targetID: placement.targetID, name: name(forTarget: placement.targetID),
+                        hours: placement.seconds / 3600,
+                        colorHex: colorHex(forTarget: placement.targetID), kind: .owed))
+                }
+            }
+
             out.append(PlannerWeekGrid.DayInput(
                 weekday: weekday, label: names[weekday - 1],
-                dayOfMonth: cal.component(.day, from: date),
-                isPast: dayStart < startOfToday, isToday: dayStart == startOfToday,
+                dayOfMonth: dayStart == startOfToday || !(showIntended || isFuture)
+                    ? cal.component(.day, from: date) : cal.component(.day, from: date),
+                isPast: dayStart < startOfToday && !isFuture,
+                isToday: dayStart == startOfToday && !isFuture,
                 blobs: blobs))
         }
         return out
@@ -1064,7 +1187,7 @@ struct PlannerView: View {
                 // block isn't anonymous. Built in steps: inline, the type-checker gave up on it.
                 let biggestOther: String? = unallocatedNames[cursor]?
                     .max { $0.value < $1.value }?.key
-                let otherLabel: String = biggestOther.map { "unallocated · \($0)" } ?? "unallocated"
+                let otherLabel: String = biggestOther.map { "off-plan · \($0)" } ?? "off-plan"
                 let entries: [(Int64, Double)] = (byDate[cursor] ?? [:])
                     .filter { $0.value > 1.0 / 60 }
                     .sorted { $0.value > $1.value }
@@ -1168,6 +1291,14 @@ struct PlannerView: View {
     /// which is how a green dot ended up next to "43.1h to do, only 42h free left". Orange means TIGHT,
     /// not merely "has work left", or every period with anything in it would be amber.
     private func verdictColor(_ v: Planner.Verdict) -> Color {
+        // An intended or future week is judged on whether the PLAN is possible; it has no progress yet, so
+        // reading this week's shortfall gave an amber dot beside "the plan fits, 33h unclaimed".
+        if isFuture || (showIntended && unit == .week) {
+            guard let plan else { return .secondary }
+            if !plan.overloadedDays.isEmpty { return Self.overColor }
+            let free = max(0, plan.capacitySeconds - plan.reservedSeconds)
+            return plan.requiredUpperSeconds <= free ? .green : .orange
+        }
         let budget = periodBudget()
         if let plan, !plan.overloadedDays.isEmpty, unit == .week, offset == 0 {
             return Self.overColor
