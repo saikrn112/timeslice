@@ -62,8 +62,7 @@ struct PlannerView: View {
     /// Built once per rebuild rather than per redraw: the calendar needs every interval placed at its
     /// real clock position, and doing that inside `body` would re-query sqlite on every hover.
     @State private var calendarDays: [PlannerWeekGrid.DayInput] = []
-    @State private var monthColumns: [PlannerMonthMatrix.WeekColumn] = []
-    @State private var monthRows: [PlannerMonthMatrix.Row] = []
+    @State private var monthWeeks: [[PlannerMonthCalendar.DayCell]] = []
     /// Tap an allocation, in the rail or the grid, to dim everything else. The one interaction on the
     /// page, because "where does THIS one actually land" is the question a week of overlapping colours
     /// can't answer at a glance.
@@ -98,7 +97,7 @@ struct PlannerView: View {
                             accessory: { EmptyView() }) {
                         railStrip(plan)
                     }
-                    section(unit == .week ? "How full each day is" : "Week by week",
+                    section(unit == .week ? "How full each day is" : "Month, day by day",
                             subtitle: calendarSubtitle,
                             accessory: { legend }) {
                         if unit == .week {
@@ -109,8 +108,11 @@ struct PlannerView: View {
                                             onPick: { pick($0) },
                                             onOpen: { openInMetrics(targetID: $0, weekday: $1) })
                         } else {
-                            PlannerMonthMatrix(weeks: monthColumns, rows: monthRows,
-                                               highlight: highlight) { pick($0) }
+                            PlannerMonthCalendar(weeks: monthWeeks,
+                                                 capacityHours: settings.wakingSeconds / 3600,
+                                                 highlight: highlight,
+                                                 onPick: { pick($0) },
+                                                 onOpen: { openInMetrics(day: $0) })
                         }
                     }
                 } else {
@@ -222,7 +224,22 @@ struct PlannerView: View {
             // The month grid has no owed blobs and no hatching, so it doesn't get their keys. A legend
             // naming things that aren't on screen is worse than none.
             legendKey(filled: true, unit == .week ? "tracked" : "done")
-            legendKey(filled: false, unit == .week ? "still to fit" : "weeks ahead")
+            if unit == .week {
+                legendKey(filled: false, "still to fit")
+            } else {
+                // One cube is one hour; the outlined one is where the day's allocations wanted to reach.
+                HStack(spacing: 4) {
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(Color.primary.opacity(0.07))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 1.5)
+                                .strokeBorder(Color.primary.opacity(0.55), lineWidth: 1)
+                        }
+                        .frame(width: 8, height: 8)
+                    Text("hour it wanted to reach").font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
+            }
             if unit == .week {
                 HStack(spacing: 4) {
                     Hatch(color: .secondary).frame(width: 14, height: 9)
@@ -413,7 +430,7 @@ struct PlannerView: View {
     private var calendarSubtitle: String {
         unit == .week
             ? "each column is a waking day · solid is tracked, dashed is still owed"
-            : "which weeks you missed, and the ones left to catch up in"
+            : "one cube is one hour of the day"
     }
 
     /// Waking hours already gone today: where the "now" rule sits in a column measured in hours.
@@ -486,11 +503,13 @@ struct PlannerView: View {
                             .monospacedDigit()
                         Text("left").font(.system(size: 10)).foregroundStyle(.secondary)
                     }
+                    .help("\(hours(budget.freeLeft)) is the available hours on the days still to come, "
+                          + "with today counted only from now.\nNothing is held back for work outside "
+                          + "your allocations — that would be a guess about what you're going to do.")
                     if budget.tracked > 60 { figure("done", budget.tracked, .accentColor) }
                 }
             }
 
-            atRisk
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -504,39 +523,6 @@ struct PlannerView: View {
                 .font(.system(size: 12, weight: .semibold, design: .rounded)).monospacedDigit()
                 .foregroundStyle(tint)
         }
-    }
-
-    /// What is going to be missed, and the reason — which is nearly always that the days it claims are
-    /// gone, not that the week is full. Naming it is the difference between a number you can act on and
-    /// one you can only feel bad about.
-    @ViewBuilder
-    private var atRisk: some View {
-        if let replan, unit == .week, offset == 0 {
-            let stuck = replan.items
-                .filter { $0.standing == .unreachable || $0.shortfallOnRemainingDays > 60 }
-                .sorted { $0.remainingSeconds > $1.remainingSeconds }
-                .prefix(3)
-            if !stuck.isEmpty {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("at risk").font(.system(size: 10)).foregroundStyle(.secondary)
-                    FlowRow(spacing: 6) {
-                        ForEach(Array(stuck), id: \.targetID) { item in
-                            chip(item.name, riskReason(item), Self.overColor,
-                                 tooltip: item.adviceIfUnreachable.isEmpty
-                                     ? "\(hours(item.remainingSeconds)) left, and its remaining days "
-                                       + "hold \(hours(item.availableOnRemainingDays))."
-                                     : item.adviceIfUnreachable)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func riskReason(_ item: Replan.Item) -> String {
-        if item.remainingClaimedDays == 0 { return "no days left" }
-        if item.remainingClaimedDays == 1 { return "\(hours(item.remainingSeconds)) on one day" }
-        return "\(hours(item.shortfallOnRemainingDays)) won't fit"
     }
 
     private struct PeriodBudget {
@@ -725,6 +711,14 @@ struct PlannerView: View {
         let idsBySubject = Dictionary(uniqueKeysWithValues:
             floors.map { ($0.id, membership.taskIDs(for: $0.subject)) })
 
+        // The most specific allocation owns an hour: a task inside both `office` and `vllm` belongs, for
+        // the purpose of "where did this hour go", to the narrower of the two. Sorting by set size once
+        // makes that a lookup rather than a search per interval.
+        let bySize = idsBySubject.sorted { $0.value.count < $1.value.count }
+        func owner(_ projectID: Int64) -> Int64? {
+            bySize.first { $0.value.contains(projectID) }?.key
+        }
+
         var byDay: [Int: [Int64: TimeInterval]] = [:]
         var otherByDay: [Int: TimeInterval] = [:]
         var totalByDay: [Int: TimeInterval] = [:]
@@ -743,10 +737,17 @@ struct PlannerView: View {
             let taskName = taskNamesByID[interval.projectID] ?? "?"
             var claimed = false
             for (id, ids) in idsBySubject where ids.contains(interval.projectID) {
-                byDay[weekday, default: [:]][id, default: 0] += seconds
+                // Every allocation that covers this work counts it — a task inside both `vllm` and `office`
+                // is genuine progress on both, and their PROGRESS BARS should each say so.
                 weekTotals[id, default: 0] += seconds
-                breakdown[weekday, default: [:]][id, default: [:]][taskName, default: 0] += seconds
                 claimed = true
+            }
+            // The day GRID is a different question: how the day was spent. There, an hour can only be
+            // spent once, so it goes to the most specific allocation that covers it. Counting it under both
+            // made a day of blobs add up to more hours than the day had, and the column over-filled.
+            if let primary = owner(interval.projectID) {
+                byDay[weekday, default: [:]][primary, default: 0] += seconds
+                breakdown[weekday, default: [:]][primary, default: [:]][taskName, default: 0] += seconds
             }
             // Hours on something no allocation covers. Shown in the grid because a day that went
             // somewhere unplanned is the commonest reason a plan didn't happen.
@@ -787,20 +788,30 @@ struct PlannerView: View {
                                           calendar: cal))
         replan = computed
 
-        // The most specific allocation wins an interval's colour: a task inside both `office` and
-        // `presentation for KT` belongs, visually, to the narrower of the two. Sorting by set size once
-        // makes that a lookup rather than a search per block.
-        let bySize = idsBySubject.sorted { $0.value.count < $1.value.count }
-        func owner(_ projectID: Int64) -> Int64? {
-            bySize.first { $0.value.contains(projectID) }?.key
-        }
-        let taskNames = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0.name) })
 
         // Allocations wholly inside another. Their hours are already in the parent's, so they must not
         // be drawn as blobs of their own.
         let nested = Set(built.nestings.compactMap { nesting in
             targets.first { name(for: $0, tasks: tasks) == nesting.innerName }?.id
         })
+
+        // Who else counts an allocation's hours. With the grid attributing an hour to the most specific
+        // allocation, `vllm` work no longer appears under `office` in the columns — while office's progress
+        // bar still counts it, because it genuinely is office work. Saying so in the tooltip is the
+        // difference between a considered model and an apparent contradiction.
+        var alsoCounts: [Int64: [String]] = [:]
+        for target in targets where target.direction == .atLeast {
+            let mine = membership.taskIDs(for: target.subject)
+            guard !mine.isEmpty else { continue }
+            for other in targets
+            where other.id != target.id && other.direction == .atLeast {
+                let theirs = membership.taskIDs(for: other.subject)
+                if !theirs.isEmpty, mine.isSubset(of: theirs) || !mine.isDisjoint(with: theirs),
+                   theirs.count > mine.count {
+                    alsoCounts[target.id, default: []].append(name(for: other, tasks: tasks))
+                }
+            }
+        }
 
         if unit == .week {
             let viewed = periodWindow() ?? week
@@ -838,12 +849,12 @@ struct PlannerView: View {
             }
             calendarDays = buildWeekColumns(week: viewed, replan: computed, nested: nested,
                                             dayActuals: viewedByDay, dayOther: viewedOther,
-                                            breakdown: viewedBreakdown, calendar: cal)
-            monthColumns = []
-            monthRows = []
+                                            breakdown: viewedBreakdown, alsoCounts: alsoCounts,
+                                            calendar: cal)
+            monthWeeks = []
         } else {
             calendarDays = []
-            buildMonthMatrix(store: store, owner: owner, nested: nested, calendar: cal)
+            monthWeeks = buildMonthCells(store: store, owner: owner, nested: nested, calendar: cal)
         }
     }
 
@@ -861,6 +872,7 @@ struct PlannerView: View {
                                   dayActuals: [Int: [Int64: TimeInterval]],
                                   dayOther: [Int: TimeInterval],
                                   breakdown: [Int: [Int64: [String: TimeInterval]]],
+                                  alsoCounts: [Int64: [String]],
                                   calendar cal: Calendar) -> [PlannerWeekGrid.DayInput] {
         let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
         let startOfToday = cal.startOfDay(for: Date())
@@ -888,7 +900,11 @@ struct PlannerView: View {
                 blobs.append(PlannerWeekGrid.Blob(targetID: id, name: name(forTarget: id),
                                                   hours: seconds / 3600,
                                                   colorHex: colorHex(forTarget: id), kind: .tracked,
-                                                  detail: detailLines(breakdown[weekday]?[id])))
+                                                  detail: detailLines(breakdown[weekday]?[id])
+                                                      + (alsoCounts[id]?.isEmpty == false
+                                                         ? ["also counts toward "
+                                                            + alsoCounts[id]!.joined(separator: ", ")]
+                                                         : [])))
             }
             if let other = dayOther[weekday], other > 60 {
                 blobs.append(PlannerWeekGrid.Blob(targetID: -2, name: "unallocated",
@@ -935,93 +951,98 @@ struct PlannerView: View {
             : shown + ["  + \(rest.count) more  \(hours(rest.reduce(0) { $0 + $1.value }))"]
     }
 
-    /// The month as weeks: one column per week it touches, one row per allocation.
+    /// The month as full weeks of day cells, including the leading and trailing days that complete the
+    /// first and last rows — a month grid that stopped at the 1st wouldn't be a calendar.
     ///
-    /// Thirty day-cells looked like a calendar and said nothing — at that size a cell holds neither a name
-    /// nor a figure. Weeks are also the unit the allocations are stated in, so a cell can be compared
-    /// against its own target instead of against a share of a day.
-    private func buildMonthMatrix(store: IntervalStore, owner: (Int64) -> Int64?,
-                                  nested: Set<Int64>,
-                                  calendar cal: Calendar) {
+    /// Each cell carries what it was, and what its allocations wanted of it. The gap between those two is
+    /// the only thing a month view has to say per day, and it's drawn as a line rather than written.
+    private func buildMonthCells(store: IntervalStore, owner: (Int64) -> Int64?,
+                                 nested: Set<Int64>,
+                                 calendar cal: Calendar) -> [[PlannerMonthCalendar.DayCell]] {
         guard let month = periodWindow(),
-              let firstWeek = cal.dateInterval(of: .weekOfYear, for: month.start),
-              let lastWeek = cal.dateInterval(of: .weekOfYear,
-                                              for: month.end.addingTimeInterval(-1))
-        else { monthColumns = []; monthRows = []; return }
+              let firstRow = cal.dateInterval(of: .weekOfYear, for: month.start),
+              let lastRow = cal.dateInterval(of: .weekOfYear,
+                                             for: month.end.addingTimeInterval(-1))
+        else { return [] }
 
+        let intervals = (try? store.intervals(from: firstRow.start, to: lastRow.end)) ?? []
         let now = Date()
         let startOfToday = cal.startOfDay(for: now)
         let waking = settings.wakingSeconds / 3600
-        let intervals = (try? store.intervals(from: firstWeek.start, to: lastWeek.end)) ?? []
+        let tasks = (try? store.listProjects(includeArchived: true)) ?? []
+        let taskNames = Dictionary(tasks.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
 
-        // Week start → allocation id → hours, plus the week's total.
-        var byWeek: [Date: [Int64: Double]] = [:]
-        var trackedByWeek: [Date: Double] = [:]
+        // Per date, per allocation (or -2 for work no allocation covers), hours.
+        var byDate: [Date: [Int64: Double]] = [:]
+        var unallocatedNames: [Date: [String: Double]] = [:]
         for interval in intervals {
             let end = interval.end ?? now
-            guard end > interval.start,
-                  let week = cal.dateInterval(of: .weekOfYear, for: interval.start) else { continue }
+            guard end > interval.start else { continue }
+            let day = cal.startOfDay(for: interval.start)
             let hours = end.timeIntervalSince(interval.start) / 3600
-            trackedByWeek[week.start, default: 0] += hours
             if let id = owner(interval.projectID), !nested.contains(id) {
-                byWeek[week.start, default: [:]][id, default: 0] += hours
+                byDate[day, default: [:]][id, default: 0] += hours
+            } else {
+                byDate[day, default: [:]][-2, default: 0] += hours
+                unallocatedNames[day, default: [:]][taskNames[interval.projectID] ?? "?",
+                                                   default: 0] += hours
             }
         }
 
-        let formatter = DateFormatter()
-        formatter.dateFormat = "d MMM"
-        var columns: [PlannerMonthMatrix.WeekColumn] = []
-        var cursor = firstWeek.start
-        while cursor < lastWeek.end {
-            guard let week = cal.dateInterval(of: .weekOfYear, for: cursor) else { break }
-            let isCurrent = week.contains(now)
-            // Available hours across the week: the waking day, less whatever each weekday gives up.
-            var available = 0.0
-            for offsetDays in 0..<7 {
-                guard let date = cal.date(byAdding: .day, value: offsetDays, to: week.start),
-                      date < week.end else { break }
-                let weekday = cal.component(.weekday, from: date)
+        let floors = targets.filter { $0.direction == .atLeast && !nested.contains($0.id) }
+        var rows: [[PlannerMonthCalendar.DayCell]] = []
+        var cursor = firstRow.start
+        while cursor < lastRow.end {
+            var row: [PlannerMonthCalendar.DayCell] = []
+            for _ in 0..<7 {
+                let weekday = cal.component(.weekday, from: cursor)
+                // The label for work no allocation covers names the biggest task in it, so the grey
+                // block isn't anonymous. Built in steps: inline, the type-checker gave up on it.
+                let biggestOther: String? = unallocatedNames[cursor]?
+                    .max { $0.value < $1.value }?.key
+                let otherLabel: String = biggestOther.map { "unallocated · \($0)" } ?? "unallocated"
+                let entries: [(Int64, Double)] = (byDate[cursor] ?? [:])
+                    .filter { $0.value > 1.0 / 60 }
+                    .sorted { $0.value > $1.value }
+                    .map { ($0.key, $0.value) }
+                let slices: [PlannerMonthCalendar.Slice] = entries.map { pair in
+                    let allocated = pair.0 >= 0
+                    return PlannerMonthCalendar.Slice(
+                        id: pair.0,
+                        name: allocated ? name(forTarget: pair.0) : otherLabel,
+                        hours: pair.1,
+                        colorHex: allocated ? colorHex(forTarget: pair.0) : "#8E8E93")
+                }
+
+                // What this weekday's allocations ask for, spread evenly over the days each claims.
+                var wanted = 0.0
+                for target in floors {
+                    let claimed = target.weekdays.effective
+                    guard claimed.contains(weekday: weekday) else { continue }
+                    wanted += target.weeklySeconds / Double(max(1, claimed.selectedCount)) / 3600
+                }
                 let unavailable = reservations
                     .filter { $0.weekdays.effective.contains(weekday: weekday) }
                     .reduce(0.0) { $0 + $1.secondsPerDay } / 3600
-                available += max(0, waking - unavailable)
-            }
-            columns.append(PlannerMonthMatrix.WeekColumn(
-                start: week.start,
-                label: formatter.string(from: week.start),
-                isCurrent: isCurrent,
-                isFuture: week.start > startOfToday,
-                elapsedFraction: isCurrent
-                    ? min(1, max(0, now.timeIntervalSince(week.start)
-                                    / week.end.timeIntervalSince(week.start)))
-                    : 1,
-                trackedHours: trackedByWeek[week.start] ?? 0,
-                availableHours: available))
-            guard let next = cal.date(byAdding: .weekOfYear, value: 1, to: cursor) else { break }
-            cursor = next
-        }
 
-        monthColumns = columns
-        monthRows = targets
-            .filter { $0.direction == .atLeast && !nested.contains($0.id) }
-            .map { target in
-                var done: [Date: Double] = [:]
-                for column in columns {
-                    done[column.start] = byWeek[column.start]?[target.id] ?? 0
-                }
-                return PlannerMonthMatrix.Row(id: target.id, name: name(for: target),
-                                              colorHex: colorHex(forTarget: target.id),
-                                              targetHours: target.weeklySeconds / 3600,
-                                              doneByWeek: done)
+                row.append(PlannerMonthCalendar.DayCell(
+                    date: cursor, dayOfMonth: cal.component(.day, from: cursor),
+                    inMonth: cursor >= month.start && cursor < month.end,
+                    isToday: cursor == startOfToday, isPast: cursor < startOfToday,
+                    unavailableHours: min(waking, unavailable),
+                    tracked: slices,
+                    wantedHours: min(max(0, waking - unavailable), wanted)))
+                guard let next = cal.date(byAdding: .day, value: 1, to: cursor) else { break }
+                cursor = next
             }
-            // Worst first: the rows worth acting on are the ones with the most left across the month.
-            .sorted { lhs, rhs in
-                func owed(_ row: PlannerMonthMatrix.Row) -> Double {
-                    columns.filter { !$0.isFuture }
-                        .reduce(0.0) { $0 + max(0, row.targetHours - (row.doneByWeek[$1.start] ?? 0)) }
-                }
-                return owed(lhs) > owed(rhs)
-            }
+            rows.append(row)
+        }
+        return rows
+    }
+
+    /// Open a specific date in Metrics, with nothing pinned. The month view's double-click.
+    private func openInMetrics(day: Date) {
+        appState.metricsHandoff = AppState.MetricsHandoff(day: day, subject: nil)
     }
 
     private func name(for target: Target, tasks: [Project]? = nil) -> String {
@@ -1077,25 +1098,20 @@ struct PlannerView: View {
         return lo == hi ? lo : "\(lo)–\(hi)"
     }
 
+    /// The dot, from the same numbers as the sentence beside it — in every mode.
+    ///
+    /// It used to read the week-scoped `Planner.Verdict` for the current week and `periodBudget` otherwise,
+    /// which is how a green dot ended up next to "43.1h to do, only 42h free left". Orange means TIGHT,
+    /// not merely "has work left", or every period with anything in it would be amber.
     private func verdictColor(_ v: Planner.Verdict) -> Color {
-        // The dot has to agree with the sentence beside it. It was reading the week-scoped verdict, so a
-        // finished week that came up 42h short got a green dot next to the words "came up 42.2h short".
-        if offset > 0 || unit == .month {
-            let budget = periodBudget()
-            if budget.stillToDo <= 60 { return .green }
-            if budget.stillToDo > budget.freeLeft + 60 { return Self.overColor }
-            // Orange means TIGHT, not merely "has work left" — otherwise an amber dot sat beside the
-            // words "still fits" for any month with anything to do in it, which is every month.
-            let spare = budget.freeLeft - budget.stillToDo
-            return spare < budget.freeLeft * 0.1 ? .orange : .green
+        let budget = periodBudget()
+        if let plan, !plan.overloadedDays.isEmpty, unit == .week, offset == 0 {
+            return Self.overColor
         }
-        if let replan, replan.weekIsLost { return Self.overColor }
-        switch v {
-        case .fits: return .green
-        case .tight: return .orange
-        case .oversubscribed: return Self.overColor
-        case .uncertain: return .yellow
-        }
+        if budget.stillToDo <= 60 { return .green }
+        if budget.stillToDo > budget.freeLeft + 60 { return Self.overColor }
+        let spare = budget.freeLeft - budget.stillToDo
+        return spare < budget.freeLeft * 0.12 ? .orange : .green
     }
 
     private func hours(_ seconds: TimeInterval) -> String {
