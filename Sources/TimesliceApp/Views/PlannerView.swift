@@ -2,22 +2,29 @@ import SwiftUI
 import TimesliceCore
 import TimesliceUI
 
-/// Whether the week is possible, and what to do about it today.
+/// Whether the week is possible, drawn as a calendar.
 ///
-/// Three shapes were tried before this one, and the lesson from each was the same: every round ADDED a
-/// section, so the page grew instead of getting clearer. Paragraphs, then a per-day list plus a
-/// per-allocation table, then an hour-cell grid plus a lagging list plus chips. Three visuals that each
-/// answer part of a question are worse than one that answers all of it.
+/// Four earlier shapes were tried, and each one added a region: paragraphs, then a per-day list plus a
+/// per-allocation table, then an hour grid plus a lagging list plus chips, then a verdict plus a budget
+/// bar plus goal rows plus a today card plus a matrix. All of them asked you to READ whether the week
+/// held together, from numbers in several different frames.
 ///
-/// So the page is two things. A **today card** — what to do now, which is what most visits are actually
-/// asking and what every earlier version answered last or not at all. And `PlannerMatrix` — allocations
-/// down, days across — where reading a row says what you're behind on and reading down the column under
-/// its unfinished cells says why: the day is already full. The collision is spatial, so it costs no
-/// prose.
+/// A calendar answers it by construction. `PlannerCalendar` draws what was tracked at the time it
+/// happened and packs what an allocation still owes into the gaps that are left; if the owed hours have
+/// nowhere to go, the column says so. Free time is free space. The now-line is where the past stops, so
+/// the page reads differently at 9am and at 11pm without being told the time. Catch-up appears as
+/// hatching pushed into the days that remain, because those are the only days the packer has.
 ///
-/// Every figure comes from `Planner` and `Replan` in Core, so `swift run TimeslicePlan --db <path>`
-/// prints the same numbers and the page can be checked against arithmetic rather than by eye — which
-/// matters because macOS UI can't be screenshotted headlessly.
+/// The rail beside it is the allocation list — what you're chasing, with the % inside its own bar — and
+/// doubles as the colour legend, so the two halves are one object instead of two summaries. Tapping an
+/// allocation in either half dims the rest.
+///
+/// Month view is the same idea one zoom out: a real month grid whose cells fill up, for deciding how to
+/// play catch-up across the weeks ahead.
+///
+/// Every figure still comes from `Planner`, `Replan` and `CalendarLayout` in Core, so
+/// `swift run TimeslicePlan --db <path>` prints the same numbers and the page is checkable against
+/// arithmetic rather than by eye — which matters because macOS UI can't be screenshotted headlessly.
 struct PlannerView: View {
     @ObservedObject var appState: AppState
     /// The timer, because a plan you can't act on is a dashboard. Every other page in this app does
@@ -50,6 +57,14 @@ struct PlannerView: View {
     @State private var periodTracked: TimeInterval = 0
     @State private var showReservations = false
     @State private var showAllocations = false
+    /// Built once per rebuild rather than per redraw: the calendar needs every interval placed at its
+    /// real clock position, and doing that inside `body` would re-query sqlite on every hover.
+    @State private var calendarDays: [PlannerCalendar.DayInput] = []
+    @State private var monthWeeks: [[PlannerMonthGrid.DayCell]] = []
+    /// Tap an allocation, in the rail or the grid, to dim everything else. The one interaction on the
+    /// page, because "where does THIS one actually land" is the question a week of overlapping colours
+    /// can't answer at a glance.
+    @State private var highlight: Int64?
 
     /// The red used for over-capacity, matching the metrics selection overlay so one colour means one
     /// thing across both pages.
@@ -70,12 +85,22 @@ struct PlannerView: View {
                 if let plan {
                     periodBar
                     headline(plan)
-                    goalRows(plan)
-                    if unit == .week, let replan { todayCard(plan, replan) }
-                    PlannerMatrix(plan: plan, replan: replan, actuals: actuals,
-                                  actualTotals: actualTotals, today: today,
-                                  colorFor: colorHex(forTarget:), nameFor: name(forTarget:))
-                    notes(plan)
+                    // Rail on the left, calendar on the right. The rail is the allocation list — what
+                    // you're chasing — and doubles as the colour legend for the grid beside it, so the
+                    // two halves are one object rather than two summaries of the same week.
+                    HStack(alignment: .top, spacing: 12) {
+                        rail(plan)
+                        if unit == .week {
+                            PlannerCalendar(days: calendarDays, nowHour: nowHour,
+                                            highlight: highlight) { pick($0) }
+                        } else {
+                            PlannerMonthGrid(weeks: monthWeeks,
+                                             wakingHours: settings.wakingSeconds / 3600,
+                                             highlight: highlight) { pick($0) }
+                        }
+                    }
+                    legend
+                    warnings(plan)
                 } else {
                     empty
                 }
@@ -113,35 +138,109 @@ struct PlannerView: View {
     /// office as 140h and a skipped week shows up as being behind on the month. No separate monthly
     /// goals, no debt bookkeeping.
     @ViewBuilder
-    private func goalRows(_ plan: Planner) -> some View {
+    private func rail(_ plan: Planner) -> some View {
         let rows = goalRowData(plan)
-        VStack(spacing: 3) {
+        VStack(alignment: .leading, spacing: 3) {
+            // Aligns with the calendar's day-name header.
+            Text("ALLOCATIONS")
+                .font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
+                .frame(height: 22)
             ForEach(rows, id: \.id) { row in
-                HStack(spacing: 8) {
-                    Circle().fill(Color(hex: row.colorHex)).frame(width: 8, height: 8)
-                    Text(row.name).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
-                        .frame(width: 140, alignment: .leading).help(row.name)
-
-                    InlineBar(fraction: min(1, row.fraction),
-                              label: "\(Int((row.fraction * 100).rounded()))%",
-                              fill: Color(hex: row.colorHex),
-                              height: 15,
-                              // Where you SHOULD be by now, as a notch. The gap between the fill and
-                              // the notch is the lag, without a number for it.
-                              marker: row.paceFraction)
-                        .frame(maxWidth: .infinity)
-
-                    Text("\(hours(row.done)) of \(hours(row.target))")
-                        .font(.system(size: 11, design: .monospaced)).monospacedDigit()
-                        .frame(width: 104, alignment: .trailing)
-                    Text(row.trailing)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(row.lagging ? Self.overColor : Color.secondary)
-                        .frame(width: 96, alignment: .leading)
-                }
-                .help(row.tooltip)
+                railRow(row)
             }
+            Spacer(minLength: 0)
         }
+        .frame(width: 232)
+    }
+
+    private func railRow(_ row: GoalRow) -> some View {
+        let task = startableTask(for: row.id)
+        let isRunning = task != nil && engine.runningProjectID == task?.id
+        let selected = highlight == row.id
+        return HStack(spacing: 5) {
+            // The page's only action. A plan you can't act on is a dashboard, and the planner already
+            // knows which task it means.
+            Button {
+                if let task { engine.switchTo(projectID: task.id) }
+            } label: {
+                Image(systemName: isRunning ? "pause.circle.fill" : "play.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(isRunning ? Color.orange : Color(hex: row.colorHex))
+            }
+            .buttonStyle(.plain)
+            .disabled(task == nil)
+            .help(task.map { isRunning ? "Running “\($0.name)”" : "Start “\($0.name)”" }
+                  ?? "No task to start — this allocation covers nothing trackable")
+
+            Text(row.name).font(.system(size: 11)).lineLimit(1).truncationMode(.tail)
+                .frame(width: 84, alignment: .leading)
+
+            // The two-tone bar from the metrics allocation rows: the % inside the fill, and a notch for
+            // where the fill should be by now. The gap between them is the lag, undescribed.
+            InlineBar(fraction: min(1, row.fraction),
+                      label: "\(Int((row.fraction * 100).rounded()))%",
+                      fill: Color(hex: row.colorHex),
+                      height: 14,
+                      marker: row.paceFraction)
+                .frame(maxWidth: .infinity)
+
+            Text(hours(row.target - min(row.target, row.done)))
+                .font(.system(size: 9, design: .monospaced)).monospacedDigit()
+                .foregroundStyle(row.lagging ? Self.overColor : Color.secondary.opacity(0.7))
+                .frame(width: 30, alignment: .trailing)
+        }
+        .padding(.vertical, 2).padding(.horizontal, 4)
+        .background(RoundedRectangle(cornerRadius: 4)
+                        .fill(selected ? Color.accentColor.opacity(0.12) : .clear))
+        .contentShape(Rectangle())
+        .onTapGesture { pick(row.id) }
+        .help(row.tooltip)
+    }
+
+    private func pick(_ id: Int64) {
+        highlight = (highlight == id) ? nil : id
+    }
+
+    /// What the two block styles mean, once, in nine words. The alternative is a tooltip nobody hovers
+    /// or a paragraph nobody reads.
+    private var legend: some View {
+        HStack(spacing: 12) {
+            legendKey(filled: true, "tracked")
+            legendKey(filled: false, "still to fit")
+            HStack(spacing: 4) {
+                Hatch(color: .secondary).frame(width: 14, height: 9)
+                    .clipShape(RoundedRectangle(cornerRadius: 2))
+                Text("reserved").font(.system(size: 9)).foregroundStyle(.secondary)
+            }
+            if highlight != nil {
+                Button("show all") { highlight = nil }
+                    .buttonStyle(.link).font(.system(size: 9))
+            }
+            Spacer()
+        }
+    }
+
+    private func legendKey(filled: Bool, _ label: String) -> some View {
+        HStack(spacing: 4) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color.accentColor.opacity(filled ? 0.85 : 0.16))
+                .overlay {
+                    if !filled {
+                        RoundedRectangle(cornerRadius: 2)
+                            .strokeBorder(Color.accentColor.opacity(0.75),
+                                          style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+                    }
+                }
+                .frame(width: 14, height: 9)
+            Text(label).font(.system(size: 9)).foregroundStyle(.secondary)
+        }
+    }
+
+    /// Hours since midnight, for the calendar's now-line.
+    private var nowHour: Double {
+        let cal = Calendar.current
+        let now = Date()
+        return now.timeIntervalSince(cal.startOfDay(for: now)) / 3600
     }
 
     private struct GoalRow: Identifiable {
@@ -279,16 +378,20 @@ struct PlannerView: View {
                 Button("Allocations…") { showAllocations = true }
                     .buttonStyle(.link).font(.system(size: 11))
             }
-            // Reads the VIEWED window, not always the current week. It was pinned to this week, so
-            // switching to Month or stepping back left a bar describing something nobody was looking at.
-            let budget = periodBudget()
-            WeekBudgetBar(capacity: budget.capacity,
-                          elapsed: budget.elapsed,
-                          tracked: budget.tracked,
-                          stillToDo: budget.stillToDo,
-                          freeLeft: budget.freeLeft,
-                          reservedLeft: budget.reservedLeft,
-                          over: budget.stillToDo > budget.freeLeft + 60)
+            // Month only. In week view the calendar already shows free time as free space, and a bar
+            // saying the same thing in a second visual language is exactly the duplication that made
+            // this page tiring. A month cell is too small to read whitespace from, so there the bar
+            // earns its place. It reads the VIEWED window either way.
+            if unit == .month {
+                let budget = periodBudget()
+                WeekBudgetBar(capacity: budget.capacity,
+                              elapsed: budget.elapsed,
+                              tracked: budget.tracked,
+                              stillToDo: budget.stillToDo,
+                              freeLeft: budget.freeLeft,
+                              reservedLeft: budget.reservedLeft,
+                              over: budget.stillToDo > budget.freeLeft + 60)
+            }
 
             // The one figure the bar can't hold, because it isn't a slice of the week: what the
             // allocations ADD UP to, which is a range when they overlap.
@@ -374,123 +477,6 @@ struct PlannerView: View {
         }
     }
 
-    // MARK: - Today
-
-    /// What to do now.
-    ///
-    /// The question most visits to this page are actually asking, and the one every previous version
-    /// answered last or not at all. It sits above the matrix because "am I over-committed" is a
-    /// question you ask once a month and "what should I be doing" is one you ask daily.
-    @ViewBuilder
-    private func todayCard(_ plan: Planner, _ replan: Replan) -> some View {
-        // Explicit types, and the row extracted below. Left inline, the type-checker gave up on
-        // this closure and silently tried the `ForEach($binding)` overload instead, whose error
-        // ("cannot convert [Placement] to Binding<C>") points nowhere near the actual problem.
-        let day: Planner.DayPlan? = plan.days.first { $0.weekday == today }
-        let wanted: [Planner.Placement] = (day?.placements ?? []).sorted { $0.seconds > $1.seconds }
-        let dayLeft = hoursLeftToday()
-        return VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 8) {
-                Text("Today").font(.system(size: 12, weight: .semibold))
-                // The clock, and how much of the day is actually left by it. Without this the card read
-                // identically at 9am and at 11pm, so "1.7h to go" was a plan in the morning and a
-                // fiction at night with nothing to tell them apart.
-                Text(clockText())
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                Text(dayLeft < 1800 ? "· day over"
-                                    : "· \(hours(dayLeft)) left")
-                    .font(.system(size: 11))
-                    .foregroundStyle(dayLeft < 1800 ? Self.overColor : .secondary)
-                if let day {
-                    Text(day.isOverCapacity
-                         ? "· asking for \(hours(day.reservedSeconds + day.committedSeconds)) of "
-                           + hours(day.capacitySeconds)
-                         : "· \(hours(day.freeSeconds)) free of \(hours(day.capacitySeconds))")
-                        .font(.system(size: 11))
-                        .foregroundStyle(day.isOverCapacity ? Self.overColor : .secondary)
-                }
-                Spacer()
-                if replan.totalDebtSeconds > 60 {
-                    Text("\(hours(replan.totalDebtSeconds)) behind overall")
-                        .font(.system(size: 10)).foregroundStyle(.orange)
-                }
-            }
-            if wanted.isEmpty {
-                Text("Nothing allocated to today.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-            } else {
-                ForEach(wanted, id: \.targetID) { placement in
-                    todayRow(placement)
-                }
-            }
-        }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 7).fill(Color.secondary.opacity(0.08)))
-    }
-
-    /// One thing today wants: how much, how much of it is already done, and what's left.
-    ///
-    /// Doubles as "how is today going", which is why the card doesn't need a second section for it.
-    private func todayRow(_ placement: Planner.Placement) -> some View {
-        let already = (actuals[today] ?? [:])[placement.targetID] ?? 0
-        let left = max(0, placement.seconds - already)
-        let dayLeft = hoursLeftToday()
-        let task = startableTask(for: placement.targetID)
-        let isRunning = task != nil && engine.runningProjectID == task?.id
-        return HStack(spacing: 8) {
-            // Start it from here. The planner knows what you should be doing and, until now, made you
-            // go to another page and find it yourself.
-            Button {
-                if let task { engine.switchTo(projectID: task.id) }
-            } label: {
-                Image(systemName: isRunning ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.system(size: 14))
-                    .foregroundStyle(isRunning ? Color.orange
-                                     : Color(hex: colorHex(forTarget: placement.targetID)))
-            }
-            .buttonStyle(.plain)
-            .disabled(task == nil)
-            .help(task.map { isRunning ? "Running “\($0.name)”" : "Start “\($0.name)”" }
-                  ?? "No task to start — this allocation covers nothing trackable")
-
-            Text(placement.name).font(.system(size: 11)).lineLimit(1)
-                .frame(width: 124, alignment: .leading)
-            ProgressPair(done: already, total: placement.seconds,
-                         tint: Color(hex: colorHex(forTarget: placement.targetID)))
-                .frame(width: 120, height: 8)
-            // "to go" only while there is time to go. Past that it's missed, and calling it pending at
-            // 11pm is the page lying about a day that has ended.
-            Text(left <= 60 ? "done"
-                 : (left > dayLeft ? "no time left" : "\(hours(left)) to go"))
-                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
-                .foregroundStyle(left <= 60 ? Color.green
-                                 : (left > dayLeft ? Self.overColor : Color.primary))
-                .frame(width: 84, alignment: .leading)
-            // Which task the button would start, so a tag allocation isn't a mystery box.
-            if let task {
-                Text(task.name).font(.system(size: 10)).foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 0)
-        }
-    }
-
-    /// Waking hours still available today, by the clock.
-    ///
-    /// Hours to midnight, capped at a waking day — the same measure `Replan` uses, so the card and the
-    /// backlog can't disagree about how much of today is left.
-    private func hoursLeftToday() -> TimeInterval {
-        Replan.fractionOfDayLeft(now: Date(), wakingSeconds: settings.wakingSeconds)
-            * settings.wakingSeconds
-    }
-
-    private func clockText() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm"
-        return f.string(from: Date())
-    }
-
     /// The task the play button should start for an allocation.
     ///
     /// An allocation can point at a tag covering fifty tasks, so this picks the one you most recently
@@ -512,7 +498,7 @@ struct PlannerView: View {
     /// the warning that no reservations are declared. Everything else the chips used to repeat is now
     /// a row or a column.
     @ViewBuilder
-    private func notes(_ plan: Planner) -> some View {
+    private func warnings(_ plan: Planner) -> some View {
         FlowRow(spacing: 6) {
             ForEach(Array(plan.unplaced.enumerated()), id: \.offset) { _, item in
                 chip(item.name, "won't fit", Self.overColor,
@@ -585,7 +571,8 @@ struct PlannerView: View {
         let now = Date()
         today = cal.component(.weekday, from: now)
         guard let week = cal.dateInterval(of: .weekOfYear, for: now) else { replan = nil; return }
-        let intervals = (try? store.intervals(from: week.start, to: week.end)) ?? []
+        let intervals = (try? store.intervals(from: week.start,
+                                              to: week.end.addingTimeInterval(7200))) ?? []
 
         // Per weekday and per allocation, so the grid's solid cells are real hours. Attribution goes
         // through the same `SubjectMembership` the planner uses, so "which hours count for this
@@ -639,11 +626,181 @@ struct PlannerView: View {
             periodTracked = total
         }
 
-        replan = Replan.compute(plan: built, input: input, actuals: weekTotals,
-                                elapsedWeekdays: Array(1..<today),
-                                remainingWeekdays: Array(today...7),
-                                fractionOfTodayLeft: Replan.fractionOfDayLeft(
-                                    now: now, wakingSeconds: settings.wakingSeconds, calendar: cal))
+        let computed = Replan.compute(plan: built, input: input, actuals: weekTotals,
+                                      elapsedWeekdays: Array(1..<today),
+                                      remainingWeekdays: Array(today...7),
+                                      fractionOfTodayLeft: Replan.fractionOfDayLeft(
+                                          now: now, wakingSeconds: settings.wakingSeconds,
+                                          calendar: cal))
+        replan = computed
+
+        // The most specific allocation wins an interval's colour: a task inside both `office` and
+        // `presentation for KT` belongs, visually, to the narrower of the two. Sorting by set size once
+        // makes that a lookup rather than a search per block.
+        let bySize = idsBySubject.sorted { $0.value.count < $1.value.count }
+        func owner(_ projectID: Int64) -> Int64? {
+            bySize.first { $0.value.contains(projectID) }?.key
+        }
+        let taskNames = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0.name) })
+
+        if unit == .week {
+            // The VIEWED week, which is only today's week at offset 0. Stepping back has to redraw the
+            // grid from that week's own intervals; reusing the current week's would show last week's
+            // header above this week's blocks.
+            let viewed = periodWindow() ?? week
+            let viewedIntervals = offset == 0 ? intervals
+                : ((try? store.intervals(from: viewed.start,
+                                         to: viewed.end.addingTimeInterval(7200))) ?? [])
+            calendarDays = buildWeekColumns(week: viewed, intervals: viewedIntervals,
+                                            replan: computed, owner: owner, taskNames: taskNames,
+                                            calendar: cal)
+            monthWeeks = []
+        } else {
+            calendarDays = []
+            monthWeeks = buildMonthCells(store: store, owner: owner, calendar: cal)
+        }
+    }
+
+    /// Seven day columns for the viewed week.
+    ///
+    /// Tracked blocks come from `Aggregations.daySegments`, the same source the metrics day timeline
+    /// draws, so a block sits in the same place on both pages. Owed hours come from the replan, which
+    /// has already spread each shortfall over the days that are actually left — so a Monday that went
+    /// wrong shows up as extra hatching later in the week rather than as a sentence about Monday.
+    private func buildWeekColumns(week: DateInterval, intervals: [Interval], replan: Replan,
+                                  owner: (Int64) -> Int64?, taskNames: [Int64: String],
+                                  calendar cal: Calendar) -> [PlannerCalendar.DayInput] {
+        let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        let startOfToday = cal.startOfDay(for: Date())
+        // Worst lag first, because the packer gives the earliest gaps to whatever comes first.
+        let owedOrder = replan.items.sorted { $0.debtSeconds > $1.debtSeconds }.map(\.targetID)
+
+        var out: [PlannerCalendar.DayInput] = []
+        for offsetDays in 0..<7 {
+            guard let date = cal.date(byAdding: .day, value: offsetDays, to: week.start) else { break }
+            let weekday = cal.component(.weekday, from: date)
+            let dayStart = cal.startOfDay(for: date)
+
+            var blocks: [PlannerCalendar.TrackedBlock] = []
+            for seg in Aggregations.daySegments(intervals: intervals, day: date, calendar: cal) {
+                let targetID = owner(seg.projectID)
+                blocks.append(PlannerCalendar.TrackedBlock(
+                    id: seg.id, startHour: seg.startHour, endHour: seg.endHour,
+                    name: taskNames[seg.projectID] ?? "?",
+                    colorHex: targetID.map(colorHex(forTarget:)) ?? "#8E8E93",
+                    targetID: targetID))
+            }
+            // Work that ran past midnight belongs to the evening it started in, so the small hours of
+            // the NEXT day are drawn at the bottom of this column at +24. Without this a session from
+            // 22:00 to 01:00 lost its last hour off the bottom of one column and the top of another.
+            if let next = cal.date(byAdding: .day, value: 1, to: date) {
+                for seg in Aggregations.daySegments(intervals: intervals, day: next, calendar: cal)
+                where seg.startHour < PlannerCalendar.bandEnd - 24 {
+                    let targetID = owner(seg.projectID)
+                    blocks.append(PlannerCalendar.TrackedBlock(
+                        id: -seg.id, startHour: seg.startHour + 24,
+                        endHour: min(PlannerCalendar.bandEnd, seg.endHour + 24),
+                        name: taskNames[seg.projectID] ?? "?",
+                        colorHex: targetID.map(colorHex(forTarget:)) ?? "#8E8E93",
+                        targetID: targetID))
+                }
+            }
+
+            let reserved = reservations
+                .filter { $0.weekdays.effective.contains(weekday: weekday) }
+                .reduce(0.0) { $0 + $1.secondsPerDay } / 3600
+
+            // Only days that are still to come can owe anything. A past day is a fact.
+            var owed: [PlannerCalendar.OwedItem] = []
+            if dayStart >= startOfToday, offset == 0,
+               let planned = replan.replannedDays.first(where: { $0.weekday == weekday }) {
+                let byID = Dictionary(planned.placements.map { ($0.targetID, $0) },
+                                      uniquingKeysWith: { a, _ in a })
+                for id in owedOrder {
+                    guard let placement = byID[id], placement.seconds > 60 else { continue }
+                    let done = (actuals[weekday] ?? [:])[id] ?? 0
+                    let left = max(0, placement.seconds - done) / 3600
+                    guard left > 1.0 / 60 else { continue }
+                    owed.append(PlannerCalendar.OwedItem(id: id, name: name(forTarget: id),
+                                                         hours: left,
+                                                         colorHex: colorHex(forTarget: id)))
+                }
+            }
+
+            out.append(PlannerCalendar.DayInput(
+                weekday: weekday, label: names[weekday - 1],
+                dayOfMonth: cal.component(.day, from: date),
+                isPast: dayStart < startOfToday, isToday: dayStart == startOfToday,
+                reservedHours: min(settings.wakingSeconds / 3600, reserved),
+                tracked: blocks, owed: owed))
+        }
+        return out
+    }
+
+    /// The month as full weeks, including the leading and trailing days that complete the first and last
+    /// rows — a month grid that stopped at the 1st and the 31st wouldn't be a calendar.
+    private func buildMonthCells(store: IntervalStore, owner: (Int64) -> Int64?,
+                                 calendar cal: Calendar) -> [[PlannerMonthGrid.DayCell]] {
+        guard let month = periodWindow(),
+              let firstRow = cal.dateInterval(of: .weekOfYear, for: month.start),
+              let lastRow = cal.dateInterval(of: .weekOfYear,
+                                             for: month.end.addingTimeInterval(-1))
+        else { return [] }
+
+        let intervals = (try? store.intervals(from: firstRow.start, to: lastRow.end)) ?? []
+        let now = Date()
+        let startOfToday = cal.startOfDay(for: now)
+        let waking = settings.wakingSeconds
+
+        // Per date, per allocation, seconds tracked.
+        var byDate: [Date: [Int64: TimeInterval]] = [:]
+        for interval in intervals {
+            let end = interval.end ?? now
+            guard end > interval.start else { continue }
+            let day = cal.startOfDay(for: interval.start)
+            let id = owner(interval.projectID) ?? -1
+            byDate[day, default: [:]][id, default: 0] += end.timeIntervalSince(interval.start)
+        }
+
+        let floors = targets.filter { $0.direction == .atLeast }
+        var rows: [[PlannerMonthGrid.DayCell]] = []
+        var cursor = firstRow.start
+        while cursor < lastRow.end {
+            var row: [PlannerMonthGrid.DayCell] = []
+            for _ in 0..<7 {
+                let weekday = cal.component(.weekday, from: cursor)
+                let tracked = (byDate[cursor] ?? [:])
+                    .sorted { $0.value > $1.value }
+                    .map { PlannerMonthGrid.Slice(
+                        id: $0.key, hours: $0.value / 3600,
+                        colorHex: $0.key < 0 ? "#8E8E93" : colorHex(forTarget: $0.key)) }
+
+                // What the allocations want of this weekday, evenly across the days they claim. For a
+                // day that has gone, nothing: the cell shows what happened, not what was meant to.
+                var planned: Double = 0
+                if cursor >= startOfToday {
+                    for target in floors {
+                        let claimed = target.weekdays.effective
+                        guard claimed.contains(weekday: weekday) else { continue }
+                        planned += target.weeklySeconds / Double(max(1, claimed.selectedCount)) / 3600
+                    }
+                }
+                let reserved = reservations
+                    .filter { $0.weekdays.effective.contains(weekday: weekday) }
+                    .reduce(0.0) { $0 + $1.secondsPerDay } / 3600
+
+                row.append(PlannerMonthGrid.DayCell(
+                    date: cursor, dayOfMonth: cal.component(.day, from: cursor),
+                    inMonth: cursor >= month.start && cursor < month.end,
+                    isToday: cursor == startOfToday, isPast: cursor < startOfToday,
+                    reservedHours: min(waking / 3600, reserved),
+                    tracked: tracked, plannedHours: planned))
+                guard let next = cal.date(byAdding: .day, value: 1, to: cursor) else { break }
+                cursor = next
+            }
+            rows.append(row)
+        }
+        return rows
     }
 
     private func name(for target: Target, tasks: [Project]? = nil) -> String {
