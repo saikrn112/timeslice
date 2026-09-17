@@ -92,25 +92,38 @@ struct PlannerView: View {
                 Button("Allocations…") { showAllocations = true }
                     .buttonStyle(.link).font(.system(size: 11))
             }
-            HStack(spacing: 0) {
-                stat(rangeText(plan), "wanted", verdictColor(plan.verdict))
-                divider
-                stat(hours(plan.reservedSeconds), "reserved", .secondary)
-                divider
-                stat(hours(free), "free", .accentColor)
-                if let replan, replan.remainingNeedSeconds > 60 {
-                    divider
-                    stat(hours(replan.remainingNeedSeconds), "still to do",
-                         replan.weekIsLost ? Self.overColor : .primary)
-                    divider
-                    // Free hours on the days that are left — catch-up can use any of them, which is
-                    // the whole point of catching up.
-                    stat(hours(replan.remainingCapacitySeconds), "free hours left",
-                         replan.weekIsLost ? Self.overColor : .secondary)
-                }
-                Spacer()
-            }
+            WeekBudgetBar(capacity: plan.capacitySeconds,
+                          elapsed: elapsedWaking(plan),
+                          tracked: actualTotals.values.reduce(0, +),
+                          stillToDo: replan?.remainingNeedSeconds ?? plan.requiredUpperSeconds,
+                          freeLeft: replan?.remainingCapacitySeconds
+                                    ?? max(0, plan.capacitySeconds - plan.reservedSeconds),
+                          reservedLeft: reservedOnRemainingDays(plan),
+                          over: replan?.weekIsLost ?? false)
+
+            // The one figure the bar can't hold, because it isn't a slice of the week: what the
+            // allocations ADD UP to, which is a range when they overlap.
+            Text("allocations want \(rangeText(plan)) a week"
+                 + (plan.requiredLowerSeconds == plan.requiredUpperSeconds ? ""
+                    : " — a range because some of them cover the same work"))
+                .font(.system(size: 10)).foregroundStyle(.tertiary)
         }
+    }
+
+    /// Waking hours already gone this week: whole days for the ones behind us, plus the part of today
+    /// that has passed. It anchors the "now" line, so it has to be measured the same way the replan
+    /// measures what's left.
+    private func elapsedWaking(_ plan: Planner) -> TimeInterval {
+        let whole = plan.days.filter { $0.weekday < today }
+            .reduce(0.0) { $0 + $1.capacitySeconds }
+        let todayCapacity = plan.days.first { $0.weekday == today }?.capacitySeconds ?? 0
+        let fractionLeft = Replan.fractionOfDayLeft(now: Date(),
+                                                    wakingSeconds: settings.wakingSeconds)
+        return whole + todayCapacity * (1 - fractionLeft)
+    }
+
+    private func reservedOnRemainingDays(_ plan: Planner) -> TimeInterval {
+        plan.days.filter { $0.weekday >= today }.reduce(0.0) { $0 + $1.reservedSeconds }
     }
 
     /// The verdict as one clause. The paragraph that used to follow it is gone: what it explained is
@@ -336,23 +349,6 @@ struct PlannerView: View {
     }
 
     // MARK: - Chrome
-
-    private var divider: some View {
-        Rectangle().fill(Color.secondary.opacity(0.25))
-            .frame(width: 1, height: 22)
-            .padding(.horizontal, 12)
-    }
-
-    private func stat(_ value: String, _ label: String, _ tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text(value).font(.system(size: 15, weight: .semibold, design: .monospaced))
-                .foregroundStyle(tint)
-            Text(label).font(.system(size: 9)).foregroundStyle(.tertiary)
-        }
-        // A floor, not a fixed width, so a long figure isn't truncated — but wide enough that the row
-        // doesn't reflow as the numbers change.
-        .frame(minWidth: 62, alignment: .leading)
-    }
 
     private func dayList(_ weekdays: [Int]) -> String {
         let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
