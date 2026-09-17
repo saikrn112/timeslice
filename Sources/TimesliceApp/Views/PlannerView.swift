@@ -247,6 +247,13 @@ struct PlannerView: View {
         } else if filter.subject == nil {
             highlight = nil
         }
+        // Metrics has units this page doesn't. Up to a week reads as a week; longer reads as a month.
+        if let theirs = filter.unit {
+            switch theirs {
+            case .day, .week: unit = .week
+            case .month, .sixMonths, .year, .all: unit = .month
+            }
+        }
         if let day = filter.day, let cal = Optional(Calendar.current) {
             let component: Calendar.Component = unit == .week ? .weekOfYear : .month
             let now = Date()
@@ -260,9 +267,10 @@ struct PlannerView: View {
         }
     }
 
-    /// Publish the window being viewed, so Metrics follows the arrows.
+    /// Publish the window being viewed, so Metrics follows both the arrows and the granularity.
     private func publishWindow() {
         appState.sharedFilter.day = periodWindow()?.start
+        appState.sharedFilter.unit = unit == .week ? .week : .month
     }
 
     /// What the two block styles mean, once, in nine words. The alternative is a tooltip nobody hovers

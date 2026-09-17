@@ -53,8 +53,11 @@ struct MetricsView: View {
     /// period. Adopted on appear only, so it can't fight with you while you're using the page.
     private func adoptSharedFilter() {
         let filter = appState.sharedFilter
-        if let day = filter.day, !range.contains(day) {
-            range = DateRange.resolve(unit: range.unit, anchor: day, earliest: earliest)
+        // The unit travels too: arriving from a week in the Planner should show that WEEK, not its first
+        // day, which is the same anchor answering a different question.
+        let wanted = filter.unit ?? range.unit
+        if let day = filter.day, wanted != range.unit || !range.contains(day) {
+            range = DateRange.resolve(unit: wanted, anchor: day, earliest: earliest)
         }
         if let subject = filter.subject {
             pinnedFocuses = [Self.focus(for: subject)]
@@ -71,6 +74,7 @@ struct MetricsView: View {
     /// and silently dropping the second one there would be worse than not carrying it.
     private func publishSharedDay() {
         appState.sharedFilter.day = range.start
+        appState.sharedFilter.unit = range.unit
     }
 
     private func publishSharedSubject() {
@@ -96,6 +100,7 @@ struct MetricsView: View {
     /// Consumes the Planner's request to show one day, with an allocation pinned. Cleared once applied so
     /// returning to this tab later doesn't yank the range back to a day you have finished with.
     private func applyHandoff(_ handoff: AppState.MetricsHandoff) {
+        // Explicitly a day: the click was on a single day's block, whatever period was being viewed.
         range = DateRange.resolve(unit: .day, anchor: handoff.day, earliest: earliest)
         pinnedFocuses = handoff.subjects.map(Self.focus(for:))
         appState.metricsHandoff = nil

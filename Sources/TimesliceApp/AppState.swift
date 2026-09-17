@@ -19,8 +19,15 @@ final class AppState: ObservableObject {
     /// allocations combined" is a question the Planner can't ask and shouldn't inherit.
     struct SharedFilter: Equatable {
         var subject: TargetSubject?
-        /// Any day inside the period being looked at. Each page resolves it to its own granularity.
+        /// Any day inside the period being looked at.
         var day: Date?
+        /// The granularity being looked at, so the two pages agree on the PERIOD and not just the date.
+        ///
+        /// Without it, leaving the Planner on a week landed Metrics on the first DAY of that week — which
+        /// is technically the same anchor and the wrong question. Metrics' finer and coarser units have no
+        /// Planner equivalent, so the Planner maps them: anything up to a week reads as a week, anything
+        /// longer as a month.
+        var unit: RangeUnit?
     }
     @Published var sharedFilter = SharedFilter()
 
