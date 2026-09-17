@@ -1,36 +1,36 @@
 import SwiftUI
 import TimesliceCore
 
-/// The hours that are gone before any allocation gets a look in.
+/// How many hours each weekday actually has available for allocations.
 ///
-/// These have to be declared, and that isn't a preference — it's forced by what the database can see.
-/// Tracked time averages about five hours of a sixteen-hour waking day, so the rest (meals, commute,
-/// getting ready, anything that never becomes a task) leaves no trace at all. A planner that inferred
-/// free time from history would believe a Tuesday has ten hours spare when its allocations already
-/// ask for fourteen.
+/// This started as "reservations" — named blocks of non-negotiable time, subtracted from a waking day.
+/// The naming was the problem: a single flat block of unavailable time is just a smaller waking day, and
+/// `wakingHours` already expresses that. The only thing it could say that the setting couldn't is that
+/// **weekdays differ** — a commute on Monday that doesn't exist on Sunday.
 ///
-/// Deliberately coarse: hours per weekday, not times of day. The app has no notion of when an event
-/// starts and shouldn't grow one — "three hours of Tuesday are gone" is enough to decide whether the
-/// week fits, and it's a thing you can state without keeping a calendar in step.
+/// So it's stated the way it's used: seven days, each with the hours available to plan with, defaulting to
+/// the waking day. Underneath, a day set below the default is stored as one `Reservation` for the
+/// difference, which keeps the sync and the solver untouched.
+///
+/// Still deliberately coarse: hours per weekday, no times of day. "Tuesday has 11 hours in it" is enough
+/// to decide whether a week fits, and it's a thing you can state without keeping a calendar in step.
 struct ReservationsSheet: View {
     let store: IntervalStore
+    /// The waking day, and the default for every weekday.
+    let wakingHours: Double
     var onClose: () -> Void
 
     @State private var rows: [Reservation] = []
-    @State private var draftName = ""
-    @State private var draftHours = ""
-    @State private var draftDays: Weekdays = .all
-    /// Row being renamed, and the text. Double-click to enter, like task and note rows.
-    @State private var editingID: Int64?
-    @State private var editName = ""
-    @FocusState private var editFocused: Bool
 
-    private static let dayNames = ["S", "M", "T", "W", "T", "F", "S"]
+    private static let dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday",
+                                  "Friday", "Saturday"]
+    /// The name given to the stored difference. Not shown anywhere.
+    private static let marker = "unavailable"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Non-negotiables").font(.headline)
+                Text("Available hours").font(.headline)
                 Text(totalText).font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Done") { onClose() }.keyboardShortcut(.defaultAction)
@@ -39,162 +39,117 @@ struct ReservationsSheet: View {
 
             Divider()
 
-            Text("Hours already spoken for, per weekday. The planner takes these first, so what's "
-                 + "left is what your allocations actually compete for.")
+            Text("Hours each day actually has for your allocations. A waking day is "
+                 + "\(hoursText(wakingHours * 3600)) — lower a day that has less, because meals, "
+                 + "commute and getting ready never become tasks and the planner would otherwise "
+                 + "believe you have hours you don't.")
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 16).padding(.top, 10)
-
-            addRow
-                .padding(.horizontal, 16).padding(.vertical, 10)
+                .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 12)
 
             Divider()
 
-            if rows.isEmpty {
-                Text("Nothing reserved yet")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(rows) { row(for: $0) }
-                    }
-                    .padding(16)
+            VStack(spacing: 6) {
+                ForEach(1...7, id: \.self) { weekday in
+                    row(weekday)
                 }
             }
+            .padding(16)
+
+            Spacer(minLength: 0)
+
+            HStack {
+                Button("Reset all to \(hoursText(wakingHours * 3600))") { resetAll() }
+                    .buttonStyle(.link).font(.system(size: 11))
+                Spacer()
+            }
+            .padding(.horizontal, 16).padding(.bottom, 14)
         }
-        .frame(width: 560, height: 460)
+        .frame(width: 460, height: 460)
         .onAppear(perform: reload)
     }
 
-    private var addRow: some View {
-        HStack(spacing: 8) {
-            TextField("What (commute, meals, standup…)", text: $draftName)
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 200)
-                .onSubmit(add)
-            // Same filtering as the allocation hours field, so "1.5" works and "abc" can't be typed.
-            TextField("hours", text: Binding(
-                get: { draftHours },
-                set: { draftHours = NumericInput.hours($0) }
-            ))
-            .textFieldStyle(.roundedBorder)
-            .frame(width: 60)
-            .onSubmit(add)
-            Text("per day on").font(.caption).foregroundStyle(.secondary)
-            weekdayBubbles(draftDays) { draftDays = $0 }
-            Spacer()
-            Button("Add", action: add)
-                .disabled(draftName.trimmingCharacters(in: .whitespaces).isEmpty
-                          || (Double(draftHours) ?? 0) <= 0)
-        }
-    }
+    private func row(_ weekday: Int) -> some View {
+        let available = availableHours(weekday)
+        let isDefault = abs(available - wakingHours) < 0.01
+        return HStack(spacing: 10) {
+            Text(Self.dayNames[weekday - 1])
+                .font(.callout)
+                .frame(width: 92, alignment: .leading)
 
-    private func row(for reservation: Reservation) -> some View {
-        HStack(spacing: 8) {
-            if editingID == reservation.id {
-                TextField("", text: $editName)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 150)
-                    .focused($editFocused)
-                    .onSubmit { commitRename(reservation) }
-                    // A TextField swallows onExitCommand, so Esc needs catching explicitly.
-                    .onKeyPress(.escape) { editingID = nil; return .handled }
-                    .onChange(of: editFocused) { _, focused in
-                        if !focused, editingID == reservation.id { commitRename(reservation) }
-                    }
-            } else {
-                Text(reservation.name)
-                    .font(.callout).lineLimit(1).truncationMode(.tail)
-                    .frame(width: 150, alignment: .leading)
-                    .help(reservation.name)
-                    .onTapGesture(count: 2) {
-                        editName = reservation.name
-                        editingID = reservation.id
-                        editFocused = true
-                    }
+            Button("−") { adjust(weekday, by: -0.5) }.buttonStyle(.borderless)
+                .disabled(available <= 0.5)
+            HoursField(seconds: available * 3600) { seconds in
+                set(weekday, hours: seconds / 3600)
             }
+            Button("+") { adjust(weekday, by: 0.5) }.buttonStyle(.borderless)
+                .disabled(available >= wakingHours - 0.01)
 
-            // ± in half-hour steps, plus a typeable field: reaching 11h in half-hour clicks is 22
-            // presses, and the allocation editor already learned that lesson.
-            Button("−") { adjust(reservation, by: -1800) }.buttonStyle(.borderless)
-            HoursField(seconds: reservation.secondsPerDay) { secs in
-                try? store.updateReservation(id: reservation.id, secondsPerDay: secs)
-                reload()
-            }
-            Button("+") { adjust(reservation, by: 1800) }.buttonStyle(.borderless)
-            Text("/day").font(.system(size: 10)).foregroundStyle(.tertiary)
+            // How much of the day this leaves out, so the trade-off is visible while you type.
+            Text(isDefault ? "full day"
+                 : "\(hoursText((wakingHours - available) * 3600)) unavailable")
+                .font(.system(size: 10))
+                .foregroundStyle(isDefault ? .tertiary : .secondary)
+                .frame(width: 120, alignment: .leading)
 
-            weekdayBubbles(reservation.weekdays) { days in
-                try? store.updateReservation(id: reservation.id, weekdays: days)
-                reload()
-            }
-
-            Spacer(minLength: 4)
-
-            Text(weekText(reservation))
-                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
-                .foregroundStyle(.secondary)
-
-            Button {
-                try? store.deleteReservation(id: reservation.id)
-                reload()
-            } label: {
-                Image(systemName: "xmark").font(.system(size: 8, weight: .semibold))
-            }
-            .buttonStyle(.borderless)
-            .help("Remove this reservation")
-        }
-    }
-
-    /// The same bubbles the allocation editor uses, so the two read as one vocabulary.
-    private func weekdayBubbles(_ current: Weekdays,
-                                _ set: @escaping (Weekdays) -> Void) -> some View {
-        HStack(spacing: 2) {
-            ForEach(0..<7, id: \.self) { bit in
-                let on = current.effective.contains(weekday: bit + 1)
-                Button {
-                    let next = current.effective.toggling(weekday: bit + 1)
-                    // Turning the last one off would mean a reservation on no days, which is just a
-                    // deletion written confusingly. Empty means every day, as it does for allocations.
-                    set(next.selectedCount == 0 ? .all : next)
-                } label: {
-                    Text(Self.dayNames[bit])
-                        .font(.system(size: 9, weight: on ? .semibold : .regular))
-                        .frame(width: 15, height: 15)
-                        .background(Circle().fill(on ? Color.accentColor.opacity(0.28)
-                                                     : Color.secondary.opacity(0.10)))
-                        .foregroundStyle(on ? Color.accentColor : Color.secondary)
-                        .contentShape(Circle())
+            // The bar is the day: filled is what you can plan with.
+            GeometryReader { geo in
+                let fraction = wakingHours > 0 ? min(1, available / wakingHours) : 0
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.secondary.opacity(0.16))
+                    Capsule().fill(Color.accentColor.opacity(0.75))
+                        .frame(width: max(2, geo.size.width * fraction))
                 }
-                .buttonStyle(.plain)
             }
+            .frame(height: 8)
+
+            Spacer(minLength: 0)
         }
     }
 
-    // MARK: - Actions
+    // MARK: - Reading and writing
 
-    private func add() {
-        let hours = Double(draftHours) ?? 0
-        guard !draftName.trimmingCharacters(in: .whitespaces).isEmpty, hours > 0 else { return }
-        _ = try? store.addReservation(name: draftName, weekdays: draftDays,
-                                     secondsPerDay: hours * 3600)
-        draftName = ""
-        draftHours = ""
-        draftDays = .all
+    /// Available hours for a weekday: the waking day minus everything stored against it.
+    ///
+    /// Sums every reservation claiming the day, not just this sheet's own marker, so hours declared by an
+    /// older build (or by the phone) still count instead of silently disappearing.
+    private func availableHours(_ weekday: Int) -> Double {
+        let taken = rows
+            .filter { $0.weekdays.effective.contains(weekday: weekday) }
+            .reduce(0.0) { $0 + $1.secondsPerDay } / 3600
+        return max(0, min(wakingHours, wakingHours - taken))
+    }
+
+    private func adjust(_ weekday: Int, by delta: Double) {
+        set(weekday, hours: availableHours(weekday) + delta)
+    }
+
+    private func set(_ weekday: Int, hours: Double) {
+        let clamped = max(0, min(wakingHours, hours))
+        let unavailable = wakingHours - clamped
+        let mask = Weekdays(rawValue: 1 << (weekday - 1))
+
+        // Clear anything already claiming this day, then store one row for the difference. Rewriting
+        // rather than adjusting keeps a day from accumulating several overlapping claims, which is how
+        // "available" would stop matching what the solver subtracts.
+        for existing in rows where existing.weekdays.effective.contains(weekday: weekday) {
+            if existing.weekdays.effective.selectedCount == 1 {
+                try? store.deleteReservation(id: existing.id)
+            } else {
+                // A multi-day row from an older build: narrow it rather than deleting other days' hours.
+                let narrowed = existing.weekdays.effective.toggling(weekday: weekday)
+                try? store.updateReservation(id: existing.id, weekdays: narrowed)
+            }
+        }
+        if unavailable > 0.01 {
+            _ = try? store.addReservation(name: Self.marker, weekdays: mask,
+                                          secondsPerDay: unavailable * 3600)
+        }
         reload()
     }
 
-    private func adjust(_ reservation: Reservation, by delta: TimeInterval) {
-        let next = max(1800, reservation.secondsPerDay + delta)
-        try? store.updateReservation(id: reservation.id, secondsPerDay: next)
-        reload()
-    }
-
-    private func commitRename(_ reservation: Reservation) {
-        // An empty name is treated as no change rather than as a delete — the ✕ is for that.
-        try? store.updateReservation(id: reservation.id, name: editName)
-        editingID = nil
+    private func resetAll() {
+        for existing in rows { try? store.deleteReservation(id: existing.id) }
         reload()
     }
 
@@ -202,15 +157,9 @@ struct ReservationsSheet: View {
         rows = (try? store.listReservations()) ?? []
     }
 
-    private func weekText(_ r: Reservation) -> String {
-        let weekly = r.secondsPerDay * Double(r.weekdays.effective.selectedCount)
-        return "\(hoursText(weekly))/wk"
-    }
-
     private var totalText: String {
-        let weekly = rows.reduce(0.0) { $0 + $1.secondsPerDay
-                                         * Double($1.weekdays.effective.selectedCount) }
-        return rows.isEmpty ? "" : "\(hoursText(weekly)) a week reserved"
+        let weekly = (1...7).reduce(0.0) { $0 + availableHours($1) }
+        return "\(hoursText(weekly * 3600)) a week to plan with"
     }
 
     private func hoursText(_ seconds: TimeInterval) -> String {

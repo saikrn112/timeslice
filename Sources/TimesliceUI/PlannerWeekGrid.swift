@@ -31,18 +31,26 @@ public struct PlannerWeekGrid: View {
         public let hours: Double
         public let colorHex: String
         public let kind: Kind
+        /// What made this blob up, largest first — "kvcache 1.2h". Shown in its tooltip.
+        ///
+        /// The reason it exists: hovering the grey "unallocated" block asked the obvious question, and
+        /// "unallocated 2.4h" answered none of it. The blob knows its own hours; only the caller knows
+        /// which tasks they came from.
+        public let detail: [String]
 
         /// Unique per blob, because one allocation can appear TWICE in a day: an hour tracked against it
         /// and an hour still owed to it. Keyed on the allocation alone, `ForEach` saw duplicate ids and
         /// drew a day's stack twice over — the vllm and office blobs each appeared two times.
         public var id: String { "\(targetID)-\(kind)" }
 
-        public init(targetID: Int64, name: String, hours: Double, colorHex: String, kind: Kind) {
+        public init(targetID: Int64, name: String, hours: Double, colorHex: String, kind: Kind,
+                    detail: [String] = []) {
             self.targetID = targetID
             self.name = name
             self.hours = hours
             self.colorHex = colorHex
             self.kind = kind
+            self.detail = detail
         }
     }
 
@@ -74,14 +82,19 @@ public struct PlannerWeekGrid: View {
     public let elapsedHoursToday: Double?
     public let highlight: Int64?
     public var onPick: (Int64) -> Void
+    /// Double-click: "show me this, properly". Carries the blob's allocation (negative for unallocated)
+    /// and the weekday, which is everything the Metrics page needs to answer for that day.
+    public var onOpen: (Int64, Int) -> Void
 
     public init(days: [DayInput], capacityHours: Double, elapsedHoursToday: Double?,
-                highlight: Int64?, onPick: @escaping (Int64) -> Void = { _ in }) {
+                highlight: Int64?, onPick: @escaping (Int64) -> Void = { _ in },
+                onOpen: @escaping (Int64, Int) -> Void = { _, _ in }) {
         self.days = days
         self.capacityHours = capacityHours
         self.elapsedHoursToday = elapsedHoursToday
         self.highlight = highlight
         self.onPick = onPick
+        self.onOpen = onOpen
     }
 
     private static let axisWidth: CGFloat = 30
@@ -150,6 +163,7 @@ public struct PlannerWeekGrid: View {
                             .strokeBorder(day.isToday ? Color.accentColor.opacity(0.45)
                                           : Color.primary.opacity(0.08), lineWidth: 1)
                     }
+                    .help(tooltip(day, total: total))
 
                 // What the empty part of the column MEANS, which differs by day: hours nobody has
                 // claimed yet on a day still coming, versus hours that went by untracked on one that
@@ -170,7 +184,8 @@ public struct PlannerWeekGrid: View {
                     if overflow > 0.02 { overflowCap(overflow, compact: compact) }
                     // Reversed: blobs are ordered bottom-to-top and a VStack lays out top-to-bottom.
                     ForEach(day.blobs.reversed()) { blob in
-                        blobView(blob, compact: compact, scale: scale(day, total: total))
+                        blobView(blob, compact: compact, scale: scale(day, total: total),
+                                 weekday: day.weekday)
                     }
                 }
                 .padding(3)
@@ -190,7 +205,6 @@ public struct PlannerWeekGrid: View {
             }
             .frame(height: Self.gridHeight)
             .opacity(day.isPast ? 0.85 : 1)
-            .help(tooltip(day, total: total))
         }
         .padding(.horizontal, 2)
     }
@@ -230,7 +244,7 @@ public struct PlannerWeekGrid: View {
     /// hidden by that — it's stated by the red cap — but a column whose contents spilled past its own
     /// outline looked like a layout fault rather than a full day.
     @ViewBuilder
-    private func blobView(_ blob: Blob, compact: Bool, scale: Double) -> some View {
+    private func blobView(_ blob: Blob, compact: Bool, scale: Double, weekday: Int) -> some View {
         let tint = Color(hex: blob.colorHex)
         let dim = highlight != nil && highlight != blob.targetID
         let h = height(blob.hours) * CGFloat(scale)
@@ -281,9 +295,19 @@ public struct PlannerWeekGrid: View {
         .frame(height: max(3, h))
         .opacity(dim ? 0.15 : 1)
         .contentShape(Rectangle())
-        .onTapGesture { if blob.targetID >= 0 { onPick(blob.targetID) } }
-        .help("\(blob.name) · \(Self.short(blob.hours))"
-              + (blob.kind == .owed ? " still to fit" : ""))
+        .onTapGesture(count: 2) { onOpen(blob.targetID, weekday) }
+        .onTapGesture { onPick(blob.targetID) }
+        .help(blobTooltip(blob))
+    }
+
+    private func blobTooltip(_ blob: Blob) -> String {
+        var lines = ["\(blob.name) · \(Self.short(blob.hours))"
+                     + (blob.kind == .owed ? " still to fit" : "")]
+        lines += blob.detail
+        if blob.kind != .owed, blob.kind != .reserved {
+            lines.append("double-click to see this day in Metrics")
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// What won't fit in the day at all, capping the column.

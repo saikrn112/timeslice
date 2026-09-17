@@ -49,6 +49,18 @@ struct MetricsView: View {
     /// the range — that's the point of pinning, and what makes the same question askable across
     /// day / week / month / 6m.
     @State private var pinnedFocuses: [TimelineFocus] = []
+    /// Consumes the Planner's request to show one day, with an allocation pinned. Cleared once applied so
+    /// returning to this tab later doesn't yank the range back to a day you have finished with.
+    private func applyHandoff(_ handoff: AppState.MetricsHandoff) {
+        range = DateRange.resolve(unit: .day, anchor: handoff.day, earliest: earliest)
+        switch handoff.subject {
+        case .task(let id): pinnedFocuses = [.task(id)]
+        case .project(let id): pinnedFocuses = [.group(id)]
+        case .tag(let id): pinnedFocuses = [.tag(id)]
+        case nil: pinnedFocuses = []
+        }
+        appState.metricsHandoff = nil
+    }
 
     /// The highlights actually in effect. PINS win over hover: once you've clicked something you're
     /// reading it, and having the page re-highlight under the pointer as it moves defeats the point
@@ -130,6 +142,12 @@ struct MetricsView: View {
                 // The range bar stays the page header — it frames everything under it, and moving a
                 // section above it cost more in coherence than it bought in precision.
                 RangeFilterBar(range: $range, earliest: earliest)
+                    .onAppear {
+                        if let handoff = appState.metricsHandoff { applyHandoff(handoff) }
+                    }
+                    .onChange(of: appState.metricsHandoff) { _, handoff in
+                        if let handoff { applyHandoff(handoff) }
+                    }
                 tiles
                 // Budgets report against their OWN period (a weekly one always shows this week), so
                 // each row states its period. That per-row label is what keeps them from reading as

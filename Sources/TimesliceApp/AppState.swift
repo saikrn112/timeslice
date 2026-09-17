@@ -8,6 +8,19 @@ final class AppState: ObservableObject {
     private let store: IntervalStore
     let engine: TimerEngine
 
+    /// A request from the Planner to open Metrics on a particular day, with an allocation highlighted.
+    ///
+    /// Lives here because it crosses two tabs that don't know about each other: the Planner sets it,
+    /// `MainWindowView` switches tab when it appears, and `MetricsView` consumes and clears it. The
+    /// question it answers is the one a blob provokes — "what WAS that unallocated 2.4h?" — which the
+    /// Metrics page already answers properly for a given day.
+    struct MetricsHandoff: Equatable {
+        let day: Date
+        /// nil asks only for the day, which is what an unallocated blob means.
+        let subject: TargetSubject?
+    }
+    @Published var metricsHandoff: MetricsHandoff?
+
     /// Exposed for views that perform task CRUD, then call `reload()`.
     var storeForEditing: IntervalStore { store }
 

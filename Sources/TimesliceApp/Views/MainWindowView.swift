@@ -38,6 +38,11 @@ struct MainWindowView: View {
         }
         .frame(minWidth: 640, minHeight: 460)
         .onAppear { appState.reload() }
+        // The Planner asks for a day in Metrics by setting a handoff; switching the tab is this view's
+        // job because it is the only one that owns the selection.
+        .onChange(of: appState.metricsHandoff) { _, handoff in
+            if handoff != nil { selectedTab = .metrics }
+        }
     }
 
     /// One low-chrome row: icon+label view tabs, an inline text scope toggle, utilities far right.

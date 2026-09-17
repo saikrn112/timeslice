@@ -53,6 +53,12 @@ if [ -z "$ID" ]; then
 fi
 
 sleep 1.5                      # let the first data load and the charts settle
+
+# Optional: hover a point first, so the capture includes a tooltip. HOVER="x,y" in screen coordinates.
+if [ -n "${HOVER:-}" ]; then
+  ./.build/debug/TimesliceHover "${HOVER%,*}" "${HOVER#*,}"
+  sleep 2.2                    # macOS tooltip delay is about 1.5s
+fi
 rm -f "$OUT"
 screencapture -x -o -l "$ID" "$OUT"
 echo "$OUT"
