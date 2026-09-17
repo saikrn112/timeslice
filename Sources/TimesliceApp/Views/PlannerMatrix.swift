@@ -24,6 +24,12 @@ struct PlannerMatrix: View {
     let today: Int
     let colorFor: (Int64) -> String
     let nameFor: (Int64) -> String
+    /// Change an allocation's weekly hours by this much. The matrix is where you SEE the problem, so
+    /// it should be where you fix it — walking to a sheet and back to try 6h instead of 10h is enough
+    /// friction that nobody does it.
+    let adjust: (Int64, TimeInterval) -> Void
+    /// Let an allocation use every day of the week. The commonest fix for "no days left".
+    let widenDays: (Int64) -> Void
 
     private static let dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
     /// Width of one day column. Wide enough for "12.5h" in the load row underneath.
@@ -108,6 +114,17 @@ struct PlannerMatrix: View {
         }
     }
 
+    private func fixButton(_ title: String, _ help: String,
+                           action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .buttonStyle(.plain)
+            .font(.system(size: 9, weight: .medium))
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .background(Capsule().fill(PlannerView.overColor.opacity(0.18)))
+            .foregroundStyle(PlannerView.overColor)
+            .help(help)
+    }
+
     private func rank(_ item: Replan.Item?) -> Int {
         switch item?.standing {
         case .unreachable: return 0
@@ -148,6 +165,33 @@ struct PlannerMatrix: View {
                                                                     : .secondary)
                 .frame(width: 130, alignment: .leading)
                 .padding(.leading, 10)
+
+            // The fix, one click, from the row that found the problem. Every one of these is a change
+            // the planner already computed and previously only described.
+            HStack(spacing: 3) {
+                if row.item?.standing == .unreachable, row.item?.remainingClaimedDays == 0 {
+                    fixButton("every day", "Let it use every day of the week — its own days have gone") {
+                        widenDays(row.targetID)
+                    }
+                }
+                if let item = row.item, item.standing == .unreachable,
+                   item.remainingClaimedDays > 0, item.availableOnRemainingDays > 0 {
+                    // Trim it to what the remaining days can actually hold.
+                    let fits = item.doneSeconds + item.availableOnRemainingDays
+                    fixButton("cut to \(short(fits))",
+                              "Reduce the weekly total to \(short(fits)), which its remaining days can hold") {
+                        adjust(row.targetID, fits - row.target)
+                    }
+                }
+                Stepper("") {
+                    adjust(row.targetID, 3600)
+                } onDecrement: {
+                    adjust(row.targetID, -3600)
+                }
+                .labelsHidden()
+                .help("Change this allocation by an hour a week and re-plan immediately")
+            }
+            .padding(.leading, 6)
             Spacer(minLength: 0)
         }
         .padding(.vertical, 3)

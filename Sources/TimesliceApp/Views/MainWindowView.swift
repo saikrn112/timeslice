@@ -33,7 +33,7 @@ struct MainWindowView: View {
             switch selectedTab {
             case .projects: ProjectListView(appState: appState, engine: engine)
             case .metrics: MetricsView(appState: appState, engine: engine, settings: settings)
-            case .planner: PlannerView(appState: appState, settings: settings)
+            case .planner: PlannerView(appState: appState, engine: engine, settings: settings)
             }
         }
         .frame(minWidth: 640, minHeight: 460)

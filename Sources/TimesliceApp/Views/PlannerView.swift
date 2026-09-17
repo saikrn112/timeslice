@@ -19,6 +19,9 @@ import TimesliceCore
 /// matters because macOS UI can't be screenshotted headlessly.
 struct PlannerView: View {
     @ObservedObject var appState: AppState
+    /// The timer, because a plan you can't act on is a dashboard. Every other page in this app does
+    /// something; this one could only be read, which is most of why it felt inert.
+    @ObservedObject var engine: TimerEngine
     @ObservedObject var settings: AppSettings
 
     @State private var targets: [Target] = []
@@ -48,7 +51,9 @@ struct PlannerView: View {
                     if let replan { todayCard(plan, replan) }
                     PlannerMatrix(plan: plan, replan: replan, actuals: actuals,
                                   actualTotals: actualTotals, today: today,
-                                  colorFor: colorHex(forTarget:), nameFor: name(forTarget:))
+                                  colorFor: colorHex(forTarget:), nameFor: name(forTarget:),
+                                  adjust: adjust(targetID:by:),
+                                  widenDays: widenDays(targetID:))
                     notes(plan)
                 } else {
                     empty
@@ -197,20 +202,55 @@ struct PlannerView: View {
     private func todayRow(_ placement: Planner.Placement) -> some View {
         let already = (actuals[today] ?? [:])[placement.targetID] ?? 0
         let left = max(0, placement.seconds - already)
+        let task = startableTask(for: placement.targetID)
+        let isRunning = task != nil && engine.runningProjectID == task?.id
         return HStack(spacing: 8) {
-            Circle().fill(Color(hex: colorHex(forTarget: placement.targetID)))
-                .frame(width: 7, height: 7)
+            // Start it from here. The planner knows what you should be doing and, until now, made you
+            // go to another page and find it yourself.
+            Button {
+                if let task { engine.switchTo(projectID: task.id) }
+            } label: {
+                Image(systemName: isRunning ? "pause.circle.fill" : "play.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(isRunning ? Color.orange
+                                     : Color(hex: colorHex(forTarget: placement.targetID)))
+            }
+            .buttonStyle(.plain)
+            .disabled(task == nil)
+            .help(task.map { isRunning ? "Running “\($0.name)”" : "Start “\($0.name)”" }
+                  ?? "No task to start — this allocation covers nothing trackable")
+
             Text(placement.name).font(.system(size: 11)).lineLimit(1)
-                .frame(width: 130, alignment: .leading)
+                .frame(width: 124, alignment: .leading)
             ProgressPair(done: already, total: placement.seconds,
                          tint: Color(hex: colorHex(forTarget: placement.targetID)))
                 .frame(width: 120, height: 8)
             Text(left > 60 ? "\(hours(left)) to go" : "done")
                 .font(.system(size: 10, design: .monospaced)).monospacedDigit()
                 .foregroundStyle(left > 60 ? Color.primary : Color.green)
-                .frame(width: 80, alignment: .leading)
+                .frame(width: 74, alignment: .leading)
+            // Which task the button would start, so a tag allocation isn't a mystery box.
+            if let task {
+                Text(task.name).font(.system(size: 10)).foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
             Spacer(minLength: 0)
         }
+    }
+
+    /// The task the play button should start for an allocation.
+    ///
+    /// An allocation can point at a tag covering fifty tasks, so this picks the one you most recently
+    /// worked on — the same recency order the switcher's cycle uses, so the planner's guess and the
+    /// switcher's first suggestion agree instead of being two different opinions.
+    private func startableTask(for targetID: Int64) -> Project? {
+        guard let target = targets.first(where: { $0.id == targetID }) else { return nil }
+        let tasks = (try? appState.storeForEditing.listProjects(includeArchived: true)) ?? []
+        let ids = SubjectMembership(tasks: tasks,
+                                   tagIDsByTask: (try? appState.storeForEditing
+                                       .effectiveTagIDsByTask()) ?? [:])
+            .taskIDs(for: target.subject)
+        return appState.recencyOrderedProjects.first { ids.contains($0.id) }
     }
 
     // MARK: - Chips
@@ -331,6 +371,29 @@ struct PlannerView: View {
                                 remainingWeekdays: Array(today...7),
                                 fractionOfTodayLeft: Replan.fractionOfDayLeft(
                                     now: now, wakingSeconds: settings.wakingSeconds, calendar: cal))
+    }
+
+    // MARK: - Acting on it
+
+    /// Change an allocation's weekly total and re-plan, from the row that showed the problem.
+    ///
+    /// Writes immediately rather than staging a draft: the step is an hour, the previous value is one
+    /// click back, and a confirm step on something this reversible is friction pretending to be safety.
+    /// Passes the existing weekdays and shape through — `setTarget` upserts every column it's given, and
+    /// omitting them is how editing hours once silently reset a weekday selection.
+    private func adjust(targetID: Int64, by delta: TimeInterval) {
+        guard let target = targets.first(where: { $0.id == targetID }) else { return }
+        let seconds = max(1800, target.seconds + delta)
+        _ = try? appState.storeForEditing.setTarget(
+            subject: target.subject, seconds: seconds, direction: target.direction,
+            period: target.period, weekdays: target.weekdays, shape: target.shape)
+        rebuild()
+    }
+
+    /// The commonest fix for "no days left": stop restricting it to weekdays that have passed.
+    private func widenDays(targetID: Int64) {
+        try? appState.storeForEditing.setTargetWeekdays(id: targetID, .all)
+        rebuild()
     }
 
     private func name(for target: Target, tasks: [Project]? = nil) -> String {
