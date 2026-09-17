@@ -45,8 +45,9 @@ struct MetricsScreen: View {
         /// a complete list that disagrees with the day's total.
         var sessionTotal = 0
         var budgets: [BudgetRows.Row] = []
-        /// Where the range's available hours stand: spent, owed to a commitment, free.
-        var capacity: Capacity.Breakdown?
+        /// The planner's own figures for the viewed DAY: capacity, what's reserved, what it wants.
+        /// Nil for any other range — `Planner` reasons in weeks of waking hours.
+        var plannedDay: Planner.DayPlan?
         /// The neighbouring periods, for the card strip that browses them.
         var strip: [PeriodCard] = []
     }
@@ -281,37 +282,37 @@ struct MetricsScreen: View {
         .background(RoundedRectangle(cornerRadius: Theme.cardRadius + 4).fill(Theme.card))
     }
 
-    /// The range's waking hours, drawn as a whole and split three ways.
+    /// The day's waking hours, drawn as a whole: spent, still wanted, free.
     ///
-    /// This replaces a bare "Waking 33%" stat. That figure was `tracked ÷ waking hours` with its
-    /// denominator never shown and no hint of what the other 67% was promised to — "I don't understand
-    /// this distribution at the top, where is it free from, still to do from". The percentage was true
-    /// and told you nothing you could act on.
+    /// This replaces a bare "Waking 33%" stat — `tracked ÷ waking hours` with its denominator never
+    /// drawn and no hint of what the other 67% was promised to. "I don't understand this distribution at
+    /// the top, where is it free from, still to do from."
     ///
-    /// The bar is the whole period. Coloured segments are hours already spent, in each task's own
-    /// colour, so it doubles as the distribution of where the time went. The striped segment is time
-    /// still owed to a commitment, and the empty remainder is genuinely free.
+    /// Every figure is read off `Planner.DayPlan`, the same solver the Mac's Planner page draws. Notably
+    /// the phone does NOT add up allocations itself: overlapping scopes (a tag and a project inside it)
+    /// describe the same hours, and the planner already resolves that through `SubjectMembership`. A
+    /// first cut of this bar reimplemented the de-duplication here and got the equal-scope case wrong;
+    /// deleting it in favour of the solver is why the two platforms can't drift.
     ///
-    /// Every figure comes from `Capacity.breakdown`, including the de-duplication that stops a tag and
-    /// the project inside it from booking the same hour twice. Nothing here computes anything.
+    /// Only for a DAY range. `Planner` reasons about a week of waking hours, so a month or a year has no
+    /// answer to read off it, and inventing one is how the phone would start disagreeing with the Mac.
     @ViewBuilder
     private var capacitySection: some View {
-        if let cap = data.capacity, cap.capacitySeconds > 0 {
+        if let day = data.plannedDay, day.capacitySeconds > 0 {
             VStack(alignment: .leading, spacing: 5) {
                 GeometryReader { geo in
                     HStack(spacing: 0) {
-                        // Spent hours, per task. Widths come straight from each task's share of
-                        // capacity, so the coloured run always ends where `tracked` says it does.
-                        ForEach(capacitySlices, id: \.id) { slice in
+                        // Spent hours, per task, so the bar doubles as where the time actually went.
+                        ForEach(capacitySlices(capacity: day.capacitySeconds), id: \.id) { slice in
                             Rectangle()
                                 .fill(Color(hex: slice.colorHex))
                                 .frame(width: geo.size.width * slice.fraction)
                         }
-                        if cap.owedFraction > 0 {
-                            // Striped, not just paler: "done" and "still to do" are different in kind,
-                            // and a lighter shade of the same fill reads as less of the same thing.
+                        if wantedFraction(day) > 0 {
+                            // Striped, not just paler: "done" and "still wanted" differ in kind, and a
+                            // lighter shade of the same fill reads as less of the same thing.
                             owedStripes
-                                .frame(width: geo.size.width * cap.owedFraction)
+                                .frame(width: geo.size.width * wantedFraction(day))
                         }
                         Spacer(minLength: 0)
                     }
@@ -320,38 +321,39 @@ struct MetricsScreen: View {
                 .background(Capsule().fill(Theme.track))
                 .clipShape(Capsule())
 
-                Text(capacityCaption)
+                Text(capacityCaption(day))
                     .font(Theme.captionSmall)
-                    .foregroundStyle(cap.isOvercommitted ? Color.orange : Color.secondary)
+                    .foregroundStyle(day.isOverCapacity ? Color.orange : Color.secondary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
-    /// One coloured run per task, largest first, as fractions of capacity.
+    /// One coloured run per task, as fractions of the day's capacity.
     ///
     /// Built from `data.taskTotals` — the same figures the breakdown section lists, so the bar can't
     /// disagree with the rows below it.
-    private var capacitySlices: [(id: Int64, colorHex: String, fraction: Double)] {
-        guard let cap = data.capacity, cap.capacitySeconds > 0 else { return [] }
+    private func capacitySlices(capacity: TimeInterval)
+        -> [(id: Int64, colorHex: String, fraction: Double)] {
+        guard capacity > 0 else { return [] }
         return data.taskTotals
             .filter { $0.seconds > 0 }
             .map { total in
                 (id: total.project.id,
                  colorHex: model.colorHex(for: total.project),
-                 fraction: total.seconds / cap.capacitySeconds)
+                 fraction: total.seconds / capacity)
             }
     }
 
-    /// Diagonal hatching for owed time, in the accent colour at low opacity.
+    /// Diagonal hatching for hours the plan wants but hasn't got yet.
     private var owedStripes: some View {
         Rectangle()
             .fill(Color.accentColor.opacity(0.28))
             .overlay(
                 GeometryReader { geo in
                     Path { path in
-                        // A stripe every 5pt, slanted by the bar's height so the angle is consistent
+                        // A stripe every 5pt, slanted by the bar's height so the angle stays consistent
                         // however wide the segment is.
                         let step: CGFloat = 5
                         var x: CGFloat = -geo.size.height
@@ -366,41 +368,47 @@ struct MetricsScreen: View {
             )
     }
 
-    /// A plain noun for the period. `rangeUnitLabel` yields the pill's letter ("d", "w"), which reads as
-    /// nonsense mid-sentence — "more than the 16h waking in this d".
-    private var capacityPeriodNoun: String {
-        switch range.unit {
-        case .day: return "day"
-        case .week: return "week"
-        case .month: return "month"
-        case .sixMonths: return "six months"
-        case .year: return "year"
-        case .all: return "period"
-        }
+    /// Hours the plan still wants today, as a fraction of the day.
+    ///
+    /// The plan's own figure minus what's already tracked. Aggregate on purpose: attributing each hour
+    /// to the allocation that claims it needs `SubjectMembership`, which the Mac's page does per row —
+    /// the bar only needs the total, and taking the difference of two of the planner's own numbers keeps
+    /// it from having a second opinion about attribution.
+    private func wantedSeconds(_ day: Planner.DayPlan) -> TimeInterval {
+        let asked = day.reservedSeconds + day.committedSeconds
+        return max(0, asked - data.summary.totalSeconds)
     }
 
-    /// "5h 12m done · 3h 18m still owed · 7h 30m free of 16h", or the overcommitted variant.
+    private func wantedFraction(_ day: Planner.DayPlan) -> Double {
+        guard day.capacitySeconds > 0 else { return 0 }
+        let spent = min(1, data.summary.totalSeconds / day.capacitySeconds)
+        return min(1 - spent, wantedSeconds(day) / day.capacitySeconds)
+    }
+
+    /// "5h 12m done · 3h 18m still wanted · 7h 30m free of 16h waking", or the over-capacity variant.
     ///
-    /// Spelled out in words because the segments alone can't say which is which: three runs of colour
-    /// need a legend, and one sentence is a smaller price than three labels under an 11pt bar.
-    private var capacityCaption: String {
-        guard let cap = data.capacity else { return "" }
+    /// Spelled out because three runs of colour otherwise need a legend, and one sentence is a smaller
+    /// price than three labels under an 11pt bar.
+    private func capacityCaption(_ day: Planner.DayPlan) -> String {
         // `BudgetRows.duration(0)` is bare "0", which reads as a typo mid-sentence ("0 done · 9h 17m
-        // still owed"). Words, since an empty period is the common case first thing in the morning.
-        let done = cap.trackedSeconds > 0 ? "\(BudgetRows.duration(cap.trackedSeconds)) done"
-                                          : "nothing tracked yet"
-        let total = BudgetRows.duration(cap.capacitySeconds)
-        if cap.owedSeconds <= 0 {
-            return "\(done) · \(BudgetRows.duration(cap.freeSeconds)) free of \(total) waking"
+        // still wanted"). Words, since an empty day is the common case first thing in the morning.
+        let done = data.summary.totalSeconds > 0
+            ? "\(BudgetRows.duration(data.summary.totalSeconds)) done"
+            : "nothing tracked yet"
+        let total = BudgetRows.duration(day.capacitySeconds)
+        let wanted = wantedSeconds(day)
+        if day.isOverCapacity {
+            let asked = day.reservedSeconds + day.committedSeconds
+            return "\(done) · the plan asks for \(BudgetRows.duration(asked)) of this day's \(total) "
+                + "waking hours"
         }
-        let owed = BudgetRows.duration(cap.owedSeconds)
-        if cap.isOvercommitted {
-            let over = cap.trackedSeconds + cap.owedSeconds - cap.capacitySeconds
-            return "\(done) · \(owed) still owed — \(BudgetRows.duration(over)) more than the "
-                + "\(total) waking in this \(capacityPeriodNoun)"
+        guard wanted > 60 else {
+            let free = max(0, day.capacitySeconds - data.summary.totalSeconds)
+            return "\(done) · nothing else planned · \(BudgetRows.duration(free)) free of \(total) waking"
         }
-        return "\(done) · \(owed) still owed · \(BudgetRows.duration(cap.freeSeconds)) free "
-            + "of \(total) waking"
+        let free = max(0, day.capacitySeconds - data.summary.totalSeconds - wanted)
+        return "\(done) · \(BudgetRows.duration(wanted)) still wanted · \(BudgetRows.duration(free)) "
+            + "free of \(total) waking"
     }
 
     private func stat(_ label: String, _ value: String, _ tint: Color) -> some View {
@@ -1160,12 +1168,31 @@ struct MetricsScreen: View {
             targets: (try? store.listTargets()) ?? [], tasks: model.allTasks,
             groups: model.groups, tags: model.allTags, tagIDsByTask: tagIDsByTask,
             intervals: all, viewedRange: range, now: now)
-        // Built from the rows above and the summary's total, so the bar, the caption and the budget
-        // list below are three views of one calculation rather than three calculations.
-        d.capacity = Capacity.breakdown(
-            rows: d.budgets, wakingSecondsPerDay: model.settings.wakingSeconds, range: range,
-            trackedSeconds: d.summary.totalSeconds, tasks: model.allTasks,
-            tagIDsByTask: tagIDsByTask)
+        // The planner's view of the viewed day, assembled exactly as the Mac's Planner page assembles
+        // it — same `Planner.Input`, same `SubjectMembership`. Day ranges only: the solver's unit is a
+        // week of waking hours, and there is no honest DayPlan to read for a month or a year.
+        if isDay {
+            let targets = (try? store.listTargets()) ?? []
+            if targets.isEmpty {
+                d.plannedDay = nil
+            } else {
+                let membership = SubjectMembership(tasks: model.allTasks, tagIDsByTask: tagIDsByTask)
+                var names: [Int64: String] = [:]
+                for t in targets {
+                    names[t.id] = BudgetRows.name(for: t.subject, tasks: model.allTasks,
+                                                  groups: model.groups, tags: model.allTags)
+                        ?? "(deleted)"
+                }
+                let plan = Planner.plan(Planner.Input(
+                    targets: targets, reservations: (try? store.listReservations()) ?? [],
+                    membership: membership, names: names,
+                    wakingSecondsPerDay: model.settings.wakingSeconds))
+                // The weekday of the day being VIEWED, not of today: paging back to Monday should show
+                // Monday's plan, the same mistake `TargetMath.periodAnchor` exists to prevent.
+                let weekday = Calendar.current.component(.weekday, from: range.start)
+                d.plannedDay = plan.days.first { $0.weekday == weekday }
+            }
+        }
         // REUSE the existing strip unless the unit changed.
         //
         // Measured at 197 ms of a 214 ms rebuild — twelve dropped frames on every single swipe, because
