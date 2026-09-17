@@ -1064,40 +1064,51 @@ struct PlannerView: View {
                                                   colorHex: "#8E8E93", kind: .reserved))
             }
 
-            // Then what was tracked, biggest first.
-            for (id, seconds) in (dayActuals[weekday] ?? [:]).sorted(by: { $0.value > $1.value })
-            where seconds > 60 && !nested.contains(id) {
-                blobs.append(PlannerWeekGrid.Blob(targetID: id, name: name(forTarget: id),
-                                                  hours: seconds / 3600,
-                                                  colorHex: colorHex(forTarget: id), kind: .tracked,
-                                                  detail: detailLines(breakdown[weekday]?[id])
-                                                      + (alsoCounts[id]?.isEmpty == false
-                                                         ? ["also counts toward "
-                                                            + alsoCounts[id]!.joined(separator: ", ")]
-                                                         : [])))
+            // Then, per allocation, what was done and what is still owed of THIS DAY'S OWN intention —
+            // adjacent, as one visual unit.
+            //
+            // Listing all the solids and then all the dashes put today's "office 1.4h done" at the bottom of
+            // the column and its "office 5.6h to go" at the top, with four other blobs in between. The two
+            // halves of one fact should touch.
+            let intendedByID = Dictionary(
+                (intendedDay(weekday)?.placements ?? []).map { ($0.targetID, $0.seconds) },
+                uniquingKeysWith: { a, _ in a })
+            let doneByID = (dayActuals[weekday] ?? [:]).filter { $0.value > 60 }
+            let owes = dayStart >= startOfToday && offset == 0 && !showIntended
+            let ids = Set(doneByID.keys).union(owes ? Array(intendedByID.keys) : [])
+                .subtracting(nested)
+                .sorted { lhs, rhs in
+                    // The day's biggest commitment sits at the bottom in both views, so switching between
+                    // them doesn't rearrange the column.
+                    let li = intendedByID[lhs] ?? 0, ri = intendedByID[rhs] ?? 0
+                    if li != ri { return li > ri }
+                    return (doneByID[lhs] ?? 0) > (doneByID[rhs] ?? 0)
+                }
+
+            for id in ids {
+                if let done = doneByID[id], done > 60 {
+                    blobs.append(PlannerWeekGrid.Blob(
+                        targetID: id, name: name(forTarget: id), hours: done / 3600,
+                        colorHex: colorHex(forTarget: id), kind: .tracked,
+                        detail: detailLines(breakdown[weekday]?[id])
+                            + (alsoCounts[id]?.isEmpty == false
+                               ? ["also counts toward " + alsoCounts[id]!.joined(separator: ", ")]
+                               : [])))
+                }
+                guard owes, let want = intendedByID[id], want > 60 else { continue }
+                let left = max(0, want - (doneByID[id] ?? 0)) / 3600
+                guard left > 1.0 / 60 else { continue }
+                blobs.append(PlannerWeekGrid.Blob(
+                    targetID: id, name: name(forTarget: id), hours: left,
+                    colorHex: colorHex(forTarget: id), kind: .owed))
             }
+
+            // Work no allocation covers goes on top: it's real, and it's usually where the plan went.
             if let other = dayOther[weekday], other > 60 {
                 blobs.append(PlannerWeekGrid.Blob(targetID: -2, name: "off-plan",
                                                   hours: other / 3600,
                                                   colorHex: "#8E8E93", kind: .unallocated,
                                                   detail: detailLines(breakdown[weekday]?[-2])))
-            }
-
-            // Then what is still owed — only on days still to come, and only in the current week. A past
-            // week owes nothing; it is simply what happened.
-            if dayStart >= startOfToday, offset == 0, !showIntended,
-               let planned = replan.replannedDays.first(where: { $0.weekday == weekday }) {
-                let byID = Dictionary(planned.placements.map { ($0.targetID, $0) },
-                                      uniquingKeysWith: { a, _ in a })
-                for id in owedOrder where !nested.contains(id) {
-                    guard let placement = byID[id], placement.seconds > 60 else { continue }
-                    let done = (dayActuals[weekday] ?? [:])[id] ?? 0
-                    let left = max(0, placement.seconds - done) / 3600
-                    guard left > 1.0 / 60 else { continue }
-                    blobs.append(PlannerWeekGrid.Blob(targetID: id, name: name(forTarget: id),
-                                                      hours: left,
-                                                      colorHex: colorHex(forTarget: id), kind: .owed))
-                }
             }
 
             // The plan as designed: the even spread over each allocation's own claimed days, with no
