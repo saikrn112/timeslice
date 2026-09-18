@@ -321,3 +321,101 @@ public extension Replan {
         return max(0, min(1, secondsLeft / wakingSeconds))
     }
 }
+
+public extension Replan {
+    /// Per remaining weekday, per allocation: hours of **catch-up** — the work pushed into a day beyond
+    /// that day's own intention, because earlier days in the week were missed.
+    ///
+    /// Two numbers matter on a day and they are not the same question:
+    ///
+    /// - *What did today want?* — the allocation's even share of its claimed days, minus what today already
+    ///   got. Stable, and the same figure the plan was built from.
+    /// - *What is being carried into today?* — the week's shortfall, which has to land somewhere.
+    ///
+    /// Drawing only the first hides the backlog; drawing only their sum (which is what a full
+    /// redistribution produces) makes today read 5.6h and tomorrow 2.7h for an allocation that plainly
+    /// wants 7h a day, and those figures move when an unrelated day fills up. So they are computed
+    /// separately and drawn separately.
+    ///
+    /// The debt goes where there is room: allocations in order of how far behind they are, each one's debt
+    /// split across its remaining claimed days in proportion to the hours those days actually have left,
+    /// and never more than a day can hold. What still doesn't fit is simply not placed — the day-level
+    /// picture shouldn't claim an impossible hour, and `weekIsLost` is where that fact belongs.
+    static func catchUp(input: Planner.Input,
+                        plan: Planner,
+                        actualsByWeekday: [Int: [Int64: TimeInterval]],
+                        remainingWeekdays: [Int],
+                        fractionOfTodayLeft: Double = 1) -> [Int: [Int64: TimeInterval]] {
+        let floors = input.targets.filter { $0.direction == .atLeast }
+        guard !floors.isEmpty, !remainingWeekdays.isEmpty else { return [:] }
+
+        func done(_ weekday: Int, _ id: Int64) -> TimeInterval {
+            actualsByWeekday[weekday]?[id] ?? 0
+        }
+
+        /// What each allocation still wants on each remaining day, before any catch-up.
+        var intendedLeft: [Int64: [Int: TimeInterval]] = [:]
+        var debts: [(id: Int64, debt: TimeInterval, days: [Int])] = []
+        for target in floors {
+            let claimed = (1...7).filter { target.weekdays.effective.contains(weekday: $0) }
+            guard !claimed.isEmpty, target.weeklySeconds > 0 else { continue }
+            let perDay = target.weeklySeconds / Double(claimed.count)
+            let remainingClaimed = remainingWeekdays.filter { claimed.contains($0) }
+
+            var byDay: [Int: TimeInterval] = [:]
+            for weekday in remainingClaimed {
+                byDay[weekday] = max(0, perDay - done(weekday, target.id))
+            }
+            intendedLeft[target.id] = byDay
+
+            let weekDone = (1...7).reduce(0.0) { $0 + done($1, target.id) }
+            let remaining = max(0, target.weeklySeconds - weekDone)
+            let base = byDay.values.reduce(0, +)
+            let debt = max(0, remaining - base)
+            if debt > 60, !remainingClaimed.isEmpty {
+                debts.append((target.id, debt, remainingClaimed))
+            }
+        }
+        guard !debts.isEmpty else { return [:] }
+
+        // Hours each remaining day has left once what has happened, what is reserved, and every
+        // allocation's own intention for that day are accounted for. Catch-up can only use what's left.
+        var room: [Int: TimeInterval] = [:]
+        for weekday in remainingWeekdays {
+            guard let day = plan.days.first(where: { $0.weekday == weekday }) else { continue }
+            let isToday = weekday == remainingWeekdays.first
+            let capacity = (day.capacitySeconds - day.reservedSeconds)
+                * (isToday ? max(0, min(1, fractionOfTodayLeft)) : 1)
+            let tracked = (actualsByWeekday[weekday] ?? [:]).values.reduce(0, +)
+            let intended = intendedLeft.values.reduce(0.0) { $0 + ($1[weekday] ?? 0) }
+            room[weekday] = max(0, capacity - tracked - intended)
+        }
+
+        var out: [Int: [Int64: TimeInterval]] = [:]
+        for entry in debts.sorted(by: { $0.debt > $1.debt }) {
+            var left = entry.debt
+            let total = entry.days.reduce(0.0) { $0 + max(0, room[$1] ?? 0) }
+            guard total > 60 else { continue }
+            let want = left
+            for weekday in entry.days {
+                let available = max(0, room[weekday] ?? 0)
+                guard available > 60 else { continue }
+                let share = min(available, want * (available / total))
+                guard share > 60 else { continue }
+                out[weekday, default: [:]][entry.id, default: 0] += share
+                room[weekday] = available - share
+                left -= share
+            }
+            // A second sweep for what rounding or capping left behind, so hours aren't silently dropped.
+            for weekday in entry.days where left > 60 {
+                let available = max(0, room[weekday] ?? 0)
+                guard available > 60 else { continue }
+                let extra = min(available, left)
+                out[weekday, default: [:]][entry.id, default: 0] += extra
+                room[weekday] = available - extra
+                left -= extra
+            }
+        }
+        return out
+    }
+}

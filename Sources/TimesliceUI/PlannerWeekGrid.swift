@@ -21,6 +21,10 @@ import TimesliceCore
 public struct PlannerWeekGrid: View {
     public enum Kind: Sendable {
         case reserved, tracked, unallocated, owed
+        /// Hours carried into this day because earlier ones were missed. Distinct from `owed`, which is
+        /// what the day wanted of its own accord — the difference between "today's 7h" and "plus 2h you
+        /// didn't do on Monday" is the whole of what a catch-up plan has to say.
+        case catchUp
     }
 
     public struct Blob: Identifiable, Sendable {
@@ -273,18 +277,29 @@ public struct PlannerWeekGrid: View {
                                           style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 3))
+            case .catchUp:
+                // Filled enough to read as extra weight on the day, with a dotted edge so it can't be
+                // mistaken for either something done or something the day asked for.
+                RoundedRectangle(cornerRadius: 3).fill(tint.opacity(0.17))
+                    .overlay(alignment: .leading) { Rectangle().fill(tint).frame(width: 3) }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(tint.opacity(0.85),
+                                          style: StrokeStyle(lineWidth: 1, dash: [1.5, 2]))
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
             }
 
             if h > 9 {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(blob.name)
+                    Text(blob.kind == .catchUp && !compact ? "\(blob.name) · catch-up" : blob.name)
                         .font(.system(size: compact ? 8 : 9,
                                       weight: blob.kind == .tracked ? .medium : .regular))
                         .lineLimit(1).truncationMode(.tail)
                     if h > 26 {
                         Text(Self.short(blob.hours))
                             .font(.system(size: compact ? 8 : 9, design: .monospaced))
-                            .opacity(0.7)
+                            .opacity(0.75)
                     }
                 }
                 .foregroundStyle(blob.kind == .tracked ? Color.white.opacity(0.95) : .secondary)
@@ -301,10 +316,15 @@ public struct PlannerWeekGrid: View {
     }
 
     private func blobTooltip(_ blob: Blob) -> String {
-        var lines = ["\(blob.name) · \(Self.short(blob.hours))"
-                     + (blob.kind == .owed ? " still to fit" : "")]
+        var suffix = ""
+        switch blob.kind {
+        case .owed: suffix = " still wanted today"
+        case .catchUp: suffix = " catch-up from earlier this week"
+        default: break
+        }
+        var lines = ["\(blob.name) · \(Self.short(blob.hours))" + suffix]
         lines += blob.detail
-        if blob.kind != .owed, blob.kind != .reserved {
+        if blob.kind == .tracked || blob.kind == .unallocated {
             lines.append("double-click to see this day in Metrics")
         }
         return lines.joined(separator: "\n")

@@ -64,6 +64,8 @@ struct PlannerView: View {
     /// on this page has to leave them out — the headline did and the figures beside it didn't, which is how
     /// "the plan fits, 33h spare" ended up above "spare 27.5h".
     @State private var nestedIDs: Set<Int64> = []
+    /// weekday → allocation → hours carried in from earlier days this week.
+    @State private var catchUpByDay: [Int: [Int64: TimeInterval]] = [:]
     /// Every second tracked inside the viewed period, allocation or not — the bar's "tracked" segment.
     @State private var periodTracked: TimeInterval = 0
     /// Show the plan as designed rather than what happened.
@@ -115,12 +117,11 @@ struct PlannerView: View {
                     }
                     section(unit == .week ? "How full each day is" : "Month, day by day",
                             subtitle: calendarSubtitle,
-                            accessory: {
-                                HStack(spacing: 10) {
-                                    if unit == .week { intendedToggle }
-                                    legend
-                                }
-                            }) {
+                            // Only the toggle here. Four legend keys in a section header wrapped
+                            // mid-word — "track / ed", "unava / ilable" — because a header row has no
+                            // room to reflow. It gets its own line below.
+                            accessory: { if unit == .week { intendedToggle } }) {
+                        legend
                         if unit == .week {
                             PlannerWeekGrid(days: calendarDays,
                                             capacityHours: settings.wakingSeconds / 3600,
@@ -295,14 +296,27 @@ struct PlannerView: View {
     /// What the two block styles mean, once, in nine words. The alternative is a tooltip nobody hovers
     /// or a paragraph nobody reads.
     private var legend: some View {
-        HStack(spacing: 12) {
+        FlowRow(spacing: 12) {
             // The month grid has no owed blobs and no hatching, so it doesn't get their keys. A legend
             // naming things that aren't on screen is worse than none.
             if !(unit == .week && (showIntended || isFuture)) {
                 legendKey(filled: true, unit == .week ? "tracked" : "done")
             }
             if unit == .week {
-                legendKey(filled: false, showIntended || isFuture ? "planned" : "still to fit")
+                legendKey(filled: false, showIntended || isFuture ? "planned" : "today wants")
+                if !showIntended, !isFuture {
+                    HStack(spacing: 4) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color.accentColor.opacity(0.30))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 2)
+                                    .strokeBorder(Color.accentColor.opacity(0.85),
+                                                  style: StrokeStyle(lineWidth: 1, dash: [1.5, 2]))
+                            }
+                            .frame(width: 14, height: 9)
+                        Text("catch-up").font(.system(size: 9)).foregroundStyle(.secondary)
+                    }
+                }
             } else {
                 // One cube is one hour; the outlined one is where the day's allocations wanted to reach.
                 HStack(spacing: 4) {
@@ -519,7 +533,7 @@ struct PlannerView: View {
         if isFuture { return "nothing tracked yet — this is the plan as designed" }
         return showIntended
             ? "the plan as designed, ignoring what actually happened"
-            : "each column is a waking day · solid is tracked, dashed is still owed"
+            : "solid is done · dashed is what the day wanted · dotted is catch-up carried in"
     }
 
     /// True when the window being viewed hasn't happened yet.
@@ -952,6 +966,13 @@ struct PlannerView: View {
                                           now: now, wakingSeconds: settings.wakingSeconds,
                                           calendar: cal))
         replan = computed
+        // Catch-up is a separate number from a day's own intention, so it's computed separately: the debt
+        // the week has accumulated, distributed over the days that actually have room for it.
+        catchUpByDay = Replan.catchUp(input: input, plan: built, actualsByWeekday: byDay,
+                                      remainingWeekdays: Array(today...7),
+                                      fractionOfTodayLeft: Replan.fractionOfDayLeft(
+                                          now: now, wakingSeconds: settings.wakingSeconds,
+                                          calendar: cal))
 
 
         // Allocations wholly inside another. Their hours are already in the parent's, so they must not
@@ -1075,7 +1096,9 @@ struct PlannerView: View {
                 uniquingKeysWith: { a, _ in a })
             let doneByID = (dayActuals[weekday] ?? [:]).filter { $0.value > 60 }
             let owes = dayStart >= startOfToday && offset == 0 && !showIntended
-            let ids = Set(doneByID.keys).union(owes ? Array(intendedByID.keys) : [])
+            let ids = Set(doneByID.keys)
+                .union(owes ? Array(intendedByID.keys) : [])
+                .union(owes ? Array((catchUpByDay[weekday] ?? [:]).keys) : [])
                 .subtracting(nested)
                 .sorted { lhs, rhs in
                     // The day's biggest commitment sits at the bottom in both views, so switching between
@@ -1095,12 +1118,22 @@ struct PlannerView: View {
                                ? ["also counts toward " + alsoCounts[id]!.joined(separator: ", ")]
                                : [])))
                 }
-                guard owes, let want = intendedByID[id], want > 60 else { continue }
-                let left = max(0, want - (doneByID[id] ?? 0)) / 3600
-                guard left > 1.0 / 60 else { continue }
-                blobs.append(PlannerWeekGrid.Blob(
-                    targetID: id, name: name(forTarget: id), hours: left,
-                    colorHex: colorHex(forTarget: id), kind: .owed))
+                guard owes else { continue }
+                if let want = intendedByID[id], want > 60 {
+                    let left = max(0, want - (doneByID[id] ?? 0)) / 3600
+                    if left > 1.0 / 60 {
+                        blobs.append(PlannerWeekGrid.Blob(
+                            targetID: id, name: name(forTarget: id), hours: left,
+                            colorHex: colorHex(forTarget: id), kind: .owed))
+                    }
+                }
+                // Then the debt this day is being asked to absorb — stacked on top of the day's own
+                // intention, because that is exactly what it is: extra weight on an already-planned day.
+                if let extra = catchUpByDay[weekday]?[id], extra > 60 {
+                    blobs.append(PlannerWeekGrid.Blob(
+                        targetID: id, name: name(forTarget: id), hours: extra / 3600,
+                        colorHex: colorHex(forTarget: id), kind: .catchUp))
+                }
             }
 
             // Work no allocation covers goes on top: it's real, and it's usually where the plan went.

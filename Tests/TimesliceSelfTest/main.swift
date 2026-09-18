@@ -2513,6 +2513,92 @@ func testReplan() {
     }
 }
 
+// MARK: - Catch-up distribution
+
+func testCatchUp() {
+    print("Catch-up:")
+    let m = plannerWorld(taskGroups: [1: 10, 2: 20], taskTags: [:])
+
+    // 14h a week over all seven days: 2h a day. Nothing done on Sun–Wed, so 8h of debt has to land on
+    // Thu–Sat on top of their own 2h each.
+    do {
+        let target = floor(1, .project(10), hours: 14)
+        let input = plannerInput([target], membership: m)
+        let plan = Planner.plan(input)
+        let catchUp = Replan.catchUp(input: input, plan: plan, actualsByWeekday: [:],
+                                    remainingWeekdays: [5, 6, 7])
+        let total = catchUp.values.flatMap { $0.values }.reduce(0, +)
+        check(approx(total / 3600, 8, 0.05),
+              "the four missed days' 8h is carried into the days that remain")
+        check(catchUp.keys.sorted() == [5, 6, 7], "and only into those days")
+        check(catchUp.values.allSatisfy { day in approx((day[1] ?? 0) / 3600, 8.0 / 3, 0.05) },
+              "split evenly when the remaining days have equal room")
+    }
+
+    // On pace: no debt, so no catch-up anywhere. The day's own intention is not catch-up.
+    do {
+        let target = floor(1, .project(10), hours: 14)
+        let input = plannerInput([target], membership: m)
+        let plan = Planner.plan(input)
+        let onPace: [Int: [Int64: TimeInterval]] = [1: [1: 2 * 3600], 2: [1: 2 * 3600],
+                                                   3: [1: 2 * 3600], 4: [1: 2 * 3600]]
+        let catchUp = Replan.catchUp(input: input, plan: plan, actualsByWeekday: onPace,
+                                     remainingWeekdays: [5, 6, 7])
+        check(catchUp.isEmpty, "a week on pace carries nothing")
+    }
+
+    // Ahead of pace: still nothing, and certainly not a negative figure.
+    do {
+        let target = floor(1, .project(10), hours: 7)
+        let input = plannerInput([target], membership: m)
+        let plan = Planner.plan(input)
+        let ahead: [Int: [Int64: TimeInterval]] = [1: [1: 6 * 3600]]
+        let catchUp = Replan.catchUp(input: input, plan: plan, actualsByWeekday: ahead,
+                                     remainingWeekdays: [5, 6, 7])
+        check(catchUp.isEmpty, "being ahead cannot produce catch-up")
+    }
+
+    // Room-aware: a remaining day that is nearly full takes less of the debt than an empty one.
+    do {
+        let target = floor(1, .project(10), hours: 14)
+        // 12h of Friday is unavailable, so Saturday has to take most of the catch-up.
+        let reserved = [Reservation(id: 1, name: "friday", weekdays: Weekdays(rawValue: 32),
+                                    secondsPerDay: 12 * 3600)]
+        let input = plannerInput([target], reservations: reserved, membership: m)
+        let plan = Planner.plan(input)
+        let catchUp = Replan.catchUp(input: input, plan: plan, actualsByWeekday: [:],
+                                     remainingWeekdays: [6, 7])
+        let friday = (catchUp[6]?[1] ?? 0) / 3600
+        let saturday = (catchUp[7]?[1] ?? 0) / 3600
+        check(friday < saturday, "the fuller day takes less of the debt")
+        check(friday <= 2.01, "and never more than it can hold")
+    }
+
+    // An allocation whose own days are gone cannot be caught up, and must not be dumped on a day it
+    // doesn't claim.
+    do {
+        let target = floor(1, .project(10), hours: 10, weekdays: .weekdaysOnly)
+        let input = plannerInput([target], membership: m)
+        let plan = Planner.plan(input)
+        let catchUp = Replan.catchUp(input: input, plan: plan, actualsByWeekday: [:],
+                                     remainingWeekdays: [7])
+        check(catchUp.isEmpty, "a Mon-Fri allocation puts no catch-up on Saturday")
+    }
+
+    // Today counts only for the part of it that is left.
+    do {
+        let target = floor(1, .project(10), hours: 14)
+        let input = plannerInput([target], membership: m)
+        let plan = Planner.plan(input)
+        let full = Replan.catchUp(input: input, plan: plan, actualsByWeekday: [:],
+                                  remainingWeekdays: [7], fractionOfTodayLeft: 1)
+        let sliver = Replan.catchUp(input: input, plan: plan, actualsByWeekday: [:],
+                                    remainingWeekdays: [7], fractionOfTodayLeft: 0.1)
+        check((sliver[7]?[1] ?? 0) < (full[7]?[1] ?? 0),
+              "an evening holds less catch-up than a whole day")
+    }
+}
+
 // MARK: - Focus block boundary
 
 func testDeepBlockBoundary() {
@@ -5213,6 +5299,7 @@ do {
     try testTagSync()
     testTagTotals()
     testTargetMath()
+    testCatchUp()
     testPalette()
     testInlineBarContrast()
     testTaskOrdering()
@@ -5234,6 +5321,7 @@ do {
     try testDuplicateNameIsProjectScoped()
     testTagTotals()
     testTargetMath()
+    testCatchUp()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1
