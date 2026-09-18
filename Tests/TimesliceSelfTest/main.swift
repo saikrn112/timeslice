@@ -2599,6 +2599,52 @@ func testCatchUp() {
     }
 }
 
+// MARK: - Owed per day
+
+func testOwedByDay() {
+    print("Owed per day:")
+
+    // 35h over Mon–Fri is 7h a day. Nothing done: each remaining day wants its full 7h.
+    do {
+        let target = floor(1, .project(10), hours: 35, weekdays: .weekdaysOnly)
+        let owed = Replan.owedByDay(target: target, doneByWeekday: [:],
+                                    remainingWeekdays: [5, 6, 7])
+        check(approx((owed[5] ?? 0) / 3600, 7, 0.01), "Thursday wants its 7h")
+        check(approx((owed[6] ?? 0) / 3600, 7, 0.01), "Friday wants its 7h")
+        check(owed[7] == nil, "Saturday isn't claimed, so it wants nothing")
+    }
+
+    // The week's remainder caps the total: 24.6h done leaves 10.4h, so Thursday keeps its full share and
+    // Friday takes what's left rather than a nominal 7h.
+    do {
+        let target = floor(1, .project(10), hours: 35, weekdays: .weekdaysOnly)
+        let done: [Int: TimeInterval] = [2: 8 * 3600, 3: 8 * 3600, 4: 5.4 * 3600, 5: 3.2 * 3600]
+        let owed = Replan.owedByDay(target: target, doneByWeekday: done,
+                                    remainingWeekdays: [5, 6])
+        let total = owed.values.reduce(0, +) / 3600
+        check(approx(total, 10.4, 0.05), "the days together ask for exactly what the week still needs")
+        check(approx((owed[5] ?? 0) / 3600, 3.8, 0.05), "today keeps its full remaining intention")
+        check(approx((owed[6] ?? 0) / 3600, 6.6, 0.05), "and the shortfall lands on the furthest day")
+    }
+
+    // Already met: nothing is owed anywhere, and certainly nothing negative.
+    do {
+        let target = floor(1, .project(10), hours: 10)
+        let owed = Replan.owedByDay(target: target, doneByWeekday: [1: 12 * 3600],
+                                    remainingWeekdays: [5, 6, 7])
+        check(owed.isEmpty, "an allocation already met asks for nothing")
+    }
+
+    // A day that has already had more than its share asks for nothing, while the rest still do.
+    do {
+        let target = floor(1, .project(10), hours: 14)      // 2h a day
+        let owed = Replan.owedByDay(target: target, doneByWeekday: [5: 5 * 3600],
+                                    remainingWeekdays: [5, 6, 7])
+        check(owed[5] == nil, "a day past its share wants no more")
+        check(approx((owed[6] ?? 0) / 3600, 2, 0.01), "the next day still wants its own share")
+    }
+}
+
 // MARK: - Focus block boundary
 
 func testDeepBlockBoundary() {
@@ -5300,6 +5346,7 @@ do {
     testTagTotals()
     testTargetMath()
     testCatchUp()
+    testOwedByDay()
     testPalette()
     testInlineBarContrast()
     testTaskOrdering()
@@ -5322,6 +5369,7 @@ do {
     testTagTotals()
     testTargetMath()
     testCatchUp()
+    testOwedByDay()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1

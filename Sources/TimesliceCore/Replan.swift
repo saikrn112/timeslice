@@ -419,3 +419,43 @@ public extension Replan {
         return out
     }
 }
+
+public extension Replan {
+    /// Per remaining weekday, what one allocation still wants of that day — and no more than the week
+    /// still needs in total.
+    ///
+    /// A day's intention is a fixed share of its claimed days: office at 35h over five days wants 7h on
+    /// each. But if only 10.4h of the week remain, then drawing 3.8h today and 7h on Friday promises 10.8h
+    /// and would overshoot the weekly target. The days are therefore filled in order and the week's
+    /// remainder is spent down as they go — today takes its full 3.8h, Friday takes the 6.6h that is left
+    /// rather than its nominal 7h.
+    ///
+    /// Order matters and it is deliberately chronological: the nearest day keeps its full intention, and the
+    /// shortfall lands on the furthest one. The alternative — shaving a bit off every day — produces
+    /// figures that are all slightly wrong and none of them memorable.
+    ///
+    /// `doneByWeekday` must be CREDITED hours: every second that counts toward this allocation, including
+    /// work a narrower allocation also covers. Measuring against a primary attribution made office ask for
+    /// 5.6h today when kvcache had already given it an hour and a half.
+    static func owedByDay(target: Target,
+                          doneByWeekday: [Int: TimeInterval],
+                          remainingWeekdays: [Int]) -> [Int: TimeInterval] {
+        let claimed = (1...7).filter { target.weekdays.effective.contains(weekday: $0) }
+        guard !claimed.isEmpty, target.weeklySeconds > 0 else { return [:] }
+        let perDay = target.weeklySeconds / Double(claimed.count)
+        let weekDone = (1...7).reduce(0.0) { $0 + (doneByWeekday[$1] ?? 0) }
+        var budget = max(0, target.weeklySeconds - weekDone)
+
+        var out: [Int: TimeInterval] = [:]
+        for weekday in remainingWeekdays where claimed.contains(weekday) {
+            guard budget > 60 else { break }
+            let want = max(0, perDay - (doneByWeekday[weekday] ?? 0))
+            let take = min(want, budget)
+            if take > 60 {
+                out[weekday] = take
+                budget -= take
+            }
+        }
+        return out
+    }
+}

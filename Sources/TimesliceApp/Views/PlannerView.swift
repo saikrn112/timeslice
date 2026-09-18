@@ -66,6 +66,9 @@ struct PlannerView: View {
     @State private var nestedIDs: Set<Int64> = []
     /// weekday → allocation → hours carried in from earlier days this week.
     @State private var catchUpByDay: [Int: [Int64: TimeInterval]] = [:]
+    /// weekday → allocation → what that day still wants of it, capped so the remaining days together never
+    /// ask for more than the week still needs.
+    @State private var owedByDay: [Int: [Int64: TimeInterval]] = [:]
     /// Every second tracked inside the viewed period, allocation or not — the bar's "tracked" segment.
     @State private var periodTracked: TimeInterval = 0
     /// Show the plan as designed rather than what happened.
@@ -976,6 +979,18 @@ struct PlannerView: View {
         replan = computed
         // Catch-up is a separate number from a day's own intention, so it's computed separately: the debt
         // the week has accumulated, distributed over the days that actually have room for it.
+        var owed: [Int: [Int64: TimeInterval]] = [:]
+        for target in targets where target.direction == .atLeast && !nestedIDs.contains(target.id) {
+            let credited = Dictionary(uniqueKeysWithValues: (1...7).map { weekday in
+                (weekday, creditByDay[weekday]?[target.id] ?? 0)
+            })
+            for (weekday, seconds) in Replan.owedByDay(target: target, doneByWeekday: credited,
+                                                       remainingWeekdays: Array(today...7)) {
+                owed[weekday, default: [:]][target.id] = seconds
+            }
+        }
+        owedByDay = owed
+
         catchUpByDay = Replan.catchUp(input: input, plan: built, actualsByWeekday: creditByDay,
                                       remainingWeekdays: Array(today...7),
                                       fractionOfTodayLeft: Replan.fractionOfDayLeft(
@@ -1107,7 +1122,7 @@ struct PlannerView: View {
             let doneByID = (dayActuals[weekday] ?? [:]).filter { $0.value > 60 }
             let owes = dayStart >= startOfToday && offset == 0 && !showIntended
             let ids = Set(doneByID.keys)
-                .union(owes ? Array(intendedByID.keys) : [])
+                .union(owes ? Array((owedByDay[weekday] ?? [:]).keys) : [])
                 .union(owes ? Array((catchUpByDay[weekday] ?? [:]).keys) : [])
                 .subtracting(nested)
                 .sorted { lhs, rhs in
@@ -1129,16 +1144,10 @@ struct PlannerView: View {
                                : [])))
                 }
                 guard owes else { continue }
-                if let want = intendedByID[id], want > 60 {
-                    // Credited hours, not the primary attribution: office is owed less because kvcache
-                    // counted toward it, even though the kvcache block is drawn as vllm.
-                    let credited = (dayCredit[weekday] ?? [:])[id] ?? (doneByID[id] ?? 0)
-                    let left = max(0, want - credited) / 3600
-                    if left > 1.0 / 60 {
-                        blobs.append(PlannerWeekGrid.Blob(
-                            targetID: id, name: name(forTarget: id), hours: left,
-                            colorHex: colorHex(forTarget: id), kind: .owed))
-                    }
+                if let left = owedByDay[weekday]?[id], left > 60 {
+                    blobs.append(PlannerWeekGrid.Blob(
+                        targetID: id, name: name(forTarget: id), hours: left / 3600,
+                        colorHex: colorHex(forTarget: id), kind: .owed))
                 }
                 // Then the debt this day is being asked to absorb — stacked on top of the day's own
                 // intention, because that is exactly what it is: extra weight on an already-planned day.
