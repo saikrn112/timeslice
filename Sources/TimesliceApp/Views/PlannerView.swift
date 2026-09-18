@@ -903,6 +903,9 @@ struct PlannerView: View {
         // so hovering "unallocated 2.4h" can say which tasks that actually was.
         var breakdown: [Int: [Int64: [String: TimeInterval]]] = [:]
         var uncovered: [Int: Set<Int64>] = [:]
+        /// weekday → allocation → every second that counts toward it, overlaps included. Distinct from
+        /// `byDay`, which gives each hour to ONE allocation so a day's blobs can't sum past the day.
+        var creditByDay: [Int: [Int64: TimeInterval]] = [:]
         let taskNamesByID = Dictionary(tasks.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
         for interval in intervals {
             let start = max(interval.start, week.start)
@@ -917,6 +920,11 @@ struct PlannerView: View {
                 // Every allocation that covers this work counts it — a task inside both `vllm` and `office`
                 // is genuine progress on both, and their PROGRESS BARS should each say so.
                 weekTotals[id, default: 0] += seconds
+                // Per day, too: what an allocation still OWES has to be measured against everything that
+                // counts toward it. Using the primary attribution below made today's office read 5.6h left
+                // when an hour and a half of kvcache — office work that vllm also covers — had already
+                // gone to it.
+                creditByDay[weekday, default: [:]][id, default: 0] += seconds
                 claimed = true
             }
             // The day GRID is a different question: how the day was spent. There, an hour can only be
@@ -968,7 +976,7 @@ struct PlannerView: View {
         replan = computed
         // Catch-up is a separate number from a day's own intention, so it's computed separately: the debt
         // the week has accumulated, distributed over the days that actually have room for it.
-        catchUpByDay = Replan.catchUp(input: input, plan: built, actualsByWeekday: byDay,
+        catchUpByDay = Replan.catchUp(input: input, plan: built, actualsByWeekday: creditByDay,
                                       remainingWeekdays: Array(today...7),
                                       fractionOfTodayLeft: Replan.fractionOfDayLeft(
                                           now: now, wakingSeconds: settings.wakingSeconds,
@@ -1036,6 +1044,7 @@ struct PlannerView: View {
             }
             calendarDays = buildWeekColumns(week: viewed, replan: computed, nested: nested,
                                             dayActuals: viewedByDay, dayOther: viewedOther,
+                                            dayCredit: offset == 0 ? creditByDay : viewedByDay,
                                             breakdown: viewedBreakdown, alsoCounts: alsoCounts,
                                             calendar: cal)
             monthWeeks = []
@@ -1058,6 +1067,7 @@ struct PlannerView: View {
                                   nested: Set<Int64>,
                                   dayActuals: [Int: [Int64: TimeInterval]],
                                   dayOther: [Int: TimeInterval],
+                                  dayCredit: [Int: [Int64: TimeInterval]],
                                   breakdown: [Int: [Int64: [String: TimeInterval]]],
                                   alsoCounts: [Int64: [String]],
                                   calendar cal: Calendar) -> [PlannerWeekGrid.DayInput] {
@@ -1120,7 +1130,10 @@ struct PlannerView: View {
                 }
                 guard owes else { continue }
                 if let want = intendedByID[id], want > 60 {
-                    let left = max(0, want - (doneByID[id] ?? 0)) / 3600
+                    // Credited hours, not the primary attribution: office is owed less because kvcache
+                    // counted toward it, even though the kvcache block is drawn as vllm.
+                    let credited = (dayCredit[weekday] ?? [:])[id] ?? (doneByID[id] ?? 0)
+                    let left = max(0, want - credited) / 3600
                     if left > 1.0 / 60 {
                         blobs.append(PlannerWeekGrid.Blob(
                             targetID: id, name: name(forTarget: id), hours: left,
