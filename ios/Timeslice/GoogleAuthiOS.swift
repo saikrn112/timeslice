@@ -115,6 +115,16 @@ final class GoogleAuthiOS: NSObject, ObservableObject {
         isSignedIn = false
     }
 
+    /// Drive answered 401: the credential is dead, so stop pretending to be signed in.
+    ///
+    /// Separate from `signOut()` so the UI can say *why* the button came back. Idempotent — a sync
+    /// cycle can hit several 401s before it unwinds, and each one lands here.
+    func handleUnauthorized() {
+        guard isSignedIn else { return }
+        signOut()
+        lastError = "Google sign-in expired. Sign in again to resume sync."
+    }
+
     /// Wire this into the sync controller. Called on sign-in and at launch when a token already
     /// exists, so `SyncController` has a transport without knowing anything about OAuth.
     func makeTransport() -> SyncTransport {
@@ -154,13 +164,35 @@ final class GoogleAuthiOS: NSObject, ObservableObject {
             return accessToken
         }
         guard let refresh = loadRefreshToken() else { throw AuthError.signedOut }
-        let tokens = try await postForm(GoogleOAuth.refreshRequestBody(refreshToken: refresh))
-        guard let token = tokens["access_token"] as? String else {
-            throw AuthError.tokenRefreshFailed("no access_token in the response")
+        do {
+            let tokens = try await postForm(GoogleOAuth.refreshRequestBody(refreshToken: refresh))
+            guard let token = tokens["access_token"] as? String else {
+                throw AuthError.tokenRefreshFailed("no access_token in the response")
+            }
+            cache(tokens)
+            return token
+        } catch {
+            // ALWAYS drop the cached pair on a failed refresh. It is only ever cleared by
+            // `signOut()` otherwise, so a refresh that fails leaves a dead access token in memory
+            // that later calls happily return (the branch above only checks the *expiry*, not
+            // whether the token still works). That is how sync stayed broken for days on a phone
+            // that looked signed in: every cycle reused a token Google had already rejected, and
+            // no amount of "Sync now" could clear it because nothing else touches these.
+            accessToken = nil
+            accessTokenExpiry = nil
+
+            // A refused *refresh token* is permanent — revoked, expired, or the grant withdrawn —
+            // and retrying it forever is what made the failure silent. Sign out so the UI offers
+            // the one action that actually helps. Anything else (offline, DNS, a 500) is transient
+            // and must NOT sign the user out: the token is still good and will work later.
+            if case AuthError.tokenRefreshFailed(let detail) = error, GoogleOAuth.isPermanentRefusal(detail) {
+                signOut()
+                lastError = "Google sign-in expired. Sign in again to resume sync."
+            }
+            throw error
         }
-        cache(tokens)
-        return token
     }
+
 
     private func cache(_ tokens: [String: Any]) {
         accessToken = tokens["access_token"] as? String

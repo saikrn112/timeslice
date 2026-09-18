@@ -77,6 +77,21 @@ public enum GoogleOAuth {
 
     public static let configFilePath = "~/.config/timeslice/env"
 
+    /// Whether a token-endpoint response means "this refresh token will never work again".
+    ///
+    /// Matched on the documented `error` field, not the status code: the endpoint answers 400 for
+    /// both a dead grant and a malformed request, so the code alone cannot tell a permanent refusal
+    /// from a transient one. Getting this wrong in either direction is costly — treat a network
+    /// blip as permanent and the user is signed out for nothing; treat a revoked grant as transient
+    /// and sync retries a dead credential forever, which is the failure this exists to end.
+    public static func isPermanentRefusal(_ detail: String) -> Bool {
+        for marker in ["invalid_grant", "invalid_client", "unauthorized_client"] {
+            if detail.contains(marker) { return true }
+        }
+        return false
+    }
+
+
     private static func credential(_ key: String) -> String {
         let envKey = "TIMESLICE_GOOGLE_\(key)"
         if let v = ProcessInfo.processInfo.environment[envKey], !v.isEmpty { return v }
