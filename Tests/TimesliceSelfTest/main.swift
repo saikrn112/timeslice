@@ -2715,6 +2715,93 @@ func testPlannerWeekFacts() {
 
 // MARK: - Dormancy
 
+/// A finished week says what it did, and what it never did — and does NOT invent a plan for days that have
+/// gone. Both halves of that were regressions: first a browsed week was scheduled from the CURRENT week's
+/// credits, then the dashed "Monday wants 6.7h" bands were drawn over a week that was already over.
+func testHistoricalWeek() {
+    print("Historical week:")
+    let monFri = Weekdays(rawValue: (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5))
+    let tueFri = Weekdays(rawValue: (1 << 2) | (1 << 5))
+    let weekend = Weekdays(rawValue: (1 << 0) | (1 << 6))
+
+    // A week that has gone draws no plan blocks on any of its days, under either method — the method only
+    // decides how the pool BELOW is attributed.
+    for day in 1...7 {
+        check(PlannerWeek.drawsPlanBlocks(offset: 1, dayIsBeforeToday: true, showIntended: false) == false,
+          "past week draws no plan on day \(day)")
+    }
+    check(PlannerWeek.drawsPlanBlocks(offset: 1, dayIsBeforeToday: false, showIntended: false) == false,
+          "a past week's own today is still past")
+    check(PlannerWeek.drawsPlanBlocks(offset: 0, dayIsBeforeToday: false, showIntended: false),
+          "this week's days still to come draw their plan")
+    check(PlannerWeek.drawsPlanBlocks(offset: 0, dayIsBeforeToday: true, showIntended: false) == false,
+          "this week's days that have gone draw none")
+    check(PlannerWeek.drawsPlanBlocks(offset: 0, dayIsBeforeToday: false, showIntended: true) == false,
+          "the intended view draws its own blocks, not these")
+
+    let office = floor(1, .tag(1), hours: 35, weekdays: monFri)
+    let vllm = floor(2, .tag(2), hours: 10)
+    let gym = floor(3, .tag(3), hours: 4, weekdays: tueFri)
+    let stonks = floor(4, .tag(4), hours: 2, weekdays: weekend)
+    let met = floor(5, .tag(5), hours: 3)
+    let ceiling = Target(id: 6, subject: .tag(6), seconds: 5 * 3600, direction: .atMost,
+                         period: .week, weekdays: .all)
+    let kt = floor(7, .tag(7), hours: 2, weekdays: monFri)      // nested inside office
+    let all = [office, vllm, gym, stonks, met, ceiling, kt]
+    let credited: [Int64: TimeInterval] = [1: 9.8 * 3600, 2: 0, 3: 2 * 3600,
+                                           4: 0, 5: 3 * 3600, 7: 1 * 3600]
+
+    let missed = PlannerWeek.neverHappened(floors: all, credited: credited, nested: [7])
+    let byID = Dictionary(missed.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+
+    check(abs((byID[1]?.missed ?? 0) - 25.2 * 3600) < 1,
+          "office missed 25.2h of 35h")
+    check(byID[1]?.lastDay == 6,
+          "office's chance ran out on Friday")
+    check(abs((byID[2]?.missed ?? 0) - 10 * 3600) < 1,
+          "vllm missed all 10h")
+    check(byID[2]?.lastDay == 7,
+          "vllm claims every day, so Saturday was its last")
+    check(abs((byID[3]?.missed ?? 0) - 2 * 3600) < 1,
+          "gym missed half of 4h")
+    check(byID[3]?.lastDay == 6,
+          "gym's last day is Friday, not Saturday")
+    check(byID[4]?.lastDay == 7,
+          "stonks' last day is Saturday")
+    check(byID[5] == nil,
+          "an allocation that was met is absent")
+    check(byID[6] == nil,
+          "a ceiling never appears — it isn't owed")
+    check(byID[7] == nil,
+          "a nested allocation is not owed twice")
+    check(PlannerWeek.neverHappened(floors: all, credited: credited).contains { $0.id == 7 },
+          "the same allocation IS owed when nothing declares it nested")
+    check(missed.map(\.missed) == missed.map(\.missed).sorted(by: >),
+          "biggest miss first")
+    let total = missed.reduce(0) { $0 + $1.missed }
+    check(abs(total - (25.2 + 10 + 2 + 2) * 3600) < 1,
+          "the pool sums to the week's shortfall")
+
+    // Nothing owed when everything was done, and no negative blocks when a week overshot.
+    let over: [Int64: TimeInterval] = [1: 40 * 3600, 2: 12 * 3600, 3: 4 * 3600,
+                                       4: 2 * 3600, 5: 3 * 3600]
+    check(PlannerWeek.neverHappened(floors: all, credited: over, nested: [7]).isEmpty,
+          "a week that beat every allocation has an empty pool")
+    check(PlannerWeek.neverHappened(floors: [met], credited: [5: 3 * 3600 - 30]).isEmpty,
+          "under a minute short is not a block")
+
+    // Month view scales the weekly rate, which is what the goal rows read.
+    let month = PlannerWeek.neverHappened(floors: [office], credited: [1: 40 * 3600], weeks: 4)
+    check(abs((month.first?.missed ?? 0) - 100 * 3600) < 1,
+          "a month wants four weeks of it")
+
+    // A window is a window: the historical pool must read the BROWSED week's credits. Feeding it this
+    // week's numbers is exactly the bug that reported 25h unplaceable on a week that had already gone.
+    let lastWeek = PlannerWeek.neverHappened(floors: [office], credited: [1: 0])
+    check(abs((lastWeek.first?.missed ?? 0) - 35 * 3600) < 1,
+          "a week with nothing tracked owes all of it")
+}
+
 func testDormancy() {
     print("Dormancy:")
     let calendar = Calendar.current
@@ -5708,6 +5795,7 @@ do {
     testTargetMath()
     testDailyPlan()
     testPlannerWeekFacts()
+    testHistoricalWeek()
     testDormancy()
     testPerDayPlan()
     testPrimaryOwner()
@@ -5735,6 +5823,7 @@ do {
     testTargetMath()
     testDailyPlan()
     testPlannerWeekFacts()
+    testHistoricalWeek()
     testDormancy()
     testPerDayPlan()
     testPrimaryOwner()

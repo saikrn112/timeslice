@@ -361,7 +361,8 @@ struct PlannerView: View {
                 legendKey(filled: true, unit == .week ? "tracked" : "done")
             }
             if unit == .week {
-                legendKey(filled: false, showIntended || isFuture ? "planned" : "this day wants")
+                legendKey(filled: false, showIntended || isFuture ? "planned"
+                                     : (offset > 0 ? "never happened" : "this day wants"))
 
             } else {
                 // One cube is one hour; the outlined one is where the day's allocations wanted to reach.
@@ -575,7 +576,7 @@ struct PlannerView: View {
             return "every day keeps its own share · what a day missed stays under it"
         }
         if offset > 0, method == .catchUp, !showIntended {
-            return "where that week's shortfall would have had to go"
+            return "what that week did · what it never did is below"
         }
         return showIntended
             ? "the plan as designed, ignoring what actually happened"
@@ -728,7 +729,7 @@ struct PlannerView: View {
     /// even given the whole week back.
     private var leftoverCaption: String {
         if method == .perDay { return "missed on the day" }
-        return offset > 0 ? "wouldn't have fitted that week" : "no room for these"
+        return offset > 0 ? "never happened" : "no room for these"
     }
 
     /// Hours that don't fit — on their own line, and only when there are any.
@@ -772,6 +773,23 @@ struct PlannerView: View {
                                  + " and didn't get this part",
                                  "  nothing was moved to another day — that's the catch up method"]))
                 }
+            }
+            return out.mapValues { $0.sorted { $0.hours > $1.hours } }
+        }
+        // A finished week's pool IS the week's answer: the columns show what happened, this shows what
+        // didn't. No scheduling — `PlannerWeek.neverHappened` is arithmetic on wanted against credited.
+        if offset > 0 {
+            let dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+            var out: [Int: [PlannerWeekGrid.Blob]] = [:]
+            for miss in PlannerWeek.neverHappened(floors: targets, credited: periodActuals,
+                                                  nested: nestedIDs, weeks: unit.weeks) {
+                out[miss.lastDay, default: []].append(PlannerWeekGrid.Blob(
+                    targetID: miss.id, name: name(forTarget: miss.id), hours: miss.missed / 3600,
+                    colorHex: colorHex(forTarget: miss.id), kind: .owed,
+                    detail: ["  \(hours(periodActuals[miss.id] ?? 0)) of "
+                             + "\(hours((targets.first { $0.id == miss.id }?.weeklySeconds ?? 0) * unit.weeks))"
+                             + " done",
+                             "  \(dayNames[miss.lastDay - 1]) was its last day that week"]))
             }
             return out.mapValues { $0.sorted { $0.hours > $1.hours } }
         }
@@ -1254,9 +1272,9 @@ struct PlannerView: View {
                 (intendedDay(weekday)?.placements ?? []).map { ($0.targetID, $0.seconds) },
                 uniquingKeysWith: { a, _ in a })
             let doneByID = (dayActuals[weekday] ?? [:]).filter { $0.value > 60 }
-            // A finished week in catch-up mode plans every one of its days — that IS the retrospective.
-            let owes = !showIntended
-                && (offset > 0 ? method == .catchUp : dayStart >= startOfToday)
+            let owes = PlannerWeek.drawsPlanBlocks(offset: offset,
+                                                   dayIsBeforeToday: dayStart < startOfToday,
+                                                   showIntended: showIntended)
             // NOT filtered by nesting: a nested allocation's tracked hours are its own and have to be
             // visible, or clicking it highlights nothing on a day you actually worked it. Only the PLAN
             // half of the loop below skips nested, because the parent's share already covers those hours.
@@ -1303,11 +1321,7 @@ struct PlannerView: View {
             // that has gone. Above the work, closing off the part of the day that is over — so everything
             // higher in the column is still to come. Drawing it at all is what makes a column add up to a
             // whole day rather than trailing off into ambiguous empty space.
-            // The untracked band is skipped when a finished week is being replanned: those hours are being
-            // shown as where the work would have gone, so calling them untracked as well would double-count
-            // the same emptiness.
-            if !showIntended, !isFuture, dayStart <= startOfToday,
-               !(offset > 0 && method == .catchUp) {
+            if !showIntended, !isFuture, dayStart <= startOfToday {
                 let trackedToday = (dayActuals[weekday] ?? [:]).values.reduce(0, +)
                     + (dayOther[weekday] ?? 0)
                 let elapsed = dayStart < startOfToday

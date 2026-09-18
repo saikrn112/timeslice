@@ -95,4 +95,39 @@ public enum PlannerWeek {
     public static func creditedByWeekday(_ facts: [Int: DayFacts]) -> [Int: [Int64: TimeInterval]] {
         facts.mapValues { $0.credited }
     }
+
+    /// Whether a day's column draws PLAN blocks — the dashed "this day wants" bands — as opposed to only
+    /// what was recorded.
+    ///
+    /// A finished week draws none, whatever the method. There is nothing left to reallocate into once a
+    /// week is over, so a dashed "Monday wants 6.7h of office" is invented hindsight: it says the hours
+    /// would have gone somewhere they demonstrably didn't. What a past week owes belongs below the columns,
+    /// where `neverHappened` puts it.
+    public static func drawsPlanBlocks(offset: Int, dayIsBeforeToday: Bool,
+                                      showIntended: Bool) -> Bool {
+        if showIntended { return false }
+        if offset > 0 { return false }
+        return !dayIsBeforeToday
+    }
+
+    /// What a finished week never did: per allocation, the hours it wanted and didn't get, filed under the
+    /// last weekday it claimed — the day its chance ran out.
+    ///
+    /// Deliberately not a scheduling result. A past week has no room left to search for, so this is plain
+    /// arithmetic on what the allocation asked for against what it was credited.
+    public static func neverHappened(floors: [Target], credited: [Int64: TimeInterval],
+                                     nested: Set<Int64> = [], weeks: Double = 1)
+    -> [(id: Int64, missed: TimeInterval, lastDay: Int)] {
+        var out: [(id: Int64, missed: TimeInterval, lastDay: Int)] = []
+        for target in floors
+        where target.direction == .atLeast && !nested.contains(target.id) {
+            let missed = max(0, target.weeklySeconds * weeks - (credited[target.id] ?? 0))
+            guard missed > 60 else { continue }
+            guard let lastDay = (1...7).last(where: {
+                target.weekdays.effective.contains(weekday: $0)
+            }) else { continue }
+            out.append((target.id, missed, lastDay))
+        }
+        return out.sorted { $0.missed > $1.missed }
+    }
 }
