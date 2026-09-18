@@ -223,12 +223,18 @@ public struct PlannerWeekGrid: View {
 
                 // The empty top is hours you still have — on a past day there are none, because the
                 // untracked band accounts for them.
+                // Pinned to the top of the column rather than floating just above the stack, where it
+                // collided with whatever block happened to reach it — "stonks 1h" and "4h free" printed over
+                // each other.
                 if capacityHours - total > 1.2 {
-                    Text("\(Self.short(capacityHours - total)) \(day.isToday ? "left" : "free")")
-                        .font(.system(size: compact ? 8 : 9))
-                        .foregroundStyle(.tertiary)
-                        .frame(maxWidth: .infinity)
-                        .offset(y: -height(total) - 12)
+                    VStack(spacing: 0) {
+                        Text("\(Self.short(capacityHours - total)) \(day.isToday ? "left" : "free")")
+                            .font(.system(size: compact ? 8 : 9))
+                            .foregroundStyle(.tertiary)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.top, 4)
+                    .frame(maxWidth: .infinity)
                 }
 
                 VStack(spacing: 1) {

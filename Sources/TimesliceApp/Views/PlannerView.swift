@@ -93,9 +93,6 @@ struct PlannerView: View {
            let parsed = Replan.Method(rawValue: forced.replacingOccurrences(of: "-", with: " ")) {
             return parsed
         }
-        // A week that has gone has no days to reallocate into, so "catch up" has nothing to say about it.
-        // Past weeks read per-day whatever the setting is, rather than offering a choice with one answer.
-        if offset > 0 { return .perDay }
         return Replan.Method(rawValue: methodRaw) ?? .catchUp
     }
     @State private var showAllocations = false
@@ -161,9 +158,7 @@ struct PlannerView: View {
                                                             elapsedHoursToday: offset == 0 && !showIntended
                                                 ? elapsedHoursToday : nil,
                                             highlight: highlight,
-                                            leftoverCaption: method == .perDay ? "missed on the day"
-                                                                : (offset > 0 ? "never happened"
-                                                                              : "no room for these"),
+                                            leftoverCaption: leftoverCaption,
                                             onPick: { pick($0) },
                                             onOpen: { openInMetrics(targetID: $0, weekday: $1) })
                         } else {
@@ -579,6 +574,9 @@ struct PlannerView: View {
         if method == .perDay, !showIntended {
             return "every day keeps its own share · what a day missed stays under it"
         }
+        if offset > 0, method == .catchUp, !showIntended {
+            return "where that week's shortfall would have had to go"
+        }
         return showIntended
             ? "the plan as designed, ignoring what actually happened"
             : "every column adds up to a whole day"
@@ -591,7 +589,7 @@ struct PlannerView: View {
     /// to reallocate — the plan as designed is the same under either method.
     @ViewBuilder
     private var methodToggle: some View {
-        if !showIntended, offset == 0 {
+        if !showIntended {
             HStack(spacing: 3) {
                 ForEach(Replan.Method.allCases, id: \.rawValue) { candidate in
                     let selected = method == candidate
@@ -723,6 +721,14 @@ struct PlannerView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
+    /// What the pool is, in this combination of week and method. Three different facts, so three phrasings:
+    /// hours with nowhere left to put them, hours that never happened, and hours that couldn't have fitted
+    /// even given the whole week back.
+    private var leftoverCaption: String {
+        if method == .perDay { return "missed on the day" }
+        return offset > 0 ? "wouldn't have fitted that week" : "no room for these"
     }
 
     /// Hours that don't fit — on their own line, and only when there are any.
@@ -1206,20 +1212,27 @@ struct PlannerView: View {
 
         // What each remaining day is asked to do: its own share, plus anything moved onto it because
         // another day was missed or had run out of hours. One pass, after the credited totals exist.
+        // For the current week, the days that remain. For a finished one, ALL of its days — "catch up" then
+        // reads as a retrospective: given the whole week, where would the shortfall have had to go, and what
+        // could never have fitted. Forcing history to one method removed a question worth asking.
+        let schedulable = offset == 0 ? Array(today...7) : Array(1...7)
         switch method {
         case .catchUp:
             dailyPlan = Replan.dailyPlan(input: input, plan: built, creditedByWeekday: creditByDay,
-                                         remainingWeekdays: Array(today...7),
-                                         fractionOfTodayLeft: Replan.fractionOfDayLeft(
-                                             now: now, wakingSeconds: settings.wakingSeconds,
-                                             calendar: cal),
+                                         remainingWeekdays: schedulable,
+                                         fractionOfTodayLeft: offset == 0
+                                             ? Replan.fractionOfDayLeft(
+                                                 now: now, wakingSeconds: settings.wakingSeconds,
+                                                 calendar: cal)
+                                             : 1,
                                          skipping: nested)
             missedByDay = [:]
         case .perDay:
             // Nothing moves: each day owes its own share, and a past day's shortfall is recorded against
             // that day rather than becoming somebody else's Friday.
             let simple = Replan.perDayPlan(input: input, creditedByWeekday: creditByDay,
-                                           remainingWeekdays: Array(today...7), skipping: nested)
+                                           remainingWeekdays: offset == 0 ? Array(today...7) : [],
+                                           skipping: nested)
             dailyPlan = Replan.DailyPlan(byDay: simple.byDay, unplaced: [:])
             missedByDay = simple.missedByDay
         }
@@ -1333,7 +1346,9 @@ struct PlannerView: View {
                 (intendedDay(weekday)?.placements ?? []).map { ($0.targetID, $0.seconds) },
                 uniquingKeysWith: { a, _ in a })
             let doneByID = (dayActuals[weekday] ?? [:]).filter { $0.value > 60 }
-            let owes = dayStart >= startOfToday && offset == 0 && !showIntended
+            // A finished week in catch-up mode plans every one of its days — that IS the retrospective.
+            let owes = !showIntended
+                && (offset > 0 ? method == .catchUp : dayStart >= startOfToday)
             // NOT filtered by nesting: a nested allocation's tracked hours are its own and have to be
             // visible, or clicking it highlights nothing on a day you actually worked it. Only the PLAN
             // half of the loop below skips nested, because the parent's share already covers those hours.
@@ -1380,7 +1395,11 @@ struct PlannerView: View {
             // that has gone. Above the work, closing off the part of the day that is over — so everything
             // higher in the column is still to come. Drawing it at all is what makes a column add up to a
             // whole day rather than trailing off into ambiguous empty space.
-            if !showIntended, !isFuture, dayStart <= startOfToday {
+            // The untracked band is skipped when a finished week is being replanned: those hours are being
+            // shown as where the work would have gone, so calling them untracked as well would double-count
+            // the same emptiness.
+            if !showIntended, !isFuture, dayStart <= startOfToday,
+               !(offset > 0 && method == .catchUp) {
                 let trackedToday = (dayActuals[weekday] ?? [:]).values.reduce(0, +)
                     + (dayOther[weekday] ?? 0)
                 let elapsed = dayStart < startOfToday
