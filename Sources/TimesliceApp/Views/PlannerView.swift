@@ -631,10 +631,25 @@ struct PlannerView: View {
                               + "would be a guess about what you're going to do.")
                     // What the remaining days could not take. Without it the dropping is invisible: an
                     // allocation just appears with less than it asked for and nothing says why.
-                    let dropped = dailyPlan.unplaced.values.reduce(0, +)
-                    if dropped > 60 {
-                        figure("won't fit", dropped, Self.overColor)
-                            .help(droppedExplanation())
+                    // Two figures, because they have different answers. "No room" moves when you change
+                    // your available hours; "no days left" cannot, and one label for both looked broken.
+                    let noRoom = dailyPlan.unplaced.values.reduce(0, +)
+                    if noRoom > 60 {
+                        figure("no room", noRoom, Self.overColor)
+                            .help(droppedExplanation(dailyPlan.unplaced,
+                                  heading: "These hours don't fit in the days that remain.",
+                                  footer: "Whatever needs the most hours per remaining day is served "
+                                        + "first, so the rest take what's left rather than every "
+                                        + "allocation losing a little. More available hours would help."))
+                    }
+                    let stranded = dailyPlan.outOfDays.values.reduce(0, +)
+                    if stranded > 60 {
+                        figure("no days left", stranded, Self.overColor)
+                            .help(droppedExplanation(dailyPlan.outOfDays,
+                                  heading: "These allocations have no claimed days left this week.",
+                                  footer: "Changing your available hours won't help — the days they're "
+                                        + "allowed to use have already passed. Widening their weekdays "
+                                        + "would."))
                     }
                 }
             }
@@ -673,20 +688,15 @@ struct PlannerView: View {
         return total
     }
 
-    /// Which allocations lost the race for the hours that remain, and by how much.
-    ///
-    /// Stated in the tooltip because it is a policy, not a fact: the days left are filled in order and each
-    /// allocation is served by how much it needs PER REMAINING DAY, so whatever is furthest behind gets the
-    /// scarce hours and the rest take what's left. Nothing is shaved evenly off everything — that leaves
-    /// every allocation slightly short and none of them decidable.
-    private func droppedExplanation() -> String {
-        var lines = ["These hours don't fit in the days that remain."]
-        for (id, seconds) in dailyPlan.unplaced.sorted(by: { $0.value > $1.value }) {
+    /// Which allocations were left short, and by how much.
+    private func droppedExplanation(_ hoursByTarget: [Int64: TimeInterval],
+                                    heading: String, footer: String) -> String {
+        var lines = [heading]
+        for (id, seconds) in hoursByTarget.sorted(by: { $0.value > $1.value }) {
             lines.append("  \(name(forTarget: id))  \(hours(seconds))")
         }
         lines.append("")
-        lines.append("Whatever needs the most hours per remaining day is served first, so the rest take "
-                     + "what's left rather than every allocation losing a little.")
+        lines.append(footer)
         return lines.joined(separator: "\n")
     }
 

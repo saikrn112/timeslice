@@ -2597,7 +2597,11 @@ func testDailyPlan() {
         let daily = Replan.dailyPlan(input: input, plan: Planner.plan(input),
                                      creditedByWeekday: [:], remainingWeekdays: [7])
         check(daily.byDay.isEmpty, "a Mon-Fri allocation puts nothing on Saturday")
-        check(approx((daily.unplaced[1] ?? 0) / 3600, 10, 0.05), "its 10h is reported as unplaceable")
+        // Reported as OUT OF DAYS rather than out of room: no amount of extra available hours would place
+        // it, and a single "won't fit" figure covering both cases doesn't move when you change them.
+        check(approx((daily.outOfDays[1] ?? 0) / 3600, 10, 0.05),
+              "its 10h is reported as having no days left")
+        check(daily.unplaced.isEmpty, "and not as a room shortage, which more hours could fix")
     }
 
     // Two allocations competing for one nearly-full day: the one needing more per day gets the room, and
@@ -2728,7 +2732,7 @@ func testHeavyOverlap() {
                 let placed = remaining.reduce(0.0) {
                     $0 + ((daily.byDay[$1]?[target.id])?.total ?? 0)
                 }
-                let unplaced = daily.unplaced[target.id] ?? 0
+                let unplaced = (daily.unplaced[target.id] ?? 0) + (daily.outOfDays[target.id] ?? 0)
                 let claimsAnyRemaining = remaining.contains {
                     target.weekdays.effective.contains(weekday: $0)
                 }
@@ -2744,7 +2748,9 @@ func testHeavyOverlap() {
             check(daily.byDay.values.allSatisfy { shares in
                     shares.values.allSatisfy { $0.intended >= 0 && $0.carried >= 0 }
                   }, "\(label): no negative hours")
-            check(daily.unplaced.values.allSatisfy { $0 >= 0 }, "\(label): no negative overflow")
+            check(daily.unplaced.values.allSatisfy { $0 >= 0 }
+                  && daily.outOfDays.values.allSatisfy { $0 >= 0 },
+                  "\(label): no negative overflow")
         }
     }
 

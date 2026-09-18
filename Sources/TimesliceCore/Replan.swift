@@ -343,12 +343,21 @@ public extension Replan {
     struct DailyPlan: Sendable {
         /// weekday → allocation → what that day is being asked for.
         public let byDay: [Int: [Int64: DayShare]]
-        /// Per allocation, hours that fit nowhere in the days that remain.
+        /// Hours that don't fit because the days that remain are full. MORE AVAILABLE HOURS WOULD HELP.
         public let unplaced: [Int64: TimeInterval]
+        /// Hours that don't fit because the allocation's own claimed days have already passed. More hours
+        /// would NOT help — the days it is allowed to use are gone.
+        ///
+        /// Kept apart from `unplaced` because they are different problems with different answers, and
+        /// lumping them together produced a "won't fit" figure that didn't budge when you changed your
+        /// available hours, which reads as a bug even when the number is right.
+        public let outOfDays: [Int64: TimeInterval]
 
-        public init(byDay: [Int: [Int64: DayShare]], unplaced: [Int64: TimeInterval]) {
+        public init(byDay: [Int: [Int64: DayShare]], unplaced: [Int64: TimeInterval],
+                    outOfDays: [Int64: TimeInterval] = [:]) {
             self.byDay = byDay
             self.unplaced = unplaced
+            self.outOfDays = outOfDays
         }
     }
 
@@ -411,6 +420,8 @@ public extension Replan {
             let weekDone = (1...7).reduce(0.0) { $0 + credited($1, target.id) }
             let remainder = max(0, target.weeklySeconds - weekDone)
             guard remainder > 60 else { continue }
+            // Included even when it has no days left, so its hours are reported rather than silently
+            // dropped: an allocation whose Monday has passed still owes what it owes.
             queue.append(Work(id: target.id,
                               perDay: target.weeklySeconds / Double(claimed.count),
                               remainder: remainder,
@@ -462,7 +473,14 @@ public extension Replan {
             if !shares.isEmpty { byDay[weekday] = shares }
         }
         var unplaced: [Int64: TimeInterval] = [:]
-        for work in queue where work.remainder > 60 { unplaced[work.id] = work.remainder }
-        return DailyPlan(byDay: byDay, unplaced: unplaced)
+        var outOfDays: [Int64: TimeInterval] = [:]
+        for work in queue where work.remainder > 60 {
+            if work.days.isEmpty {
+                outOfDays[work.id] = work.remainder
+            } else {
+                unplaced[work.id] = work.remainder
+            }
+        }
+        return DailyPlan(byDay: byDay, unplaced: unplaced, outOfDays: outOfDays)
     }
 }
