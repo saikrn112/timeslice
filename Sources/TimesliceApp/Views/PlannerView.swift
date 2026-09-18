@@ -922,14 +922,21 @@ struct PlannerView: View {
         })
         nestedIDs = nested
 
-        // The most specific allocation owns an hour: a task inside both `office` and `vllm` belongs, for
-        // the purpose of "where did this hour go", to the narrower of the two. Sorting by set size once
-        // makes that a lookup rather than a search per interval.
-        let bySize = idsBySubject
-            .filter { !nested.contains($0.key) }
-            .sorted { $0.value.count < $1.value.count }
+        // Who owns an hour when several allocations cover it. `SubjectMembership.primaryOwner` decides —
+        // most specific wins — and it lives in Core because this rule was written inline here twice and was
+        // wrong both times: once letting every covering allocation draw the hour, so days summed past a day;
+        // once excluding nested allocations from owning anything, which made a nested allocation you HAD
+        // worked invisible, so clicking `presentation for KT` on a Monday lit nothing up.
+        //
+        // Nested allocations own their hours like anyone else. What they're excluded from is the PLAN, where
+        // the parent's share already covers them.
+        let subjectsByTarget = Dictionary(uniqueKeysWithValues: floors.map { ($0.id, $0.subject) })
+        var ownerCache: [Int64: Int64?] = [:]
         func owner(_ projectID: Int64) -> Int64? {
-            bySize.first { $0.value.contains(projectID) }?.key
+            if let cached = ownerCache[projectID] { return cached }
+            let resolved = membership.primaryOwner(of: projectID, among: subjectsByTarget)
+            ownerCache[projectID] = resolved
+            return resolved
         }
 
 
@@ -1130,9 +1137,11 @@ struct PlannerView: View {
                 uniquingKeysWith: { a, _ in a })
             let doneByID = (dayActuals[weekday] ?? [:]).filter { $0.value > 60 }
             let owes = dayStart >= startOfToday && offset == 0 && !showIntended
+            // NOT filtered by nesting: a nested allocation's tracked hours are its own and have to be
+            // visible, or clicking it highlights nothing on a day you actually worked it. Only the PLAN
+            // half of the loop below skips nested, because the parent's share already covers those hours.
             let ids = Set(doneByID.keys)
                 .union(owes ? Array((dailyPlan.byDay[weekday] ?? [:]).keys) : [])
-                .subtracting(nested)
                 .sorted { lhs, rhs in
                     // The day's biggest commitment sits at the bottom in both views, so switching between
                     // them doesn't rearrange the column.
@@ -1182,7 +1191,9 @@ struct PlannerView: View {
             // Above the line drawn by what has gone: what the days still to come are being asked for. Its
             // own share dashed, anything moved onto it dotted.
             if owes {
-                for id in ids {
+                for id in ids where !nested.contains(id) {
+                    // Nested allocations get no PLAN block: the parent's share already covers those hours.
+                    // Their tracked hours are still drawn above, which is what makes them traceable.
                     guard let share = dailyPlan.byDay[weekday]?[id], share.total > 60 else { continue }
                     // ONE block per allocation, not its own share plus a "+1h moved here" stacked on top.
                     // Two adjacent blocks of the same colour and name read as a duplicate, and the split is
@@ -1316,7 +1327,9 @@ struct PlannerView: View {
             guard end > interval.start else { continue }
             let day = cal.startOfDay(for: interval.start)
             let hours = end.timeIntervalSince(interval.start) / 3600
-            if let id = owner(interval.projectID), !nested.contains(id) {
+            // Nested allocations own their hours here too. Sending them to "off-plan" said the work
+            // belonged to nothing, when it belonged to the narrowest allocation covering it.
+            if let id = owner(interval.projectID) {
                 byDate[day, default: [:]][id, default: 0] += hours
             } else {
                 byDate[day, default: [:]][-2, default: 0] += hours

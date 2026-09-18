@@ -66,3 +66,31 @@ public struct SubjectMembership: Sendable {
         return .partial
     }
 }
+
+public extension SubjectMembership {
+    /// Which of several allocations owns a task's hours, when more than one covers it.
+    ///
+    /// The rule is "the most specific wins": a task inside both `office` (a tag over dozens of tasks) and
+    /// `presentation for KT` (that one task) belongs, for the purpose of *where did this hour go*, to the
+    /// narrower of the two. An hour can only be spent once, so a day's blocks have to attribute it once —
+    /// while each allocation's own progress still counts it, because it genuinely is progress on both.
+    ///
+    /// This lives here, and is tested, because it was written inline in the view twice and got it wrong
+    /// twice: first by letting every covering allocation draw the hour, which made days sum past a day; then
+    /// by excluding nested allocations from owning anything, which made a nested allocation invisible — you
+    /// could click `presentation for KT` on a Monday you had worked it and nothing lit up.
+    ///
+    /// Ties are broken by the smaller id, so the answer is stable across rebuilds rather than depending on
+    /// dictionary order.
+    func primaryOwner(of taskID: Int64, among subjects: [Int64: TargetSubject]) -> Int64? {
+        var best: (id: Int64, size: Int)?
+        for (allocationID, subject) in subjects {
+            let ids = taskIDs(for: subject)
+            guard ids.contains(taskID) else { continue }
+            if let current = best,
+               (ids.count, allocationID) >= (current.size, current.id) { continue }
+            best = (allocationID, ids.count)
+        }
+        return best?.id
+    }
+}

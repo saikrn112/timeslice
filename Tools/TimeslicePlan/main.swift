@@ -42,6 +42,34 @@ do {
             ?? "(deleted)"
     }
 
+    // Where each tracked hour of the current week actually LANDS, which is the question a column of blocks
+    // answers and the only way to check it without a screenshot.
+    let calendar = Calendar.current
+    if let week = calendar.dateInterval(of: .weekOfYear, for: Date()) {
+        let floors = targets.filter { $0.direction == .atLeast }
+        let subjects = Dictionary(uniqueKeysWithValues: floors.map { ($0.id, $0.subject) })
+        let intervals = try store.intervals(from: week.start, to: week.end)
+        var byDay: [Int: [Int64?: TimeInterval]] = [:]
+        for interval in intervals {
+            let end = interval.end ?? Date()
+            guard end > interval.start else { continue }
+            let weekday = calendar.component(.weekday, from: interval.start)
+            let owner = membership.primaryOwner(of: interval.projectID, among: subjects)
+            byDay[weekday, default: [:]][owner, default: 0] += end.timeIntervalSince(interval.start)
+        }
+        print("\nwhere this week's hours land (most specific allocation wins):")
+        let dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        for weekday in 1...7 {
+            guard let entries = byDay[weekday] else { continue }
+            let total = entries.values.reduce(0, +) / 3600
+            print(String(format: "  %@  %.1fh total", dayNames[weekday - 1], total))
+            for (owner, seconds) in entries.sorted(by: { $0.value > $1.value }) {
+                let label = owner.flatMap { names[$0] } ?? "off-plan"
+                print(String(format: "      %-28@ %.2fh", label as NSString, seconds / 3600))
+            }
+        }
+    }
+
     let plan = Planner.plan(Planner.Input(
         targets: targets, reservations: reservations, membership: membership, names: names,
         wakingSecondsPerDay: wakingHours * 3600))

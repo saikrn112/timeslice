@@ -2621,6 +2621,52 @@ func testDailyPlan() {
     }
 }
 
+// MARK: - Primary owner
+
+/// Which allocation owns an hour when several cover it — the rule that decides what a day's blocks say.
+///
+/// Tested because it was written inline in the view twice and wrong twice: once letting every covering
+/// allocation draw the same hour, so a day's blocks summed past a day; once excluding nested allocations
+/// from owning anything, which made an allocation you HAD worked invisible in the grid.
+func testPrimaryOwner() {
+    print("Primary owner:")
+    // Tasks 1–4 in group 10, task 5 in the Inbox. Tasks 1 and 2 tagged 99.
+    let m = plannerWorld(taskGroups: [1: 10, 2: 10, 3: 10, 4: 10, 5: nil],
+                         taskTags: [1: [99], 2: [99]])
+    let subjects: [Int64: TargetSubject] = [
+        100: .project(10),      // four tasks
+        200: .tag(99),          // two tasks
+        300: .task(1),          // one task
+    ]
+
+    check(m.primaryOwner(of: 1, among: subjects) == 300,
+          "the narrowest allocation covering a task owns it")
+    check(m.primaryOwner(of: 2, among: subjects) == 200,
+          "and when there is no task-level one, the tag beats the group")
+    check(m.primaryOwner(of: 3, among: subjects) == 100,
+          "a task only the group covers belongs to the group")
+    check(m.primaryOwner(of: 5, among: subjects) == nil,
+          "a task no allocation covers is owned by nothing — that's off-plan work")
+
+    // A NESTED allocation still owns its hours. Excluding it is what made it invisible in the grid.
+    let nestedSubjects: [Int64: TargetSubject] = [100: .project(10), 300: .task(1)]
+    check(m.primaryOwner(of: 1, among: nestedSubjects) == 300,
+          "a task allocation nested inside a group allocation still owns its own hours")
+
+    // Each hour goes to exactly ONE allocation, so a day's blocks can never sum past the day.
+    let everyTask: [Int64] = [1, 2, 3, 4, 5]
+    let owners = everyTask.map { m.primaryOwner(of: $0, among: subjects) }
+    check(owners.count == everyTask.count, "every task resolves to at most one owner")
+    check(Set(owners.compactMap { $0 }).isSubset(of: Set(subjects.keys)),
+          "and always to an allocation that exists")
+
+    // Ties are broken deterministically, so a rebuild can't shuffle the colours in a column.
+    let tied: [Int64: TargetSubject] = [7: .tag(99), 9: .tag(99)]
+    check(m.primaryOwner(of: 1, among: tied) == 7, "equal-sized allocations resolve to the smaller id")
+    check(m.primaryOwner(of: 1, among: tied) == m.primaryOwner(of: 1, among: tied),
+          "and the answer doesn't change between calls")
+}
+
 // MARK: - Heavy overlap
 
 /// Worlds where allocations overlap a lot, because that is where a planner's arithmetic quietly stops
@@ -5468,6 +5514,7 @@ do {
     testTagTotals()
     testTargetMath()
     testDailyPlan()
+    testPrimaryOwner()
     testHeavyOverlap()
     testPalette()
     testInlineBarContrast()
@@ -5491,6 +5538,7 @@ do {
     testTagTotals()
     testTargetMath()
     testDailyPlan()
+    testPrimaryOwner()
     testHeavyOverlap()
 } catch {
     print("  ✘ threw: \(error)")
