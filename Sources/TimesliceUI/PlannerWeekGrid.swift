@@ -404,6 +404,11 @@ public struct PlannerWeekGrid: View {
         }
         let free = capacityHours - total
         lines.append(free > 0.02 ? "\(Self.short(free)) free" : "nothing free")
+        // The rule, once per day rather than on every block: these add up to the day because each hour is
+        // drawn under one allocation only. An allocation's own progress counts shared hours too, which is
+        // why its bar in the list can read higher than its blocks here.
+        lines.append("")
+        lines.append("Each hour appears once, under the narrowest allocation covering it.")
         return lines.joined(separator: "\n")
     }
 

@@ -1152,13 +1152,22 @@ struct PlannerView: View {
 
             for id in ids {
                 if let done = doneByID[id], done > 60 {
+                    // The block is EXCLUSIVE — each hour is drawn once, under the narrowest allocation
+                    // covering it — while the rail's progress bar is inclusive. Both are right, and without
+                    // saying so a day of 6.1h office beside 40m of presentation invites the question of
+                    // whether the 6.1h contains the 40m.
+                    let credited = (dayCredit[weekday] ?? [:])[id] ?? done
+                    var notes = detailLines(breakdown[weekday]?[id])
+                    if credited - done > 60 {
+                        notes.append("+\(hours(credited - done)) more counts toward this, drawn under a "
+                                     + "narrower allocation")
+                    }
+                    if let also = alsoCounts[id], !also.isEmpty {
+                        notes.append("also counts toward " + also.joined(separator: ", "))
+                    }
                     blobs.append(PlannerWeekGrid.Blob(
                         targetID: id, name: name(forTarget: id), hours: done / 3600,
-                        colorHex: colorHex(forTarget: id), kind: .tracked,
-                        detail: detailLines(breakdown[weekday]?[id])
-                            + (alsoCounts[id]?.isEmpty == false
-                               ? ["also counts toward " + alsoCounts[id]!.joined(separator: ", ")]
-                               : [])))
+                        colorHex: colorHex(forTarget: id), kind: .tracked, detail: notes))
                 }
             }
 
