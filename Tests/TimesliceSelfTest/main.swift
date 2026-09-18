@@ -2513,135 +2513,107 @@ func testReplan() {
     }
 }
 
-// MARK: - Catch-up distribution
+// MARK: - Daily plan
 
-func testCatchUp() {
-    print("Catch-up:")
+func testDailyPlan() {
+    print("Daily plan:")
     let m = plannerWorld(taskGroups: [1: 10, 2: 20], taskTags: [:])
 
-    // 14h a week over all seven days: 2h a day. Nothing done on Sun–Wed, so 8h of debt has to land on
-    // Thu–Sat on top of their own 2h each.
-    do {
-        let target = floor(1, .project(10), hours: 14)
-        let input = plannerInput([target], membership: m)
-        let plan = Planner.plan(input)
-        let catchUp = Replan.catchUp(input: input, plan: plan, actualsByWeekday: [:],
-                                    remainingWeekdays: [5, 6, 7])
-        let total = catchUp.values.flatMap { $0.values }.reduce(0, +)
-        check(approx(total / 3600, 8, 0.05),
-              "the four missed days' 8h is carried into the days that remain")
-        check(catchUp.keys.sorted() == [5, 6, 7], "and only into those days")
-        check(catchUp.values.allSatisfy { day in approx((day[1] ?? 0) / 3600, 8.0 / 3, 0.05) },
-              "split evenly when the remaining days have equal room")
+    func shares(_ p: Replan.DailyPlan, _ weekday: Int, _ id: Int64) -> Replan.DayShare {
+        p.byDay[weekday]?[id] ?? Replan.DayShare(intended: 0, carried: 0)
     }
 
-    // On pace: no debt, so no catch-up anywhere. The day's own intention is not catch-up.
+    // 14h a week over all seven days: 2h a day. Nothing done, so the three days left owe 14h between
+    // them — 2h each as their own share and the other 8h carried in.
     do {
         let target = floor(1, .project(10), hours: 14)
         let input = plannerInput([target], membership: m)
-        let plan = Planner.plan(input)
+        let daily = Replan.dailyPlan(input: input, plan: Planner.plan(input),
+                                     creditedByWeekday: [:], remainingWeekdays: [5, 6, 7])
+        check(approx(shares(daily, 5, 1).intended / 3600, 2, 0.01), "each day keeps its own 2h share")
+        let carried = [5, 6, 7].reduce(0.0) { $0 + shares(daily, $1, 1).carried } / 3600
+        check(approx(carried, 8, 0.05), "and the four missed days' 8h is carried into them")
+        check(daily.unplaced.isEmpty, "with room to spare, nothing is left over")
+    }
+
+    // On pace: each remaining day wants its own share and nothing is carried.
+    do {
+        let target = floor(1, .project(10), hours: 14)
+        let input = plannerInput([target], membership: m)
         let onPace: [Int: [Int64: TimeInterval]] = [1: [1: 2 * 3600], 2: [1: 2 * 3600],
                                                    3: [1: 2 * 3600], 4: [1: 2 * 3600]]
-        let catchUp = Replan.catchUp(input: input, plan: plan, actualsByWeekday: onPace,
-                                     remainingWeekdays: [5, 6, 7])
-        check(catchUp.isEmpty, "a week on pace carries nothing")
+        let daily = Replan.dailyPlan(input: input, plan: Planner.plan(input),
+                                     creditedByWeekday: onPace, remainingWeekdays: [5, 6, 7])
+        check([5, 6, 7].allSatisfy { shares(daily, $0, 1).carried < 60 },
+              "a week on pace carries nothing")
+        check(approx(shares(daily, 7, 1).intended / 3600, 2, 0.01), "and each day still wants its share")
     }
 
-    // Ahead of pace: still nothing, and certainly not a negative figure.
+    // Already met: nothing anywhere, and nothing negative.
     do {
         let target = floor(1, .project(10), hours: 7)
         let input = plannerInput([target], membership: m)
-        let plan = Planner.plan(input)
-        let ahead: [Int: [Int64: TimeInterval]] = [1: [1: 6 * 3600]]
-        let catchUp = Replan.catchUp(input: input, plan: plan, actualsByWeekday: ahead,
+        let daily = Replan.dailyPlan(input: input, plan: Planner.plan(input),
+                                     creditedByWeekday: [1: [1: 9 * 3600]],
                                      remainingWeekdays: [5, 6, 7])
-        check(catchUp.isEmpty, "being ahead cannot produce catch-up")
+        check(daily.byDay.isEmpty, "an allocation already met asks for nothing")
     }
 
-    // Room-aware: a remaining day that is nearly full takes less of the debt than an empty one.
+    // THE ONE THAT MATTERS: today has almost no hours left, so today can only be asked for what it can
+    // hold and the rest moves to tomorrow.
     do {
         let target = floor(1, .project(10), hours: 14)
-        // 12h of Friday is unavailable, so Saturday has to take most of the catch-up.
-        let reserved = [Reservation(id: 1, name: "friday", weekdays: Weekdays(rawValue: 32),
-                                    secondsPerDay: 12 * 3600)]
-        let input = plannerInput([target], reservations: reserved, membership: m)
-        let plan = Planner.plan(input)
-        let catchUp = Replan.catchUp(input: input, plan: plan, actualsByWeekday: [:],
-                                     remainingWeekdays: [6, 7])
-        let friday = (catchUp[6]?[1] ?? 0) / 3600
-        let saturday = (catchUp[7]?[1] ?? 0) / 3600
-        check(friday < saturday, "the fuller day takes less of the debt")
-        check(friday <= 2.01, "and never more than it can hold")
+        let input = plannerInput([target], membership: m)
+        let evening = Replan.dailyPlan(input: input, plan: Planner.plan(input),
+                                       creditedByWeekday: [:], remainingWeekdays: [6, 7],
+                                       fractionOfTodayLeft: 0.05)   // ~40m left of a 14h day
+        let today = shares(evening, 6, 1).total / 3600
+        check(today < 1, "an evening is asked for less than an hour")
+        check(shares(evening, 7, 1).total > shares(evening, 6, 1).total,
+              "and tomorrow takes what today couldn't hold")
     }
 
-    // An allocation whose own days are gone cannot be caught up, and must not be dumped on a day it
+    // The week's remainder caps the total: 35h over Mon-Fri with 24.6h done leaves 10.4h, and the two days
+    // left ask for exactly that rather than a nominal 7h each.
+    do {
+        let target = floor(1, .project(10), hours: 35, weekdays: .weekdaysOnly)
+        let input = plannerInput([target], membership: m)
+        let done: [Int: [Int64: TimeInterval]] = [2: [1: 8 * 3600], 3: [1: 8 * 3600],
+                                                  4: [1: 5.4 * 3600], 5: [1: 3.2 * 3600]]
+        let daily = Replan.dailyPlan(input: input, plan: Planner.plan(input),
+                                     creditedByWeekday: done, remainingWeekdays: [5, 6])
+        let total = ([5, 6].reduce(0.0) { $0 + shares(daily, $1, 1).total }) / 3600
+        check(approx(total, 10.4, 0.05),
+              "the days together ask for exactly what the week still needs")
+        check(approx(shares(daily, 5, 1).intended / 3600, 3.8, 0.05),
+              "today keeps its full remaining share")
+    }
+
+    // An allocation whose own days are gone can't be caught up, and must not be dumped on a day it
     // doesn't claim.
     do {
         let target = floor(1, .project(10), hours: 10, weekdays: .weekdaysOnly)
         let input = plannerInput([target], membership: m)
-        let plan = Planner.plan(input)
-        let catchUp = Replan.catchUp(input: input, plan: plan, actualsByWeekday: [:],
-                                     remainingWeekdays: [7])
-        check(catchUp.isEmpty, "a Mon-Fri allocation puts no catch-up on Saturday")
+        let daily = Replan.dailyPlan(input: input, plan: Planner.plan(input),
+                                     creditedByWeekday: [:], remainingWeekdays: [7])
+        check(daily.byDay.isEmpty, "a Mon-Fri allocation puts nothing on Saturday")
+        check(approx((daily.unplaced[1] ?? 0) / 3600, 10, 0.05), "its 10h is reported as unplaceable")
     }
 
-    // Today counts only for the part of it that is left.
+    // Two allocations competing for one nearly-full day: the one needing more per day gets the room, and
+    // the shortfall is reported rather than drawn.
     do {
-        let target = floor(1, .project(10), hours: 14)
-        let input = plannerInput([target], membership: m)
-        let plan = Planner.plan(input)
-        let full = Replan.catchUp(input: input, plan: plan, actualsByWeekday: [:],
-                                  remainingWeekdays: [7], fractionOfTodayLeft: 1)
-        let sliver = Replan.catchUp(input: input, plan: plan, actualsByWeekday: [:],
-                                    remainingWeekdays: [7], fractionOfTodayLeft: 0.1)
-        check((sliver[7]?[1] ?? 0) < (full[7]?[1] ?? 0),
-              "an evening holds less catch-up than a whole day")
-    }
-}
-
-// MARK: - Owed per day
-
-func testOwedByDay() {
-    print("Owed per day:")
-
-    // 35h over Mon–Fri is 7h a day. Nothing done: each remaining day wants its full 7h.
-    do {
-        let target = floor(1, .project(10), hours: 35, weekdays: .weekdaysOnly)
-        let owed = Replan.owedByDay(target: target, doneByWeekday: [:],
-                                    remainingWeekdays: [5, 6, 7])
-        check(approx((owed[5] ?? 0) / 3600, 7, 0.01), "Thursday wants its 7h")
-        check(approx((owed[6] ?? 0) / 3600, 7, 0.01), "Friday wants its 7h")
-        check(owed[7] == nil, "Saturday isn't claimed, so it wants nothing")
-    }
-
-    // The week's remainder caps the total: 24.6h done leaves 10.4h, so Thursday keeps its full share and
-    // Friday takes what's left rather than a nominal 7h.
-    do {
-        let target = floor(1, .project(10), hours: 35, weekdays: .weekdaysOnly)
-        let done: [Int: TimeInterval] = [2: 8 * 3600, 3: 8 * 3600, 4: 5.4 * 3600, 5: 3.2 * 3600]
-        let owed = Replan.owedByDay(target: target, doneByWeekday: done,
-                                    remainingWeekdays: [5, 6])
-        let total = owed.values.reduce(0, +) / 3600
-        check(approx(total, 10.4, 0.05), "the days together ask for exactly what the week still needs")
-        check(approx((owed[5] ?? 0) / 3600, 3.8, 0.05), "today keeps its full remaining intention")
-        check(approx((owed[6] ?? 0) / 3600, 6.6, 0.05), "and the shortfall lands on the furthest day")
-    }
-
-    // Already met: nothing is owed anywhere, and certainly nothing negative.
-    do {
-        let target = floor(1, .project(10), hours: 10)
-        let owed = Replan.owedByDay(target: target, doneByWeekday: [1: 12 * 3600],
-                                    remainingWeekdays: [5, 6, 7])
-        check(owed.isEmpty, "an allocation already met asks for nothing")
-    }
-
-    // A day that has already had more than its share asks for nothing, while the rest still do.
-    do {
-        let target = floor(1, .project(10), hours: 14)      // 2h a day
-        let owed = Replan.owedByDay(target: target, doneByWeekday: [5: 5 * 3600],
-                                    remainingWeekdays: [5, 6, 7])
-        check(owed[5] == nil, "a day past its share wants no more")
-        check(approx((owed[6] ?? 0) / 3600, 2, 0.01), "the next day still wants its own share")
+        let big = floor(1, .project(10), hours: 20, weekdays: Weekdays(rawValue: 64))    // Sat only
+        let small = floor(2, .project(20), hours: 4, weekdays: Weekdays(rawValue: 64))
+        let input = plannerInput([big, small], membership: plannerWorld(taskGroups: [1: 10, 2: 20],
+                                                                       taskTags: [:]))
+        let daily = Replan.dailyPlan(input: input, plan: Planner.plan(input),
+                                     creditedByWeekday: [:], remainingWeekdays: [7])
+        let placed = (shares(daily, 7, 1).total + shares(daily, 7, 2).total) / 3600
+        check(placed <= 16.01, "a day is never asked for more hours than it has")
+        check(!daily.unplaced.isEmpty, "and what doesn't fit is reported")
+        check(shares(daily, 7, 1).total > shares(daily, 7, 2).total,
+              "the allocation needing more per day gets the room first")
     }
 }
 
@@ -5345,8 +5317,7 @@ do {
     try testTagSync()
     testTagTotals()
     testTargetMath()
-    testCatchUp()
-    testOwedByDay()
+    testDailyPlan()
     testPalette()
     testInlineBarContrast()
     testTaskOrdering()
@@ -5368,8 +5339,7 @@ do {
     try testDuplicateNameIsProjectScoped()
     testTagTotals()
     testTargetMath()
-    testCatchUp()
-    testOwedByDay()
+    testDailyPlan()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1

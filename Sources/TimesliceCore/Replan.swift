@@ -323,139 +323,146 @@ public extension Replan {
 }
 
 public extension Replan {
-    /// Per remaining weekday, per allocation: hours of **catch-up** — the work pushed into a day beyond
-    /// that day's own intention, because earlier days in the week were missed.
+    /// What one allocation is asked to do on one remaining day.
+    struct DayShare: Sendable, Equatable {
+        /// That day's own share: the allocation's even slice of its claimed days, less what the day already
+        /// got. The figure the plan was built from, and stable from day to day.
+        public let intended: TimeInterval
+        /// Hours moved here from another day — either missed earlier in the week, or pushed forward because
+        /// the day they belonged to had run out of hours.
+        public let carried: TimeInterval
+
+        public init(intended: TimeInterval, carried: TimeInterval) {
+            self.intended = intended
+            self.carried = carried
+        }
+
+        public var total: TimeInterval { intended + carried }
+    }
+
+    struct DailyPlan: Sendable {
+        /// weekday → allocation → what that day is being asked for.
+        public let byDay: [Int: [Int64: DayShare]]
+        /// Per allocation, hours that fit nowhere in the days that remain.
+        public let unplaced: [Int64: TimeInterval]
+
+        public init(byDay: [Int: [Int64: DayShare]], unplaced: [Int64: TimeInterval]) {
+            self.byDay = byDay
+            self.unplaced = unplaced
+        }
+    }
+
+    /// Spread what's left of every allocation across the days that remain, respecting the hours those days
+    /// actually have.
     ///
-    /// Two numbers matter on a day and they are not the same question:
+    /// One pass, because these were two and they disagreed. A day's own intention and the catch-up carried
+    /// into it are still reported separately — they answer different questions and are drawn differently —
+    /// but they are decided together, which is what makes the total per day honest:
     ///
-    /// - *What did today want?* — the allocation's even share of its claimed days, minus what today already
-    ///   got. Stable, and the same figure the plan was built from.
-    /// - *What is being carried into today?* — the week's shortfall, which has to land somewhere.
+    /// - **A day can't be asked for more hours than it has left.** At 9pm today has three hours, so three
+    ///   hours is all it can be asked for however far behind you are; the rest moves to tomorrow. Computing
+    ///   a day's intention without reference to its room is how "3.7h of office today" survived on an
+    ///   evening that couldn't hold it.
+    /// - **The week's remainder is spent down as the days are filled**, chronologically, so the days
+    ///   together never ask for more than the week still needs. The nearest day keeps its full share and
+    ///   the shortfall lands on the furthest one, because shaving a little off every day gives figures that
+    ///   are all slightly wrong and none of them memorable.
+    /// - **Whatever fits nowhere is reported rather than drawn.** A column claiming an impossible hour is
+    ///   worse than a card saying the week is over by that much.
     ///
-    /// Drawing only the first hides the backlog; drawing only their sum (which is what a full
-    /// redistribution produces) makes today read 5.6h and tomorrow 2.7h for an allocation that plainly
-    /// wants 7h a day, and those figures move when an unrelated day fills up. So they are computed
-    /// separately and drawn separately.
+    /// Allocations are served in order of how much they need per remaining day, so the scarcest room goes to
+    /// whatever is furthest behind.
     ///
-    /// The debt goes where there is room: allocations in order of how far behind they are, each one's debt
-    /// split across its remaining claimed days in proportion to the hours those days actually have left,
-    /// and never more than a day can hold. What still doesn't fit is simply not placed — the day-level
-    /// picture shouldn't claim an impossible hour, and `weekIsLost` is where that fact belongs.
-    static func catchUp(input: Planner.Input,
-                        plan: Planner,
-                        actualsByWeekday: [Int: [Int64: TimeInterval]],
-                        remainingWeekdays: [Int],
-                        fractionOfTodayLeft: Double = 1) -> [Int: [Int64: TimeInterval]] {
+    /// `creditedByWeekday` must be CREDITED hours: every second that counts toward an allocation, including
+    /// work a narrower allocation also covers. Measuring against a one-hour-one-owner attribution made
+    /// office ask for 5.6h today when kvcache had already given it an hour and a half.
+    static func dailyPlan(input: Planner.Input,
+                          plan: Planner,
+                          creditedByWeekday: [Int: [Int64: TimeInterval]],
+                          remainingWeekdays: [Int],
+                          fractionOfTodayLeft: Double = 1) -> DailyPlan {
         let floors = input.targets.filter { $0.direction == .atLeast }
-        guard !floors.isEmpty, !remainingWeekdays.isEmpty else { return [:] }
+        guard !floors.isEmpty, !remainingWeekdays.isEmpty else { return DailyPlan(byDay: [:], unplaced: [:]) }
 
-        func done(_ weekday: Int, _ id: Int64) -> TimeInterval {
-            actualsByWeekday[weekday]?[id] ?? 0
+        func credited(_ weekday: Int, _ id: Int64) -> TimeInterval {
+            creditedByWeekday[weekday]?[id] ?? 0
         }
 
-        /// What each allocation still wants on each remaining day, before any catch-up.
-        var intendedLeft: [Int64: [Int: TimeInterval]] = [:]
-        var debts: [(id: Int64, debt: TimeInterval, days: [Int])] = []
-        for target in floors {
-            let claimed = (1...7).filter { target.weekdays.effective.contains(weekday: $0) }
-            guard !claimed.isEmpty, target.weeklySeconds > 0 else { continue }
-            let perDay = target.weeklySeconds / Double(claimed.count)
-            let remainingClaimed = remainingWeekdays.filter { claimed.contains($0) }
-
-            var byDay: [Int: TimeInterval] = [:]
-            for weekday in remainingClaimed {
-                byDay[weekday] = max(0, perDay - done(weekday, target.id))
-            }
-            intendedLeft[target.id] = byDay
-
-            let weekDone = (1...7).reduce(0.0) { $0 + done($1, target.id) }
-            let remaining = max(0, target.weeklySeconds - weekDone)
-            let base = byDay.values.reduce(0, +)
-            let debt = max(0, remaining - base)
-            if debt > 60, !remainingClaimed.isEmpty {
-                debts.append((target.id, debt, remainingClaimed))
-            }
-        }
-        guard !debts.isEmpty else { return [:] }
-
-        // Hours each remaining day has left once what has happened, what is reserved, and every
-        // allocation's own intention for that day are accounted for. Catch-up can only use what's left.
+        // Hours each remaining day can still be asked for. Today is only the part of it that is left; a
+        // future day is all of its available hours.
         var room: [Int: TimeInterval] = [:]
         for weekday in remainingWeekdays {
             guard let day = plan.days.first(where: { $0.weekday == weekday }) else { continue }
+            let available = max(0, day.capacitySeconds - day.reservedSeconds)
             let isToday = weekday == remainingWeekdays.first
-            let capacity = (day.capacitySeconds - day.reservedSeconds)
-                * (isToday ? max(0, min(1, fractionOfTodayLeft)) : 1)
-            let tracked = (actualsByWeekday[weekday] ?? [:]).values.reduce(0, +)
-            let intended = intendedLeft.values.reduce(0.0) { $0 + ($1[weekday] ?? 0) }
-            room[weekday] = max(0, capacity - tracked - intended)
+            room[weekday] = isToday ? available * max(0, min(1, fractionOfTodayLeft)) : available
         }
 
-        var out: [Int: [Int64: TimeInterval]] = [:]
-        for entry in debts.sorted(by: { $0.debt > $1.debt }) {
-            var left = entry.debt
-            let total = entry.days.reduce(0.0) { $0 + max(0, room[$1] ?? 0) }
-            guard total > 60 else { continue }
-            let want = left
-            for weekday in entry.days {
+        struct Work {
+            let id: Int64
+            let perDay: TimeInterval
+            var remainder: TimeInterval
+            let days: [Int]
+        }
+        var queue: [Work] = []
+        for target in floors {
+            let claimed = (1...7).filter { target.weekdays.effective.contains(weekday: $0) }
+            guard !claimed.isEmpty, target.weeklySeconds > 0 else { continue }
+            let weekDone = (1...7).reduce(0.0) { $0 + credited($1, target.id) }
+            let remainder = max(0, target.weeklySeconds - weekDone)
+            guard remainder > 60 else { continue }
+            queue.append(Work(id: target.id,
+                              perDay: target.weeklySeconds / Double(claimed.count),
+                              remainder: remainder,
+                              days: remainingWeekdays.filter { claimed.contains($0) }))
+        }
+        // Most pressing first: hours needed per day left, not hours needed.
+        queue.sort { lhs, rhs in
+            let l = lhs.remainder / Double(max(1, lhs.days.count))
+            let r = rhs.remainder / Double(max(1, rhs.days.count))
+            return l > r
+        }
+
+        var intended: [Int: [Int64: TimeInterval]] = [:]
+        var carried: [Int: [Int64: TimeInterval]] = [:]
+
+        // Each day's own share first, so a day that has room keeps its plan intact.
+        for index in queue.indices {
+            for weekday in queue[index].days where queue[index].remainder > 60 {
                 let available = max(0, room[weekday] ?? 0)
                 guard available > 60 else { continue }
-                let share = min(available, want * (available / total))
-                guard share > 60 else { continue }
-                out[weekday, default: [:]][entry.id, default: 0] += share
-                room[weekday] = available - share
-                left -= share
+                let want = max(0, queue[index].perDay - credited(weekday, queue[index].id))
+                let take = min(min(want, queue[index].remainder), available)
+                guard take > 60 else { continue }
+                intended[weekday, default: [:]][queue[index].id] = take
+                room[weekday] = available - take
+                queue[index].remainder -= take
             }
-            // A second sweep for what rounding or capping left behind, so hours aren't silently dropped.
-            for weekday in entry.days where left > 60 {
+        }
+
+        // Then whatever is still owed, into whatever room is left, earliest day first.
+        for index in queue.indices {
+            for weekday in queue[index].days where queue[index].remainder > 60 {
                 let available = max(0, room[weekday] ?? 0)
                 guard available > 60 else { continue }
-                let extra = min(available, left)
-                out[weekday, default: [:]][entry.id, default: 0] += extra
-                room[weekday] = available - extra
-                left -= extra
+                let take = min(queue[index].remainder, available)
+                carried[weekday, default: [:]][queue[index].id, default: 0] += take
+                room[weekday] = available - take
+                queue[index].remainder -= take
             }
         }
-        return out
-    }
-}
 
-public extension Replan {
-    /// Per remaining weekday, what one allocation still wants of that day — and no more than the week
-    /// still needs in total.
-    ///
-    /// A day's intention is a fixed share of its claimed days: office at 35h over five days wants 7h on
-    /// each. But if only 10.4h of the week remain, then drawing 3.8h today and 7h on Friday promises 10.8h
-    /// and would overshoot the weekly target. The days are therefore filled in order and the week's
-    /// remainder is spent down as they go — today takes its full 3.8h, Friday takes the 6.6h that is left
-    /// rather than its nominal 7h.
-    ///
-    /// Order matters and it is deliberately chronological: the nearest day keeps its full intention, and the
-    /// shortfall lands on the furthest one. The alternative — shaving a bit off every day — produces
-    /// figures that are all slightly wrong and none of them memorable.
-    ///
-    /// `doneByWeekday` must be CREDITED hours: every second that counts toward this allocation, including
-    /// work a narrower allocation also covers. Measuring against a primary attribution made office ask for
-    /// 5.6h today when kvcache had already given it an hour and a half.
-    static func owedByDay(target: Target,
-                          doneByWeekday: [Int: TimeInterval],
-                          remainingWeekdays: [Int]) -> [Int: TimeInterval] {
-        let claimed = (1...7).filter { target.weekdays.effective.contains(weekday: $0) }
-        guard !claimed.isEmpty, target.weeklySeconds > 0 else { return [:] }
-        let perDay = target.weeklySeconds / Double(claimed.count)
-        let weekDone = (1...7).reduce(0.0) { $0 + (doneByWeekday[$1] ?? 0) }
-        var budget = max(0, target.weeklySeconds - weekDone)
-
-        var out: [Int: TimeInterval] = [:]
-        for weekday in remainingWeekdays where claimed.contains(weekday) {
-            guard budget > 60 else { break }
-            let want = max(0, perDay - (doneByWeekday[weekday] ?? 0))
-            let take = min(want, budget)
-            if take > 60 {
-                out[weekday] = take
-                budget -= take
+        var byDay: [Int: [Int64: DayShare]] = [:]
+        for weekday in remainingWeekdays {
+            var shares: [Int64: DayShare] = [:]
+            for id in Set((intended[weekday] ?? [:]).keys).union((carried[weekday] ?? [:]).keys) {
+                shares[id] = DayShare(intended: intended[weekday]?[id] ?? 0,
+                                      carried: carried[weekday]?[id] ?? 0)
             }
+            if !shares.isEmpty { byDay[weekday] = shares }
         }
-        return out
+        var unplaced: [Int64: TimeInterval] = [:]
+        for work in queue where work.remainder > 60 { unplaced[work.id] = work.remainder }
+        return DailyPlan(byDay: byDay, unplaced: unplaced)
     }
 }

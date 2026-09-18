@@ -21,10 +21,10 @@ import TimesliceCore
 public struct PlannerWeekGrid: View {
     public enum Kind: Sendable {
         case reserved, tracked, unallocated, owed
-        /// Hours carried into this day because earlier ones were missed. Distinct from `owed`, which is
-        /// what the day wanted of its own accord — the difference between "today's 7h" and "plus 2h you
-        /// didn't do on Monday" is the whole of what a catch-up plan has to say.
-        case catchUp
+        /// Hours that went by with nothing recorded. On a past day it's the rest of the day; on today it's
+        /// the elapsed part that wasn't tracked. Either way it is gone, and drawing it is what makes a
+        /// column add up to a whole day instead of trailing off into ambiguous empty space.
+        case untracked
     }
 
     public struct Blob: Identifiable, Sendable {
@@ -169,11 +169,10 @@ public struct PlannerWeekGrid: View {
                     }
                     .help(tooltip(day, total: total))
 
-                // What the empty part of the column MEANS, which differs by day: hours nobody has
-                // claimed yet on a day still coming, versus hours that went by untracked on one that
-                // has gone. Same emptiness, opposite implications, and it was unlabelled either way.
+                // The empty top is hours you still have — on a past day there are none, because the
+                // untracked band accounts for them.
                 if capacityHours - total > 1.2 {
-                    Text("\(Self.short(capacityHours - total)) \(day.isPast ? "untracked" : "free")")
+                    Text("\(Self.short(capacityHours - total)) \(day.isToday ? "left" : "free")")
                         .font(.system(size: compact ? 8 : 9))
                         .foregroundStyle(.tertiary)
                         .frame(maxWidth: .infinity)
@@ -196,16 +195,6 @@ public struct PlannerWeekGrid: View {
                 .frame(height: Self.gridHeight)
                 .clipped()
 
-                // How much of today has gone. This is the whole of the clock the page needs: late in the
-                // day the rule sits near the top, and dashed blobs above it are visibly not happening.
-                if day.isToday, let elapsed = elapsedHoursToday, elapsed > 0 {
-                    ZStack(alignment: .leading) {
-                        Rectangle().fill(Color.accentColor).frame(height: 1)
-                        Circle().fill(Color.accentColor).frame(width: 5, height: 5).offset(x: -2)
-                    }
-                    .offset(y: -height(elapsed))
-                    .help("\(Self.short(elapsed)) of today has gone")
-                }
             }
             .frame(height: Self.gridHeight)
             .opacity(day.isPast ? 0.85 : 1)
@@ -258,6 +247,13 @@ public struct PlannerWeekGrid: View {
                 Hatch(color: .secondary).clipShape(RoundedRectangle(cornerRadius: 3))
             case .tracked:
                 RoundedRectangle(cornerRadius: 3).fill(tint.opacity(0.9))
+            case .untracked:
+                // Flat, and coloured by nothing: it is the absence of work rather than a kind of it. Its
+                // size is the message.
+                RoundedRectangle(cornerRadius: 3).fill(Color.primary.opacity(0.055))
+                    .overlay(alignment: .top) {
+                        Rectangle().fill(Color.primary.opacity(0.16)).frame(height: 1)
+                    }
             case .unallocated:
                 // Tracked, but against nothing you allocated. Distinct from both a solid allocation blob
                 // and from empty space, because it is neither — it's usually where the plan went.
@@ -277,22 +273,75 @@ public struct PlannerWeekGrid: View {
                                           style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 3))
-            case .catchUp:
-                // Filled enough to read as extra weight on the day, with a dotted edge so it can't be
-                // mistaken for either something done or something the day asked for.
-                RoundedRectangle(cornerRadius: 3).fill(tint.opacity(0.17))
+            case .unallocated:
+                // Tracked, but against nothing you allocated. Distinct from both a solid allocation blob
+                // and from empty space, because it is neither — it's usually where the plan went.
+                RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.30))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(Color.secondary.opacity(0.5), lineWidth: 1)
+                    }
+            case .owed:
+                // Dashed, with the colour on the edge rather than in the fill: a low-alpha tint of a
+                // dark hue vanished against the column and left a label floating over nothing.
+                RoundedRectangle(cornerRadius: 3).fill(Color.primary.opacity(0.06))
                     .overlay(alignment: .leading) { Rectangle().fill(tint).frame(width: 3) }
                     .overlay {
                         RoundedRectangle(cornerRadius: 3)
-                            .strokeBorder(tint.opacity(0.85),
-                                          style: StrokeStyle(lineWidth: 1, dash: [1.5, 2]))
+                            .strokeBorder(tint.opacity(0.6),
+                                          style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+            case .untracked:
+                // Flat, and coloured by nothing: it is the absence of work rather than a kind of it. Its
+                // size is the message.
+                RoundedRectangle(cornerRadius: 3).fill(Color.primary.opacity(0.055))
+                    .overlay(alignment: .top) {
+                        Rectangle().fill(Color.primary.opacity(0.16)).frame(height: 1)
+                    }
+            case .unallocated:
+                // Tracked, but against nothing you allocated. Distinct from both a solid allocation blob
+                // and from empty space, because it is neither — it's usually where the plan went.
+                RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.30))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(Color.secondary.opacity(0.5), lineWidth: 1)
+                    }
+            case .owed:
+                // Dashed, with the colour on the edge rather than in the fill: a low-alpha tint of a
+                // dark hue vanished against the column and left a label floating over nothing.
+                RoundedRectangle(cornerRadius: 3).fill(Color.primary.opacity(0.06))
+                    .overlay(alignment: .leading) { Rectangle().fill(tint).frame(width: 3) }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(tint.opacity(0.6),
+                                          style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+            case .unallocated:
+                // Tracked, but against nothing you allocated. Distinct from both a solid allocation blob
+                // and from empty space, because it is neither — it's usually where the plan went.
+                RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.30))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(Color.secondary.opacity(0.5), lineWidth: 1)
+                    }
+            case .owed:
+                // Dashed, with the colour on the edge rather than in the fill: a low-alpha tint of a
+                // dark hue vanished against the column and left a label floating over nothing.
+                RoundedRectangle(cornerRadius: 3).fill(Color.primary.opacity(0.06))
+                    .overlay(alignment: .leading) { Rectangle().fill(tint).frame(width: 3) }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(tint.opacity(0.6),
+                                          style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 3))
             }
 
             if h > 9 {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(blob.kind == .catchUp && !compact ? "\(blob.name) · catch-up" : blob.name)
+                    Text(blob.name)
                         .font(.system(size: compact ? 8 : 9,
                                       weight: blob.kind == .tracked ? .medium : .regular))
                         .lineLimit(1).truncationMode(.tail)
@@ -319,7 +368,7 @@ public struct PlannerWeekGrid: View {
         var suffix = ""
         switch blob.kind {
         case .owed: suffix = " still wanted today"
-        case .catchUp: suffix = " catch-up from earlier this week"
+        case .untracked: suffix = " with nothing tracked"
         default: break
         }
         var lines = ["\(blob.name) · \(Self.short(blob.hours))" + suffix]

@@ -64,11 +64,8 @@ struct PlannerView: View {
     /// on this page has to leave them out — the headline did and the figures beside it didn't, which is how
     /// "the plan fits, 33h spare" ended up above "spare 27.5h".
     @State private var nestedIDs: Set<Int64> = []
-    /// weekday → allocation → hours carried in from earlier days this week.
-    @State private var catchUpByDay: [Int: [Int64: TimeInterval]] = [:]
-    /// weekday → allocation → what that day still wants of it, capped so the remaining days together never
-    /// ask for more than the week still needs.
-    @State private var owedByDay: [Int: [Int64: TimeInterval]] = [:]
+    /// What each remaining day is asked to do: its own share, and anything moved onto it.
+    @State private var dailyPlan = Replan.DailyPlan(byDay: [:], unplaced: [:])
     /// Every second tracked inside the viewed period, allocation or not — the bar's "tracked" segment.
     @State private var periodTracked: TimeInterval = 0
     /// Show the plan as designed rather than what happened.
@@ -187,7 +184,7 @@ struct PlannerView: View {
         let rows = goalRowData(plan)
         // Adaptive columns: at the app's default 720pt this is two, and on a wide window three or four.
         // Fixed columns overflowed the window instead of reflowing.
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 268), spacing: 18)],
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 310), spacing: 18)],
                   alignment: .leading, spacing: 2) {
             ForEach(rows, id: \.id) { row in
                 railRow(row)
@@ -205,7 +202,13 @@ struct PlannerView: View {
         return HStack(spacing: 7) {
             Circle().fill(Color(hex: row.colorHex)).frame(width: 7, height: 7)
             Text(row.name).font(.system(size: 11)).lineLimit(1).truncationMode(.tail)
-                .frame(width: 96, alignment: .leading)
+                .frame(width: 84, alignment: .leading)
+            // Hours done, left of the bar, exactly as the metrics allocation rows read — the percentage
+            // says how far along, and this says how far along in hours.
+            Text(hours(row.done))
+                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
+                .foregroundStyle(row.done > 60 ? Color.primary.opacity(0.8) : .secondary)
+                .frame(width: 40, alignment: .trailing)
             InlineBar(fraction: min(1, row.fraction),
                       label: "\(Int((row.fraction * 100).rounded()))%",
                       fill: Color(hex: row.colorHex),
@@ -306,20 +309,8 @@ struct PlannerView: View {
                 legendKey(filled: true, unit == .week ? "tracked" : "done")
             }
             if unit == .week {
-                legendKey(filled: false, showIntended || isFuture ? "planned" : "today wants")
-                if !showIntended, !isFuture {
-                    HStack(spacing: 4) {
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(Color.accentColor.opacity(0.30))
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 2)
-                                    .strokeBorder(Color.accentColor.opacity(0.85),
-                                                  style: StrokeStyle(lineWidth: 1, dash: [1.5, 2]))
-                            }
-                            .frame(width: 14, height: 9)
-                        Text("catch-up").font(.system(size: 9)).foregroundStyle(.secondary)
-                    }
-                }
+                legendKey(filled: false, showIntended || isFuture ? "planned" : "this day wants")
+
             } else {
                 // One cube is one hour; the outlined one is where the day's allocations wanted to reach.
                 HStack(spacing: 4) {
@@ -536,7 +527,7 @@ struct PlannerView: View {
         if isFuture { return "nothing tracked yet — this is the plan as designed" }
         return showIntended
             ? "the plan as designed, ignoring what actually happened"
-            : "solid is done · dashed is what the day wanted · dotted is catch-up carried in"
+            : "every column adds up to a whole day"
     }
 
     /// True when the window being viewed hasn't happened yet.
@@ -890,13 +881,24 @@ struct PlannerView: View {
         let idsBySubject = Dictionary(uniqueKeysWithValues:
             floors.map { ($0.id, membership.taskIDs(for: $0.subject)) })
 
+        // Allocations wholly inside another. Their hours are already in the parent's, so they are not
+        // drawn as blobs of their own — which means they must not OWN an hour either. When they did, the
+        // hour was counted in the day's total and drawn nowhere, leaving a gap at the top of the column.
+        let nested = Set(built.nestings.compactMap { nesting in
+            targets.first { name(for: $0, tasks: tasks) == nesting.innerName }?.id
+        })
+        nestedIDs = nested
+
         // The most specific allocation owns an hour: a task inside both `office` and `vllm` belongs, for
         // the purpose of "where did this hour go", to the narrower of the two. Sorting by set size once
         // makes that a lookup rather than a search per interval.
-        let bySize = idsBySubject.sorted { $0.value.count < $1.value.count }
+        let bySize = idsBySubject
+            .filter { !nested.contains($0.key) }
+            .sorted { $0.value.count < $1.value.count }
         func owner(_ projectID: Int64) -> Int64? {
             bySize.first { $0.value.contains(projectID) }?.key
         }
+
 
         var byDay: [Int: [Int64: TimeInterval]] = [:]
         var otherByDay: [Int: TimeInterval] = [:]
@@ -977,33 +979,14 @@ struct PlannerView: View {
                                           now: now, wakingSeconds: settings.wakingSeconds,
                                           calendar: cal))
         replan = computed
-        // Catch-up is a separate number from a day's own intention, so it's computed separately: the debt
-        // the week has accumulated, distributed over the days that actually have room for it.
-        var owed: [Int: [Int64: TimeInterval]] = [:]
-        for target in targets where target.direction == .atLeast && !nestedIDs.contains(target.id) {
-            let credited = Dictionary(uniqueKeysWithValues: (1...7).map { weekday in
-                (weekday, creditByDay[weekday]?[target.id] ?? 0)
-            })
-            for (weekday, seconds) in Replan.owedByDay(target: target, doneByWeekday: credited,
-                                                       remainingWeekdays: Array(today...7)) {
-                owed[weekday, default: [:]][target.id] = seconds
-            }
-        }
-        owedByDay = owed
 
-        catchUpByDay = Replan.catchUp(input: input, plan: built, actualsByWeekday: creditByDay,
-                                      remainingWeekdays: Array(today...7),
-                                      fractionOfTodayLeft: Replan.fractionOfDayLeft(
-                                          now: now, wakingSeconds: settings.wakingSeconds,
-                                          calendar: cal))
-
-
-        // Allocations wholly inside another. Their hours are already in the parent's, so they must not
-        // be drawn as blobs of their own.
-        let nested = Set(built.nestings.compactMap { nesting in
-            targets.first { name(for: $0, tasks: tasks) == nesting.innerName }?.id
-        })
-        nestedIDs = nested
+        // What each remaining day is asked to do: its own share, plus anything moved onto it because
+        // another day was missed or had run out of hours. One pass, after the credited totals exist.
+        dailyPlan = Replan.dailyPlan(input: input, plan: built, creditedByWeekday: creditByDay,
+                                     remainingWeekdays: Array(today...7),
+                                     fractionOfTodayLeft: Replan.fractionOfDayLeft(
+                                         now: now, wakingSeconds: settings.wakingSeconds,
+                                         calendar: cal))
 
         // Who else counts an allocation's hours. With the grid attributing an hour to the most specific
         // allocation, `vllm` work no longer appears under `office` in the columns — while office's progress
@@ -1122,8 +1105,7 @@ struct PlannerView: View {
             let doneByID = (dayActuals[weekday] ?? [:]).filter { $0.value > 60 }
             let owes = dayStart >= startOfToday && offset == 0 && !showIntended
             let ids = Set(doneByID.keys)
-                .union(owes ? Array((owedByDay[weekday] ?? [:]).keys) : [])
-                .union(owes ? Array((catchUpByDay[weekday] ?? [:]).keys) : [])
+                .union(owes ? Array((dailyPlan.byDay[weekday] ?? [:]).keys) : [])
                 .subtracting(nested)
                 .sorted { lhs, rhs in
                     // The day's biggest commitment sits at the bottom in both views, so switching between
@@ -1143,28 +1125,55 @@ struct PlannerView: View {
                                ? ["also counts toward " + alsoCounts[id]!.joined(separator: ", ")]
                                : [])))
                 }
-                guard owes else { continue }
-                if let left = owedByDay[weekday]?[id], left > 60 {
-                    blobs.append(PlannerWeekGrid.Blob(
-                        targetID: id, name: name(forTarget: id), hours: left / 3600,
-                        colorHex: colorHex(forTarget: id), kind: .owed))
-                }
-                // Then the debt this day is being asked to absorb — stacked on top of the day's own
-                // intention, because that is exactly what it is: extra weight on an already-planned day.
-                if let extra = catchUpByDay[weekday]?[id], extra > 60 {
-                    blobs.append(PlannerWeekGrid.Blob(
-                        targetID: id, name: name(forTarget: id), hours: extra / 3600,
-                        colorHex: colorHex(forTarget: id), kind: .catchUp))
-                }
             }
 
-            // Work no allocation covers goes on top: it's real, and it's usually where the plan went.
+            // Work no allocation covers: real hours, so they sit with the other real hours.
             if let other = dayOther[weekday], other > 60 {
                 blobs.append(PlannerWeekGrid.Blob(targetID: -2, name: "off-plan",
                                                   hours: other / 3600,
                                                   colorHex: "#8E8E93", kind: .unallocated,
                                                   detail: detailLines(breakdown[weekday]?[-2])))
             }
+
+            // The hours that went by with nothing recorded — today's elapsed part, or the whole of a day
+            // that has gone. Above the work, closing off the part of the day that is over — so everything
+            // higher in the column is still to come. Drawing it at all is what makes a column add up to a
+            // whole day rather than trailing off into ambiguous empty space.
+            if !showIntended, !isFuture, dayStart <= startOfToday {
+                let trackedToday = (dayActuals[weekday] ?? [:]).values.reduce(0, +)
+                    + (dayOther[weekday] ?? 0)
+                let elapsed = dayStart < startOfToday
+                    ? settings.wakingSeconds
+                    : elapsedHoursToday * 3600
+                let missing = max(0, elapsed - trackedToday)
+                if missing > 60 {
+                    blobs.append(PlannerWeekGrid.Blob(targetID: -3, name: "untracked",
+                                                      hours: missing / 3600,
+                                                      colorHex: "#8E8E93", kind: .untracked))
+                }
+            }
+
+            // Above the line drawn by what has gone: what the days still to come are being asked for. Its
+            // own share dashed, anything moved onto it dotted.
+            if owes {
+                for id in ids {
+                    guard let share = dailyPlan.byDay[weekday]?[id], share.total > 60 else { continue }
+                    // ONE block per allocation, not its own share plus a "+1h moved here" stacked on top.
+                    // Two adjacent blocks of the same colour and name read as a duplicate, and the split is
+                    // detail: what the day is being asked for is one number. The tooltip has the breakdown.
+                    var detail: [String] = []
+                    if share.carried > 60, share.intended > 60 {
+                        detail = ["  \(hours(share.intended)) this day's own share",
+                                  "  \(hours(share.carried)) moved here from another day"]
+                    } else if share.carried > 60 {
+                        detail = ["  all of it moved here from another day"]
+                    }
+                    blobs.append(PlannerWeekGrid.Blob(
+                        targetID: id, name: name(forTarget: id), hours: share.total / 3600,
+                        colorHex: colorHex(forTarget: id), kind: .owed, detail: detail))
+                }
+            }
+
 
             // The plan as designed: the even spread over each allocation's own claimed days, with no
             // reference to what happened. This is the whole of a future week, and the "intended" view of
