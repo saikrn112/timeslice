@@ -33,7 +33,6 @@ struct PlannerView: View {
     @ObservedObject var settings: AppSettings
 
     @State private var targets: [Target] = []
-    @State private var reservations: [Reservation] = []
     @State private var plan: Planner?
     @State private var replan: Replan?
     /// weekday → target id → seconds tracked this week, for the solid cells.
@@ -64,6 +63,12 @@ struct PlannerView: View {
     /// on this page has to leave them out — the headline did and the figures beside it didn't, which is how
     /// "the plan fits, 33h spare" ended up above "spare 27.5h".
     @State private var nestedIDs: Set<Int64> = []
+    /// Tasks, groups and tags as of the last rebuild.
+    ///
+    /// Read from the store rather than `AppState`, because AppState reloads from the same `dataDidChange`
+    /// notification this page subscribes to and subscriber order isn't defined — so a rename could land in
+    /// the columns one refresh late, or not until you left the tab and came back.
+    @State private var world: (tasks: [Project], groups: [TaskProject], tags: [Tag]) = ([], [], [])
     /// What each remaining day is asked to do: its own share, and anything moved onto it.
     @State private var dailyPlan = Replan.DailyPlan(byDay: [:], unplaced: [:])
     /// Every second tracked inside the viewed period, allocation or not — the bar's "tracked" segment.
@@ -75,7 +80,6 @@ struct PlannerView: View {
     /// that exists, being able to see it for THIS week is the same code with the actuals ignored.
     @State private var showIntended = ProcessInfo.processInfo
         .environment["TIMESLICE_PLANNER_INTENDED"] == "1"
-    @State private var showReservations = false
     @State private var showAllocations = false
     /// Built once per rebuild rather than per redraw: the calendar needs every interval placed at its
     /// real clock position, and doing that inside `body` would re-query sqlite on every hover.
@@ -152,12 +156,26 @@ struct PlannerView: View {
         .onReceive(NotificationCenter.default.publisher(for: TimesliceNotifications.dataDidChange)) { _ in
             rebuild()
         }
-        .sheet(isPresented: $showReservations) {
-            ReservationsSheet(store: appState.storeForEditing,
-                              wakingHours: settings.wakingSeconds / 3600) {
-                showReservations = false
-                rebuild()
-            }
+        // Everything below is a way this page could go stale while you are looking at it. The page derives
+        // a lot ONCE — the plan, the daily shares, every column — while reading a few things live from
+        // settings and the clock. When only half of that updates, the numbers stop agreeing with each other,
+        // which is what "I have to go back and forth to refresh it" actually was.
+        //
+        // A change to the waking day: it resizes every column, rescales the capacity axis and changes what
+        // each day can be asked for, and none of that is recomputed by a redraw.
+        .onChange(of: settings.wakingHours) { _, _ in rebuild() }
+        // The clock. `today`, the hours left of it, the untracked band, and how much today can still be
+        // asked for all move on their own — so at midnight the page was pointing at yesterday, and at 23:00
+        // it was still offering an afternoon's worth of room.
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
+            let weekday = Calendar.current.component(.weekday, from: Date())
+            if weekday != today || unit == .week { rebuild() }
+        }
+        // Coming back to the app after a while — the tab may already have been showing, so `onAppear` never
+        // fires and the page can be hours out of date.
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in
+            rebuild()
         }
         .sheet(isPresented: $showAllocations) {
             TargetsSheet(appState: appState, store: appState.storeForEditing) {
@@ -323,13 +341,6 @@ struct PlannerView: View {
                         .frame(width: 8, height: 8)
                     Text("hour it wanted to reach").font(.system(size: 9))
                         .foregroundStyle(.secondary)
-                }
-            }
-            if unit == .week {
-                HStack(spacing: 4) {
-                    Hatch(color: .secondary).frame(width: 14, height: 9)
-                        .clipShape(RoundedRectangle(cornerRadius: 2))
-                    Text("unavailable").font(.system(size: 9)).foregroundStyle(.secondary)
                 }
             }
             if highlight != nil {
@@ -585,8 +596,6 @@ struct PlannerView: View {
                     .foregroundStyle(verdictColor(plan.verdict))
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
-                Button("Available hours…") { showReservations = true }
-                    .buttonStyle(.link).font(.system(size: 11))
                 Button("Allocations…") { showAllocations = true }
                     .buttonStyle(.link).font(.system(size: 11))
             }
@@ -617,47 +626,71 @@ struct PlannerView: View {
                         figure("other work", budget.tracked - towards, .secondary)
                     }
                 } else {
-                    // Plain words. "Still owed", "short" and "came up short" are the vocabulary of a
-                    // ledger, and this is a page you glance at.
-                    // The same four words a finished period uses, plus the two only a live one has. The
-                    // headline says what it MEANS; these say what it is, and neither repeats the other.
-                    figure("goal", goalSeconds, .secondary)
+                    // A progression rather than six equal facts: what the week wants, how much is done,
+                    // how much is left, and the room there is for it. Six undifferentiated numbers in one
+                    // row meant reading all of them to find the one you were after.
                     figure("done", periodActuals.values.reduce(0, +), .accentColor)
+                    Text("of").font(.system(size: 10)).foregroundStyle(.tertiary)
+                    Text(hours(goalSeconds))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded)).monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    Divider().frame(height: 12)
                     figure("to do", budget.stillToDo,
                            budget.stillToDo > budget.freeLeft ? Self.overColor : .orange)
                     figure("free", budget.freeLeft, .secondary)
                         .help("Available hours on the days still to come, with today counted only from "
                               + "now.\nNothing is held back for work outside your allocations — that "
                               + "would be a guess about what you're going to do.")
-                    // What the remaining days could not take. Without it the dropping is invisible: an
-                    // allocation just appears with less than it asked for and nothing says why.
-                    // Two figures, because they have different answers. "No room" moves when you change
-                    // your available hours; "no days left" cannot, and one label for both looked broken.
-                    let noRoom = dailyPlan.unplaced.values.reduce(0, +)
-                    if noRoom > 60 {
-                        figure("no room", noRoom, Self.overColor)
-                            .help(droppedExplanation(dailyPlan.unplaced,
-                                  heading: "These hours don't fit in the days that remain.",
-                                  footer: "Whatever needs the most hours per remaining day is served "
-                                        + "first, so the rest take what's left rather than every "
-                                        + "allocation losing a little. More available hours would help."))
-                    }
-                    let stranded = dailyPlan.outOfDays.values.reduce(0, +)
-                    if stranded > 60 {
-                        figure("no days left", stranded, Self.overColor)
-                            .help(droppedExplanation(dailyPlan.outOfDays,
-                                  heading: "These allocations have no claimed days left this week.",
-                                  footer: "Changing your available hours won't help — the days they're "
-                                        + "allowed to use have already passed. Widening their weekdays "
-                                        + "would."))
-                    }
                 }
             }
 
+            problems
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
+    /// Hours that don't fit — on their own line, and only when there are any.
+    ///
+    /// Below the figures rather than among them: those state what the week is, these state what is going to
+    /// go wrong, and mixing the two made a row of six numbers where four were routine.
+    @ViewBuilder
+    private var problems: some View {
+        let noRoom = dailyPlan.unplaced.values.reduce(0, +)
+        let stranded = dailyPlan.outOfDays.values.reduce(0, +)
+        if unit == .week, offset == 0, !showIntended, noRoom > 60 || stranded > 60 {
+            HStack(spacing: 14) {
+                if noRoom > 60 {
+                    problem(hours(noRoom), "has no room in the days left",
+                            tooltip: droppedExplanation(
+                                dailyPlan.unplaced,
+                                heading: "These hours don't fit in the days that remain.",
+                                footer: "Whatever needs the most hours per remaining day is served first, "
+                                      + "so the rest take what's left rather than every allocation losing "
+                                      + "a little. More available hours would help."))
+                }
+                if stranded > 60 {
+                    problem(hours(stranded), "has no claimed days left",
+                            tooltip: droppedExplanation(
+                                dailyPlan.outOfDays,
+                                heading: "These allocations have no claimed days left this week.",
+                                footer: "More hours won't help — the days they're allowed to use have "
+                                      + "passed. Widening their weekdays would."))
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private func problem(_ amount: String, _ text: String, tooltip: String) -> some View {
+        HStack(spacing: 4) {
+            Text(amount)
+                .font(.system(size: 11, weight: .semibold, design: .rounded)).monospacedDigit()
+                .foregroundStyle(Self.overColor)
+            Text(text).font(.system(size: 10)).foregroundStyle(.secondary)
+        }
+        .help(tooltip)
     }
 
     /// What the allocations ask for over the viewed window, with nested ones left out because their hours
@@ -672,21 +705,7 @@ struct PlannerView: View {
     ///
     /// `PeriodBudget.reservedLeft` only counts the days still to come, which is right for "what can I still
     /// do" and wrong for "how big is this week", the question a future or intended week asks.
-    private func unavailableInWindow() -> TimeInterval {
-        guard let window = periodWindow() else { return 0 }
-        let cal = Calendar.current
-        var total: TimeInterval = 0
-        var cursor = cal.startOfDay(for: window.start)
-        while cursor < window.end {
-            let weekday = cal.component(.weekday, from: cursor)
-            total += min(settings.wakingSeconds, reservations
-                .filter { $0.weekdays.effective.contains(weekday: weekday) }
-                .reduce(0.0) { $0 + $1.secondsPerDay })
-            guard let next = cal.date(byAdding: .day, value: 1, to: cursor) else { break }
-            cursor = next
-        }
-        return total
-    }
+    private func unavailableInWindow() -> TimeInterval { 0 }
 
     /// Which allocations were left short, and by how much.
     private func droppedExplanation(_ hoursByTarget: [Int64: TimeInterval],
@@ -736,9 +755,7 @@ struct PlannerView: View {
         var cursor = cal.startOfDay(for: window.start)
         while cursor < window.end {
             let weekday = cal.component(.weekday, from: cursor)
-            let reserved = min(waking, reservations
-                .filter { $0.weekdays.effective.contains(weekday: weekday) }
-                .reduce(0.0) { $0 + $1.secondsPerDay })
+            let reserved = 0.0
             out.capacity += waking
 
             if cursor < startOfToday {
@@ -843,21 +860,6 @@ struct PlannerView: View {
         }
     }
 
-    /// The task the play button should start for an allocation.
-    ///
-    /// An allocation can point at a tag covering fifty tasks, so this picks the one you most recently
-    /// worked on — the same recency order the switcher's cycle uses, so the planner's guess and the
-    /// switcher's first suggestion agree instead of being two different opinions.
-    private func startableTask(for targetID: Int64) -> Project? {
-        guard let target = targets.first(where: { $0.id == targetID }) else { return nil }
-        let tasks = (try? appState.storeForEditing.listProjects(includeArchived: true)) ?? []
-        let ids = SubjectMembership(tasks: tasks,
-                                   tagIDsByTask: (try? appState.storeForEditing
-                                       .effectiveTagIDsByTask()) ?? [:])
-            .taskIDs(for: target.subject)
-        return appState.recencyOrderedProjects.first { ids.contains($0.id) }
-    }
-
     // MARK: - Chips
 
     private func chip(_ title: String, _ detail: String, _ tint: Color,
@@ -886,7 +888,9 @@ struct PlannerView: View {
     private func rebuild() {
         let store = appState.storeForEditing
         targets = (try? store.listTargets()) ?? []
-        reservations = (try? store.listReservations()) ?? []
+        world = ((try? store.listProjects(includeArchived: true)) ?? [],
+                 (try? store.listTaskProjects()) ?? [],
+                 (try? store.listTags()) ?? [])
         assignColors()
         guard !targets.isEmpty else { plan = nil; return }
 
@@ -895,7 +899,11 @@ struct PlannerView: View {
         let membership = SubjectMembership(tasks: tasks, tagIDsByTask: tagIDsByTask)
         var names: [Int64: String] = [:]
         for t in targets { names[t.id] = name(for: t, tasks: tasks) }
-        let input = Planner.Input(targets: targets, reservations: reservations,
+        // No per-weekday reservations: the feature is withdrawn for now, so every day is the waking day.
+        // The store still keeps and syncs the table, so bringing it back is a UI change rather than a
+        // migration — but nothing reads it, and a planner that half-reads a setting is worse than one that
+        // doesn't offer it.
+        let input = Planner.Input(targets: targets, reservations: [],
                                   membership: membership, names: names,
                                   wakingSecondsPerDay: settings.wakingSeconds)
         let built = Planner.plan(input)
@@ -1119,13 +1127,6 @@ struct PlannerView: View {
             var blobs: [PlannerWeekGrid.Blob] = []
 
             // Bottom of the column: hours that were never available to anything.
-            let reserved = reservations
-                .filter { $0.weekdays.effective.contains(weekday: weekday) }
-                .reduce(0.0) { $0 + $1.secondsPerDay } / 3600
-            if reserved > 0.02 {
-                blobs.append(PlannerWeekGrid.Blob(targetID: -1, name: "unavailable", hours: reserved,
-                                                  colorHex: "#8E8E93", kind: .reserved))
-            }
 
             // Then, per allocation, what was done and what is still owed of THIS DAY'S OWN intention —
             // adjacent, as one visual unit.
@@ -1363,9 +1364,7 @@ struct PlannerView: View {
                     guard claimed.contains(weekday: weekday) else { continue }
                     wanted += target.weeklySeconds / Double(max(1, claimed.selectedCount)) / 3600
                 }
-                let unavailable = reservations
-                    .filter { $0.weekdays.effective.contains(weekday: weekday) }
-                    .reduce(0.0) { $0 + $1.secondsPerDay } / 3600
+                let unavailable = 0.0
 
                 row.append(PlannerMonthCalendar.DayCell(
                     date: cursor, dayOfMonth: cal.component(.day, from: cursor),
@@ -1388,8 +1387,8 @@ struct PlannerView: View {
     }
 
     private func name(for target: Target, tasks: [Project]? = nil) -> String {
-        BudgetRows.name(for: target.subject, tasks: tasks ?? appState.projects,
-                        groups: appState.taskProjects, tags: appState.allTags) ?? "(deleted)"
+        BudgetRows.name(for: target.subject, tasks: tasks ?? world.tasks,
+                        groups: world.groups, tags: world.tags) ?? "(deleted)"
     }
 
     private func name(forTarget id: Int64) -> String {
@@ -1399,8 +1398,8 @@ struct PlannerView: View {
     private func colorHex(forTarget id: Int64) -> String {
         if let assigned = targetColors[id] { return assigned }
         guard let target = targets.first(where: { $0.id == id }) else { return "#8E8E93" }
-        return BudgetRows.colorHex(for: target.subject, tasks: appState.projects,
-                                  groups: appState.taskProjects, tags: appState.allTags)
+        return BudgetRows.colorHex(for: target.subject, tasks: world.tasks,
+                                  groups: world.groups, tags: world.tags)
     }
 
     /// Give each allocation a colour nothing else is using.
@@ -1414,8 +1413,8 @@ struct PlannerView: View {
         var used: Set<String> = []
         var out: [Int64: String] = [:]
         for target in targets.sorted(by: { $0.id < $1.id }) {
-            let base = BudgetRows.colorHex(for: target.subject, tasks: appState.projects,
-                                           groups: appState.taskProjects, tags: appState.allTags)
+            let base = BudgetRows.colorHex(for: target.subject, tasks: world.tasks,
+                                           groups: world.groups, tags: world.tags)
             var candidate = base
             var step = 0
             while used.contains(candidate.lowercased()), step < Palette.colors.count + 6 {
