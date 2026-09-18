@@ -629,6 +629,13 @@ struct PlannerView: View {
                         .help("Available hours on the days still to come, with today counted only from "
                               + "now.\nNothing is held back for work outside your allocations — that "
                               + "would be a guess about what you're going to do.")
+                    // What the remaining days could not take. Without it the dropping is invisible: an
+                    // allocation just appears with less than it asked for and nothing says why.
+                    let dropped = dailyPlan.unplaced.values.reduce(0, +)
+                    if dropped > 60 {
+                        figure("won't fit", dropped, Self.overColor)
+                            .help(droppedExplanation())
+                    }
                 }
             }
 
@@ -664,6 +671,23 @@ struct PlannerView: View {
             cursor = next
         }
         return total
+    }
+
+    /// Which allocations lost the race for the hours that remain, and by how much.
+    ///
+    /// Stated in the tooltip because it is a policy, not a fact: the days left are filled in order and each
+    /// allocation is served by how much it needs PER REMAINING DAY, so whatever is furthest behind gets the
+    /// scarce hours and the rest take what's left. Nothing is shaved evenly off everything — that leaves
+    /// every allocation slightly short and none of them decidable.
+    private func droppedExplanation() -> String {
+        var lines = ["These hours don't fit in the days that remain."]
+        for (id, seconds) in dailyPlan.unplaced.sorted(by: { $0.value > $1.value }) {
+            lines.append("  \(name(forTarget: id))  \(hours(seconds))")
+        }
+        lines.append("")
+        lines.append("Whatever needs the most hours per remaining day is served first, so the rest take "
+                     + "what's left rather than every allocation losing a little.")
+        return lines.joined(separator: "\n")
     }
 
     private func figure(_ label: String, _ seconds: TimeInterval, _ tint: Color) -> some View {
@@ -1190,6 +1214,12 @@ struct PlannerView: View {
                 }
             }
 
+            // Slivers collapse. With fifteen allocations a day becomes a stack of unlabelled two-pixel
+            // bands — the arithmetic stays right and the column stops being readable, which is its own
+            // kind of wrong. Anything under twenty minutes joins one block per kind, named for how many
+            // it stands for, with the detail in its tooltip.
+            blobs = Self.collapsingSlivers(blobs)
+
             out.append(PlannerWeekGrid.DayInput(
                 weekday: weekday, label: names[weekday - 1],
                 dayOfMonth: dayStart == startOfToday || !(showIntended || isFuture)
@@ -1198,6 +1228,46 @@ struct PlannerView: View {
                 isToday: dayStart == startOfToday && !isFuture,
                 blobs: blobs))
         }
+        return out
+    }
+
+    /// Merge blobs too small to label into one per kind, preserving their order and total.
+    ///
+    /// The threshold is twenty minutes: below that a block can't hold its own name at any window width, and
+    /// a column of anonymous slivers says less than a single block that admits there are six of them.
+    static func collapsingSlivers(_ blobs: [PlannerWeekGrid.Blob]) -> [PlannerWeekGrid.Blob] {
+        let floorHours = 20.0 / 60
+        var out: [PlannerWeekGrid.Blob] = []
+        var pending: [PlannerWeekGrid.Kind: [PlannerWeekGrid.Blob]] = [:]
+
+        func flush(_ kind: PlannerWeekGrid.Kind) {
+            guard let group = pending[kind], !group.isEmpty else { return }
+            pending[kind] = nil
+            if group.count == 1 {
+                out.append(group[0])
+                return
+            }
+            let total = group.reduce(0.0) { $0 + $1.hours }
+            out.append(PlannerWeekGrid.Blob(
+                targetID: -4, name: "\(group.count) small",
+                hours: total, colorHex: "#8E8E93", kind: kind,
+                detail: group.sorted { $0.hours > $1.hours }.map {
+                    "  \($0.name)  " + (($0.hours * 60) >= 1
+                                       ? "\(Int(($0.hours * 60).rounded()))m" : "<1m")
+                }))
+        }
+
+        for blob in blobs {
+            if blob.hours < floorHours, blob.kind != .reserved, blob.kind != .untracked {
+                pending[blob.kind, default: []].append(blob)
+                continue
+            }
+            // A block big enough to stand alone closes any group of its own kind, so the collapsed block
+            // stays where its members were rather than drifting to the top of the column.
+            flush(blob.kind)
+            out.append(blob)
+        }
+        for kind in [PlannerWeekGrid.Kind.tracked, .unallocated, .owed] { flush(kind) }
         return out
     }
 

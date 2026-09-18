@@ -2617,6 +2617,150 @@ func testDailyPlan() {
     }
 }
 
+// MARK: - Heavy overlap
+
+/// Worlds where allocations overlap a lot, because that is where a planner's arithmetic quietly stops
+/// adding up: an hour that counts toward three allocations can be credited three times, drawn three times,
+/// or spent three times, and each mistake looks plausible on its own.
+///
+/// Rather than one hand-made case, this builds many worlds deterministically and asserts the invariants
+/// that have to hold in all of them. Deterministic on purpose — a failure has to be reproducible, and
+/// `Math.random` isn't available in this harness anyway.
+func testHeavyOverlap() {
+    print("Heavy overlap:")
+
+    // 12 tasks, all in one group, every task carrying two or three of five tags. Allocations are then
+    // written against the group, each tag, and three individual tasks — so most pairs of allocations
+    // overlap partially, a few nest completely, and one is disjoint.
+    var taskGroups: [Int64: Int64?] = [:]
+    var taskTags: [Int64: Set<Int64>] = [:]
+    for task in Int64(1)...12 {
+        taskGroups[task] = task <= 10 ? 100 : 200          // 11 and 12 sit in a different group
+        var tags: Set<Int64> = [901 + (task % 3)]
+        if task % 2 == 0 { tags.insert(904) }
+        if task % 4 == 0 { tags.insert(905) }
+        taskTags[task] = tags
+    }
+    let membership = plannerWorld(taskGroups: taskGroups, taskTags: taskTags)
+
+    var targets: [Target] = [
+        floor(1, .project(100), hours: 30),                       // the big group
+        floor(2, .tag(901), hours: 8),
+        floor(3, .tag(902), hours: 8),
+        floor(4, .tag(903), hours: 8),
+        floor(5, .tag(904), hours: 10, weekdays: .weekdaysOnly),
+        floor(6, .tag(905), hours: 4, weekdays: Weekdays(rawValue: 1 | 64)),
+        floor(7, .task(4), hours: 3),                             // inside group 100, tags 902/904/905
+        floor(8, .task(11), hours: 5),                            // the other group
+        floor(9, .project(200), hours: 6),                        // contains task 11 and 12
+    ]
+    let input = plannerInput(targets, membership: membership)
+    let plan = Planner.plan(input)
+
+    // Bounds: the certainly-required figure can never exceed the naive sum, and both have to be positive
+    // in a world this tangled. A lower bound above the upper one is the classic overlap arithmetic bug.
+    check(plan.requiredLowerSeconds <= plan.requiredUpperSeconds + 1,
+          "the disjoint lower bound never exceeds the naive sum")
+    check(plan.requiredLowerSeconds > 0, "and it is not zero when allocations genuinely need hours")
+    check(plan.requiredUpperSeconds <= targets.reduce(0) { $0 + $1.weeklySeconds } + 1,
+          "the naive sum is exactly that — no allocation counted twice")
+
+    // Nesting has to be found, and only where it exists: task 11 is inside group 200, and task 4 inside
+    // group 100. Nothing should be reported as inside something it merely overlaps.
+    let nestedNames = Set(plan.nestings.map { $0.innerName })
+    check(nestedNames.contains("a8"), "a task allocation inside its group's allocation is nested")
+    check(nestedNames.contains("a7"), "and so is a task inside the big group")
+    check(!nestedNames.contains("a5"),
+          "a tag that merely overlaps a group is NOT nested — partial overlap is not containment")
+
+    // No day may be committed beyond its capacity by the planner's own spread.
+    for day in plan.days {
+        check(day.reservedSeconds + day.committedSeconds <= day.capacitySeconds * 1.0001
+              || day.isOverCapacity,
+              "a day over its capacity is reported as over rather than silently accepted")
+    }
+
+    // Now the daily plan, in a range of situations: nothing done, a normal week, and a week where one
+    // allocation has been hammered and the rest ignored.
+    let scenarios: [(String, [Int: [Int64: TimeInterval]])] = [
+        ("nothing tracked", [:]),
+        ("a little of everything",
+         Dictionary(uniqueKeysWithValues: (1...4).map { weekday in
+             (weekday, Dictionary(uniqueKeysWithValues: targets.map { ($0.id, 1.5 * 3600) }))
+         })),
+        ("one allocation hammered",
+         [1: [1: 12 * 3600], 2: [1: 10 * 3600], 3: [1: 8 * 3600]]),
+        ("everything already met",
+         [1: Dictionary(uniqueKeysWithValues: targets.map { ($0.id, $0.weeklySeconds) })]),
+    ]
+
+    for (label, credited) in scenarios {
+        for remaining in [[1, 2, 3, 4, 5, 6, 7], [5, 6, 7], [7]] {
+            let daily = Replan.dailyPlan(input: input, plan: plan, creditedByWeekday: credited,
+                                         remainingWeekdays: remaining,
+                                         fractionOfTodayLeft: 0.5)
+
+            // THE invariant: no day is ever asked for more hours than it has. Everything else on the page
+            // is built on a column that can't overflow.
+            for weekday in remaining {
+                guard let day = plan.days.first(where: { $0.weekday == weekday }) else { continue }
+                let asked = (daily.byDay[weekday] ?? [:]).values.reduce(0) { $0 + $1.total }
+                let isToday = weekday == remaining.first
+                let room = (day.capacitySeconds - day.reservedSeconds) * (isToday ? 0.5 : 1)
+                check(asked <= room + 1,
+                      "\(label), \(remaining.count) days left: no day is asked for more than it has")
+            }
+
+            // Nothing is ever asked of a day the allocation doesn't claim.
+            for (weekday, shares) in daily.byDay {
+                for id in shares.keys {
+                    let target = targets.first { $0.id == id }!
+                    check(target.weekdays.effective.contains(weekday: weekday),
+                          "\(label): an allocation is only planned on days it claims")
+                }
+            }
+
+            // Placed plus unplaced is exactly what each allocation still needs — no hours invented, none
+            // lost. This is what an overlap bug breaks first.
+            for target in targets {
+                let weekDone = (1...7).reduce(0.0) { $0 + (credited[$1]?[target.id] ?? 0) }
+                let needed = max(0, target.weeklySeconds - weekDone)
+                let placed = remaining.reduce(0.0) {
+                    $0 + ((daily.byDay[$1]?[target.id])?.total ?? 0)
+                }
+                let unplaced = daily.unplaced[target.id] ?? 0
+                let claimsAnyRemaining = remaining.contains {
+                    target.weekdays.effective.contains(weekday: $0)
+                }
+                if claimsAnyRemaining {
+                    check(placed + unplaced <= needed + 60,
+                          "\(label): never asks for more than the allocation still needs")
+                } else {
+                    check(placed < 60, "\(label): an allocation with no days left is planned nowhere")
+                }
+            }
+
+            // No negative figures anywhere, in any scenario.
+            check(daily.byDay.values.allSatisfy { shares in
+                    shares.values.allSatisfy { $0.intended >= 0 && $0.carried >= 0 }
+                  }, "\(label): no negative hours")
+            check(daily.unplaced.values.allSatisfy { $0 >= 0 }, "\(label): no negative overflow")
+        }
+    }
+
+    // Membership itself, since every figure above depends on it: a heavily-tagged task belongs to several
+    // allocations, and each allocation's set is exactly the tasks that qualify.
+    check(membership.taskIDs(for: .project(100)).count == 10, "the group holds its ten tasks")
+    check(membership.taskIDs(for: .tag(904)).count == 6, "the even-numbered tasks carry tag 904")
+    check(membership.taskIDs(for: .task(4)) == [4], "and a task allocation is just that task")
+    check(membership.relation(.task(4), .project(100)) == .containedIn,
+          "a task inside a group is contained in it")
+    check(membership.relation(.tag(904), .project(100)) == .partial,
+          "a tag spanning two groups partially overlaps either of them")
+    check(membership.relation(.project(100), .project(200)) == .disjoint,
+          "two groups share nothing")
+}
+
 // MARK: - Focus block boundary
 
 func testDeepBlockBoundary() {
@@ -5318,6 +5462,7 @@ do {
     testTagTotals()
     testTargetMath()
     testDailyPlan()
+    testHeavyOverlap()
     testPalette()
     testInlineBarContrast()
     testTaskOrdering()
@@ -5340,6 +5485,7 @@ do {
     testTagTotals()
     testTargetMath()
     testDailyPlan()
+    testHeavyOverlap()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1

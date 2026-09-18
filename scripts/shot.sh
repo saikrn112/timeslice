@@ -21,7 +21,8 @@ sleep 0.4
 
 # Against a COPY of the database. The app syncs and can write on launch, and a screenshot must not be
 # able to change your data. WAL sidecars have to come along or the copy is missing recent commits.
-SRC="$HOME/Library/Application Support/Timeslice/timeslice.db"
+# DB_SRC lets a stress run point at a doctored copy instead of your real database.
+SRC="${DB_SRC:-$HOME/Library/Application Support/Timeslice/timeslice.db}"
 SHOT_DB="/tmp/timeslice-shot/timeslice.db"
 mkdir -p /tmp/timeslice-shot
 if [ -f "$SRC" ]; then
