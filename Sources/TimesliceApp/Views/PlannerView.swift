@@ -759,8 +759,8 @@ struct PlannerView: View {
         guard unit == .week, !showIntended else { return [:] }
         let dayNamesShort = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
         if method == .perDay {
-            // One pool entry per day that fell short, under that day. This is the whole difference the
-            // method makes visible: a miss belongs to the day that missed it.
+            // One entry per day that fell short, under that day — the whole point of the method. On a
+            // finished week every claimed day is a candidate, because none of them are still to come.
             var out: [Int: [PlannerWeekGrid.Blob]] = [:]
             for (weekday, shorts) in missedByDay {
                 for (id, seconds) in shorts where seconds > 60 {
@@ -775,28 +775,6 @@ struct PlannerView: View {
             }
             return out.mapValues { $0.sorted { $0.hours > $1.hours } }
         }
-        // A finished week has a pool too, and it's the more useful one: what never happened. There is no
-        // scheduling left to do, so it's simply each allocation's shortfall, filed under the last day it
-        // claimed — where the chance to do it ran out.
-        if offset > 0 {
-            let dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-            var out: [Int: [PlannerWeekGrid.Blob]] = [:]
-            for target in targets
-            where target.direction == .atLeast && !nestedIDs.contains(target.id) {
-                let missed = max(0, target.weeklySeconds - (periodActuals[target.id] ?? 0))
-                guard missed > 60 else { continue }
-                let claimed = (1...7).filter { target.weekdays.effective.contains(weekday: $0) }
-                guard let day = claimed.last else { continue }
-                out[day, default: []].append(PlannerWeekGrid.Blob(
-                    targetID: target.id, name: name(forTarget: target.id), hours: missed / 3600,
-                    colorHex: colorHex(forTarget: target.id), kind: .owed,
-                    detail: ["  never happened — \(hours(periodActuals[target.id] ?? 0)) of "
-                             + "\(hours(target.weeklySeconds)) done",
-                             "  \(dayNames[day - 1]) was its last day that week"]))
-            }
-            return out.mapValues { $0.sorted { $0.hours > $1.hours } }
-        }
-        guard offset == 0 else { return [:] }
         let dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
         var out: [Int: [PlannerWeekGrid.Blob]] = [:]
 
@@ -1130,76 +1108,29 @@ struct PlannerView: View {
         }
 
 
-        var byDay: [Int: [Int64: TimeInterval]] = [:]
-        var otherByDay: [Int: TimeInterval] = [:]
-        var totalByDay: [Int: TimeInterval] = [:]
-        var weekTotals: [Int64: TimeInterval] = [:]
-        // weekday → allocation id (or -2 for unallocated) → task name → seconds. Feeds the blob tooltips,
-        // so hovering "unallocated 2.4h" can say which tasks that actually was.
-        var breakdown: [Int: [Int64: [String: TimeInterval]]] = [:]
-        var uncovered: [Int: Set<Int64>] = [:]
-        /// weekday → allocation → every second that counts toward it, overlaps included. Distinct from
-        /// `byDay`, which gives each hour to ONE allocation so a day's blobs can't sum past the day.
-        var creditByDay: [Int: [Int64: TimeInterval]] = [:]
         let taskNamesByID = Dictionary(tasks.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
-        for interval in intervals {
-            let start = max(interval.start, week.start)
-            let end = min(interval.end ?? now, week.end)
-            guard end > start else { continue }
-            let seconds = end.timeIntervalSince(start)
-            let weekday = cal.component(.weekday, from: start)
-            totalByDay[weekday, default: 0] += seconds
-            let taskName = taskNamesByID[interval.projectID] ?? "?"
-            var claimed = false
-            for (id, ids) in idsBySubject where ids.contains(interval.projectID) {
-                // Every allocation that covers this work counts it — a task inside both `vllm` and `office`
-                // is genuine progress on both, and their PROGRESS BARS should each say so.
-                weekTotals[id, default: 0] += seconds
-                // Per day, too: what an allocation still OWES has to be measured against everything that
-                // counts toward it. Using the primary attribution below made today's office read 5.6h left
-                // when an hour and a half of kvcache — office work that vllm also covers — had already
-                // gone to it.
-                creditByDay[weekday, default: [:]][id, default: 0] += seconds
-                claimed = true
-            }
-            // The day GRID is a different question: how the day was spent. There, an hour can only be
-            // spent once, so it goes to the most specific allocation that covers it. Counting it under both
-            // made a day of blobs add up to more hours than the day had, and the column over-filled.
-            if let primary = owner(interval.projectID) {
-                byDay[weekday, default: [:]][primary, default: 0] += seconds
-                breakdown[weekday, default: [:]][primary, default: [:]][taskName, default: 0] += seconds
-            }
-            // Hours on something no allocation covers. Shown in the grid because a day that went
-            // somewhere unplanned is the commonest reason a plan didn't happen.
-            if !claimed {
-                otherByDay[weekday, default: 0] += seconds
-                breakdown[weekday, default: [:]][-2, default: [:]][taskName, default: 0] += seconds
-                uncovered[weekday, default: []].insert(interval.projectID)
-            }
-        }
-        actuals = byDay
-        unallocated = otherByDay
-        unallocatedTaskIDs = uncovered.mapValues { Array($0) }
-        actualTotals = totalByDay
 
-        // The viewed window's own totals, which is what the goal rows read. Separate from the weekly
-        // figures above because the window can be a month, or a week that has already gone.
+        // The current week, through the same Core function the viewed week uses. This loop used to be
+        // written out here AND again below for the browsed week, and the copies drifted.
+        let weekFacts = PlannerWeek.facts(intervals: intervals, window: week, floors: floors,
+                                          membership: membership, nested: nested,
+                                          taskNames: taskNamesByID, now: now, calendar: cal)
+        actuals = weekFacts.mapValues { $0.primary }
+        unallocated = weekFacts.mapValues { $0.unallocated }
+        unallocatedTaskIDs = weekFacts.mapValues { Array($0.uncoveredTaskIDs) }
+        actualTotals = weekFacts.mapValues { $0.total }
+        let creditByDay = PlannerWeek.creditedByWeekday(weekFacts)
+        let weekTotals = PlannerWeek.creditedTotals(weekFacts)
+
+        // The viewed window's own totals, which is what the goal rows read. Separate from the weekly figures
+        // above because the window can be a month, or a week that has already gone.
         if let window = periodWindow() {
             let inWindow = (try? store.intervals(from: window.start, to: window.end)) ?? []
-            var scoped: [Int64: TimeInterval] = [:]
-            var total: TimeInterval = 0
-            for interval in inWindow {
-                let start = max(interval.start, window.start)
-                let end = min(interval.end ?? now, window.end)
-                guard end > start else { continue }
-                let seconds = end.timeIntervalSince(start)
-                total += seconds
-                for (id, ids) in idsBySubject where ids.contains(interval.projectID) {
-                    scoped[id, default: 0] += seconds
-                }
-            }
-            periodActuals = scoped
-            periodTracked = total
+            let windowFacts = PlannerWeek.facts(intervals: inWindow, window: window, floors: floors,
+                                                membership: membership, taskNames: taskNamesByID,
+                                                now: now, calendar: cal)
+            periodActuals = PlannerWeek.creditedTotals(windowFacts)
+            periodTracked = windowFacts.values.reduce(0) { $0 + $1.total }
         }
 
         let computed = Replan.compute(plan: built, input: input, actuals: weekTotals,
@@ -1209,33 +1140,6 @@ struct PlannerView: View {
                                           now: now, wakingSeconds: settings.wakingSeconds,
                                           calendar: cal))
         replan = computed
-
-        // What each remaining day is asked to do: its own share, plus anything moved onto it because
-        // another day was missed or had run out of hours. One pass, after the credited totals exist.
-        // For the current week, the days that remain. For a finished one, ALL of its days — "catch up" then
-        // reads as a retrospective: given the whole week, where would the shortfall have had to go, and what
-        // could never have fitted. Forcing history to one method removed a question worth asking.
-        let schedulable = offset == 0 ? Array(today...7) : Array(1...7)
-        switch method {
-        case .catchUp:
-            dailyPlan = Replan.dailyPlan(input: input, plan: built, creditedByWeekday: creditByDay,
-                                         remainingWeekdays: schedulable,
-                                         fractionOfTodayLeft: offset == 0
-                                             ? Replan.fractionOfDayLeft(
-                                                 now: now, wakingSeconds: settings.wakingSeconds,
-                                                 calendar: cal)
-                                             : 1,
-                                         skipping: nested)
-            missedByDay = [:]
-        case .perDay:
-            // Nothing moves: each day owes its own share, and a past day's shortfall is recorded against
-            // that day rather than becoming somebody else's Friday.
-            let simple = Replan.perDayPlan(input: input, creditedByWeekday: creditByDay,
-                                           remainingWeekdays: offset == 0 ? Array(today...7) : [],
-                                           skipping: nested)
-            dailyPlan = Replan.DailyPlan(byDay: simple.byDay, unplaced: [:])
-            missedByDay = simple.missedByDay
-        }
 
         // Who else counts an allocation's hours. With the grid attributing an hour to the most specific
         // allocation, `vllm` work no longer appears under `office` in the columns — while office's progress
@@ -1257,42 +1161,46 @@ struct PlannerView: View {
 
         if unit == .week {
             let viewed = periodWindow() ?? week
-            // Per weekday, for the week being LOOKED AT. `actuals` above is always the current week, so
-            // stepping back drew this week's blobs under last week's dates — the same numbers, the wrong
-            // heading, which is worse than showing nothing.
-            var viewedByDay: [Int: [Int64: TimeInterval]] = [:]
-            var viewedOther: [Int: TimeInterval] = [:]
-            var viewedBreakdown: [Int: [Int64: [String: TimeInterval]]] = [:]
+            // One assembly step, from Core, for whichever week is on screen — see `PlannerWeek.facts`. Two
+            // copies of this loop is what let a finished week be scheduled from the CURRENT week's hours.
+            let viewedFacts: [Int: PlannerWeek.DayFacts]
             if offset == 0 {
-                viewedByDay = byDay
-                viewedOther = otherByDay
-                viewedBreakdown = breakdown
+                viewedFacts = weekFacts
             } else {
-                for interval in (try? store.intervals(from: viewed.start, to: viewed.end)) ?? [] {
-                    let start = max(interval.start, viewed.start)
-                    let end = min(interval.end ?? now, viewed.end)
-                    guard end > start else { continue }
-                    let seconds = end.timeIntervalSince(start)
-                    let weekday = cal.component(.weekday, from: start)
-                    let taskName = taskNamesByID[interval.projectID] ?? "?"
-                    var claimed = false
-                    for (id, ids) in idsBySubject where ids.contains(interval.projectID) {
-                        viewedByDay[weekday, default: [:]][id, default: 0] += seconds
-                        viewedBreakdown[weekday, default: [:]][id, default: [:]][taskName,
-                                                                                default: 0] += seconds
-                        claimed = true
-                    }
-                    if !claimed {
-                        viewedOther[weekday, default: 0] += seconds
-                        viewedBreakdown[weekday, default: [:]][-2, default: [:]][taskName,
-                                                                                default: 0] += seconds
-                    }
-                }
+                let past = (try? store.intervals(from: viewed.start, to: viewed.end)) ?? []
+                viewedFacts = PlannerWeek.facts(intervals: past, window: viewed, floors: floors,
+                                                membership: membership, nested: nested,
+                                                taskNames: taskNamesByID, now: now, calendar: cal)
             }
+            // And the plan for that week is built from that week's own credited hours.
+            let viewedCredits = PlannerWeek.creditedByWeekday(viewedFacts)
+            let schedulable = offset == 0 ? Array(today...7) : Array(1...7)
+            switch method {
+            case .catchUp:
+                dailyPlan = Replan.dailyPlan(input: input, plan: built,
+                                             creditedByWeekday: viewedCredits,
+                                             remainingWeekdays: schedulable,
+                                             fractionOfTodayLeft: offset == 0
+                                                 ? Replan.fractionOfDayLeft(
+                                                     now: now, wakingSeconds: settings.wakingSeconds,
+                                                     calendar: cal)
+                                                 : 1,
+                                             skipping: nested)
+                missedByDay = [:]
+            case .perDay:
+                let simple = Replan.perDayPlan(input: input, creditedByWeekday: viewedCredits,
+                                               remainingWeekdays: offset == 0 ? Array(today...7) : [],
+                                               skipping: nested)
+                dailyPlan = Replan.DailyPlan(byDay: simple.byDay, unplaced: [:])
+                missedByDay = simple.missedByDay
+            }
+
             calendarDays = buildWeekColumns(week: viewed, replan: computed, nested: nested,
-                                            dayActuals: viewedByDay, dayOther: viewedOther,
-                                            dayCredit: offset == 0 ? creditByDay : viewedByDay,
-                                            breakdown: viewedBreakdown, alsoCounts: alsoCounts,
+                                            dayActuals: viewedFacts.mapValues { $0.primary },
+                                            dayOther: viewedFacts.mapValues { $0.unallocated },
+                                            dayCredit: viewedCredits,
+                                            breakdown: viewedFacts.mapValues { $0.breakdown },
+                                            alsoCounts: alsoCounts,
                                             calendar: cal)
             monthWeeks = []
         } else {

@@ -2621,6 +2621,98 @@ func testDailyPlan() {
     }
 }
 
+// MARK: - Planner week facts
+
+/// The week-assembly step, which used to live in the view in two copies that drifted apart. These are the
+/// checks that would have caught every one of the regressions it produced.
+func testPlannerWeekFacts() {
+    print("Planner week facts:")
+    let calendar = Calendar.current
+    func at(_ day: Int, _ hour: Int) -> Date {
+        calendar.date(from: DateComponents(year: 2026, month: 9, day: day, hour: hour))!
+    }
+    // Sun 13 Sep 2026 through Sat 19.
+    let thisWeek = DateInterval(start: at(13, 0), end: at(20, 0))
+    let lastWeek = DateInterval(start: at(6, 0), end: at(13, 0))
+
+    // Tasks 1 and 2 in group 10; task 1 also tagged 99; task 3 covered by nothing.
+    let membership = plannerWorld(taskGroups: [1: 10, 2: 10, 3: nil], taskTags: [1: [99]])
+    let group = floor(100, .project(10), hours: 14)      // covers tasks 1 and 2
+    let tag = floor(200, .tag(99), hours: 7)             // covers task 1 only — narrower
+    let floors = [group, tag]
+    let names: [Int64: String] = [1: "one", 2: "two", 3: "three"]
+
+    // Monday of each week: 2h on task 1, 1h on task 3.
+    let intervals = [
+        Interval(id: 1, projectID: 1, start: at(14, 9), end: at(14, 11)),
+        Interval(id: 2, projectID: 3, start: at(14, 12), end: at(14, 13)),
+        Interval(id: 3, projectID: 1, start: at(7, 9), end: at(7, 14)),      // 5h, LAST week
+    ]
+
+    let this = PlannerWeek.facts(intervals: intervals, window: thisWeek, floors: floors,
+                                 membership: membership, taskNames: names, calendar: calendar)
+    let monday = this[2] ?? PlannerWeek.DayFacts()
+
+    // Credited: both allocations get the two hours, because both cover task 1.
+    check(approx((monday.credited[100] ?? 0) / 3600, 2, 0.01),
+          "the group is credited work on a task it covers")
+    check(approx((monday.credited[200] ?? 0) / 3600, 2, 0.01),
+          "and so is the tag covering the same task — an hour is progress on both")
+
+    // Primary: exactly one of them owns it, the narrower.
+    check(monday.primary[100] == nil, "but only the narrowest allocation OWNS the hour")
+    check(approx((monday.primary[200] ?? 0) / 3600, 2, 0.01), "which is the tag, covering one task")
+    check(approx(monday.primary.values.reduce(0, +) / 3600, 2, 0.01),
+          "so the owned hours of a day never exceed what was tracked")
+
+    // Work no allocation covers is its own category, with the task recorded for the hand-off to Metrics.
+    check(approx(monday.unallocated / 3600, 1, 0.01), "uncovered work is counted separately")
+    check(monday.uncoveredTaskIDs == [3], "and the task behind it is named")
+    check(approx(monday.total / 3600, 3, 0.01), "the day's total is everything tracked in it")
+
+    // THE REGRESSION: a window is a window. Last week's five hours must not appear in this week, and this
+    // week's must not appear in last — the planner once scheduled a finished week using the CURRENT week's
+    // hours, and reported 25h as unplaceable while every day showed room.
+    check(this.values.allSatisfy { $0.credited[100] ?? 0 <= 2 * 3600 + 1 },
+          "no interval from outside the window leaks in")
+    let last = PlannerWeek.facts(intervals: intervals, window: lastWeek, floors: floors,
+                                 membership: membership, taskNames: names, calendar: calendar)
+    check(approx((last[2]?.credited[100] ?? 0) / 3600, 5, 0.01),
+          "and last week's Monday reports its own five hours")
+    check((last[2]?.unallocated ?? 0) < 60, "with none of this week's uncovered work")
+
+    // Nested allocations are credited but never own — otherwise their hours are counted in a day's total
+    // and drawn nowhere, which is how a column came to disagree with its own untracked figure.
+    let nested = PlannerWeek.facts(intervals: intervals, window: thisWeek, floors: floors,
+                                   membership: membership, nested: [200],
+                                   taskNames: names, calendar: calendar)
+    check(approx((nested[2]?.credited[200] ?? 0) / 3600, 2, 0.01),
+          "a nested allocation is still credited its own work")
+    check(approx((nested[2]?.primary[100] ?? 0) / 3600, 2, 0.01),
+          "and the hour falls to the parent rather than vanishing")
+    check(nested[2]?.primary[200] == nil, "the nested one owns nothing")
+
+    // An interval straddling the window edge is clipped, not counted whole or dropped.
+    let straddling = [Interval(id: 9, projectID: 1, start: at(12, 22), end: at(13, 2))]
+    let clipped = PlannerWeek.facts(intervals: straddling, window: thisWeek, floors: floors,
+                                    membership: membership, taskNames: names, calendar: calendar)
+    check(approx((clipped[1]?.total ?? 0) / 3600, 2, 0.01),
+          "only the part inside the window counts")
+
+    // A running interval (no end) is measured to `now`, not treated as zero.
+    let running = [Interval(id: 10, projectID: 1, start: at(14, 9), end: nil)]
+    let live = PlannerWeek.facts(intervals: running, window: thisWeek, floors: floors,
+                                 membership: membership, taskNames: names,
+                                 now: at(14, 12), calendar: calendar)
+    check(approx((live[2]?.total ?? 0) / 3600, 3, 0.01), "a running interval counts up to now")
+
+    // The totals helpers agree with the per-day facts, since two callers read them.
+    let totals = PlannerWeek.creditedTotals(this)
+    check(approx((totals[200] ?? 0) / 3600, 2, 0.01), "credited totals sum the days")
+    check(PlannerWeek.creditedByWeekday(this)[2]?[200] == monday.credited[200],
+          "and the by-weekday shape is the same numbers")
+}
+
 // MARK: - Dormancy
 
 func testDormancy() {
@@ -5615,6 +5707,7 @@ do {
     testTagTotals()
     testTargetMath()
     testDailyPlan()
+    testPlannerWeekFacts()
     testDormancy()
     testPerDayPlan()
     testPrimaryOwner()
@@ -5641,6 +5734,7 @@ do {
     testTagTotals()
     testTargetMath()
     testDailyPlan()
+    testPlannerWeekFacts()
     testDormancy()
     testPerDayPlan()
     testPrimaryOwner()
