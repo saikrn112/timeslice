@@ -88,11 +88,31 @@ final class AppState: ObservableObject {
         allProjectsCache = (try? store.listProjects(includeArchived: true)) ?? []
         taskProjects = (try? store.listTaskProjects()) ?? []
         reloadTags()
+        recomputeDormancy()
         recomputeTotals()
         // Keep selection on an existing active task.
         if selectedProjectID == nil || !projects.contains(where: { $0.id == selectedProjectID }) {
             selectedProjectID = projects.first?.id
         }
+    }
+
+    /// Which tasks have gone quiet, and for how long.
+    ///
+    /// The threshold is read from `AppSettings` at the time of the reload rather than injected, so changing
+    /// it takes effect on the next reload without this type needing to observe the settings object.
+    private func recomputeDormancy() {
+        // A capture run can force a threshold, so the quiet state is reviewable on a database where
+        // everything has been touched this month.
+        let days = ProcessInfo.processInfo.environment["TIMESLICE_DORMANT_DAYS"].flatMap { Int($0) }
+            ?? UserDefaults.standard.object(forKey: "dormantAfterDays") as? Int ?? 30
+        let activity = (try? store.lastActivityByProject()) ?? [:]
+        dormantTaskIDs = Dormancy.dormantTaskIDs(lastActivity: activity, tasks: projects,
+                                                 afterDays: days)
+        var quiet: [Int64: Int] = [:]
+        for task in projects {
+            quiet[task.id] = Dormancy.daysSince(activity[task.id]) ?? -1
+        }
+        quietDaysByTask = quiet
     }
 
     /// Tags a project carries, for display on its header row.
@@ -108,6 +128,13 @@ final class AppState: ObservableObject {
     /// sits under: repeating "office" on all nine of that project's tasks would be nine copies of one
     /// fact. What a task row can't otherwise tell you is the tag it carries on top of that.
     @Published private(set) var ownTagsByTask: [Int64: [Tag]] = [:]
+    /// Tasks nothing has been tracked against for `AppSettings.dormantAfterDays`.
+    ///
+    /// Derived on every reload rather than stored — see `Dormancy`. Held here so the list doesn't run the
+    /// query per row.
+    @Published private(set) var dormantTaskIDs: Set<Int64> = []
+    /// Task id → days since it was last tracked, for the row's tooltip.
+    @Published private(set) var quietDaysByTask: [Int64: Int] = [:]
 
     private func reloadTags() {
         allTags = (try? store.listTags()) ?? []

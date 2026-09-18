@@ -26,6 +26,19 @@ public final class AppSettings: ObservableObject {
     /// Minimum unbroken session length (seconds) that counts as a "deep block" for Focus %.
     /// SYNCED: it decides what counts as focused, so two devices with different values disagree
     /// about the same recorded day.
+    /// Days of silence after which a task is treated as dormant. 0 turns it off.
+    ///
+    /// Dormancy is DERIVED, never stored: a task is dormant if nothing was tracked against it for this
+    /// long, and the moment you track it again it isn't. That avoids a stored flag needing a background job
+    /// to set it, a migration to add it, and a sync conflict when two devices disagree about when it went
+    /// quiet.
+    @Published public var dormantAfterDays: Int {
+        didSet {
+            defaults.set(dormantAfterDays, forKey: Keys.dormantAfterDays)
+            publishSynced(Keys.dormantAfterDays, String(dormantAfterDays))
+        }
+    }
+
     @Published public var deepBlockMinutes: Int {
         didSet {
             defaults.set(deepBlockMinutes, forKey: Keys.deepBlockMinutes)
@@ -159,6 +172,7 @@ public final class AppSettings: ObservableObject {
     public var idleNudgeSeconds: TimeInterval { nudgeConfig.pausedSeconds }
 
     public init() {
+        dormantAfterDays = defaults.object(forKey: Keys.dormantAfterDays) as? Int ?? 30
         deepBlockMinutes = defaults.object(forKey: Keys.deepBlockMinutes) as? Int ?? 25
         autoPauseMinutes = defaults.object(forKey: Keys.autoPauseMinutes) as? Int ?? 60
         idleNudgeMinutes = defaults.object(forKey: Keys.idleNudgeMinutes) as? Int ?? 15
@@ -214,6 +228,7 @@ public final class AppSettings: ObservableObject {
          (Keys.idleNudgeMinutes, String(idleNudgeMinutes)),
          (Keys.promptsEnabled, promptsEnabled ? "1" : "0"),
          (Keys.deepBlockMinutes, String(deepBlockMinutes)),
+         (Keys.dormantAfterDays, String(dormantAfterDays)),
          (Keys.wakingHours, String(wakingHours)),
          (Keys.highlightDimPercent, String(highlightDimPercent))]
     }
@@ -246,6 +261,10 @@ public final class AppSettings: ObservableObject {
         }
         // The capture override wins over the stored value: adopting from the database put the real 14h
         // straight back, so `WAKING=5 scripts/shot.sh` silently rendered the ordinary page.
+        if let row = (try? store.settingValue(Keys.dormantAfterDays)) ?? nil,
+           let n = Int(row.value), n != dormantAfterDays {
+            dormantAfterDays = n
+        }
         if Self.wakingHoursOverride == nil,
            let row = (try? store.settingValue(Keys.wakingHours)) ?? nil,
            let n = Double(row.value), n != wakingHours {
@@ -259,6 +278,7 @@ public final class AppSettings: ObservableObject {
 
     private enum Keys {
         static let deepBlockMinutes = "deepBlockMinutes"
+        static let dormantAfterDays = "dormantAfterDays"
         static let autoPauseMinutes = "autoPauseMinutes"
         static let idleNudgeMinutes = "idleNudgeMinutes"
         static let promptsEnabled = "promptsEnabled"

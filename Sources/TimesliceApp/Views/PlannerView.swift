@@ -93,6 +93,9 @@ struct PlannerView: View {
            let parsed = Replan.Method(rawValue: forced.replacingOccurrences(of: "-", with: " ")) {
             return parsed
         }
+        // A week that has gone has no days to reallocate into, so "catch up" has nothing to say about it.
+        // Past weeks read per-day whatever the setting is, rather than offering a choice with one answer.
+        if offset > 0 { return .perDay }
         return Replan.Method(rawValue: methodRaw) ?? .catchUp
     }
     @State private var showAllocations = false
@@ -588,7 +591,7 @@ struct PlannerView: View {
     /// to reallocate — the plan as designed is the same under either method.
     @ViewBuilder
     private var methodToggle: some View {
-        if !showIntended {
+        if !showIntended, offset == 0 {
             HStack(spacing: 3) {
                 ForEach(Replan.Method.allCases, id: \.rawValue) { candidate in
                     let selected = method == candidate

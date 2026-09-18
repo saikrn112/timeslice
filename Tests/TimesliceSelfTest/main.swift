@@ -2621,6 +2621,46 @@ func testDailyPlan() {
     }
 }
 
+// MARK: - Dormancy
+
+func testDormancy() {
+    print("Dormancy:")
+    let calendar = Calendar.current
+    let now = calendar.date(from: DateComponents(year: 2026, month: 9, day: 18, hour: 10))!
+    func daysAgo(_ n: Int) -> Date { calendar.date(byAdding: .day, value: -n, to: now)! }
+
+    func task(_ id: Int64, finished: Bool = false, archived: Bool = false) -> Project {
+        Project(id: id, name: "t\(id)", colorHex: "#fff", sortOrder: 0, archived: archived,
+                finished: finished)
+    }
+    let tasks = [task(1), task(2), task(3), task(4, finished: true), task(5, archived: true)]
+    let activity: [Int64: Date] = [1: daysAgo(2), 2: daysAgo(30), 4: daysAgo(90), 5: daysAgo(90)]
+
+    let dormant = Dormancy.dormantTaskIDs(lastActivity: activity, tasks: tasks, afterDays: 30,
+                                          now: now, calendar: calendar)
+    check(!dormant.contains(1), "a task touched two days ago is not dormant")
+    check(dormant.contains(2), "one silent for exactly the threshold is")
+    check(dormant.contains(3), "and one never tracked at all counts as silent")
+    check(!dormant.contains(4), "a finished task is closed, not drifting")
+    check(!dormant.contains(5), "and an archived one isn't shown at all")
+
+    // The threshold is a real setting, including off.
+    check(Dormancy.dormantTaskIDs(lastActivity: activity, tasks: tasks, afterDays: 0,
+                                  now: now, calendar: calendar).isEmpty,
+          "zero days turns the whole idea off")
+    check(Dormancy.dormantTaskIDs(lastActivity: activity, tasks: tasks, afterDays: 31,
+                                  now: now, calendar: calendar).contains(2) == false,
+          "and a longer threshold spares a task just under it")
+
+    // Counted by calendar day, so the time of day at either end doesn't shift the answer.
+    let lateNight = calendar.date(from: DateComponents(year: 2026, month: 8, day: 19, hour: 23))!
+    let earlyNow = calendar.date(from: DateComponents(year: 2026, month: 9, day: 18, hour: 1))!
+    check(Dormancy.daysSince(lateNight, now: earlyNow, calendar: calendar) == 30,
+          "30 days means 30 calendar days, not 30 exact 24-hour blocks")
+    check(Dormancy.daysSince(nil, now: now, calendar: calendar) == nil,
+          "never tracked has no number of days")
+}
+
 // MARK: - Per-day method
 
 /// The simple method: nothing moves. Tested alongside the reallocating one because the whole point of
@@ -5575,6 +5615,7 @@ do {
     testTagTotals()
     testTargetMath()
     testDailyPlan()
+    testDormancy()
     testPerDayPlan()
     testPrimaryOwner()
     testHeavyOverlap()
@@ -5600,6 +5641,7 @@ do {
     testTagTotals()
     testTargetMath()
     testDailyPlan()
+    testDormancy()
     testPerDayPlan()
     testPrimaryOwner()
     testHeavyOverlap()

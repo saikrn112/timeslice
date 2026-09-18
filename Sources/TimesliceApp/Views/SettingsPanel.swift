@@ -35,6 +35,14 @@ struct SettingsPanel: View {
                 onInc: { settings.deepBlockMinutes = min(120, settings.deepBlockMinutes + 5) }
             )
 
+            stepperRow(
+                title: "Quiet after",
+                value: settings.dormantAfterDays == 0 ? "Off" : "\(settings.dormantAfterDays)d",
+                caption: "tasks untouched this long are marked quiet, not done",
+                onDec: { settings.dormantAfterDays = max(0, settings.dormantAfterDays - 5) },
+                onInc: { settings.dormantAfterDays = min(365, settings.dormantAfterDays + 5) }
+            )
+
             Divider()
 
             Toggle(isOn: $settings.promptsEnabled) {

@@ -525,13 +525,28 @@ struct ProjectListView: View {
                     .onKeyPress(.escape) { editingID = nil; focus = .list; return .handled }
                     .onExitCommand { editingID = nil; focus = .list }
             } else {
-                Text(project.name)
-                    .font(.callout)
-                    .fontWeight(isRunning ? .semibold : .regular)
-                    .strikethrough(isFinished, color: .secondary)
-                    .foregroundStyle(isFinished ? .secondary : .primary)
-                    .lineLimit(1)
-                    .onTapGesture(count: 2) { beginRename(project) }   // double-click to rename in place
+                // Three states, not two. Finished is struck through; dormant — nothing tracked against it
+                // for the configured stretch — is dimmed and marked, because a task you haven't touched in
+                // a month is neither active nor done, and showing it as active is what lets a list grow
+                // until it's ignored. The mark is a symbol rather than a strike: a strike would say you
+                // closed it, and you didn't; it drifted.
+                let isDormant = !isFinished && appState.dormantTaskIDs.contains(project.id)
+                HStack(spacing: 4) {
+                    Text(project.name)
+                        .font(.callout)
+                        .fontWeight(isRunning ? .semibold : .regular)
+                        .strikethrough(isFinished, color: .secondary)
+                        .foregroundStyle(isFinished || isDormant ? .secondary : .primary)
+                        .lineLimit(1)
+                    if isDormant {
+                        Image(systemName: "moon.zzz.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .opacity(isDormant ? 0.75 : 1)
+                .help(isDormant ? dormantHelp(project) : "")
+                .onTapGesture(count: 2) { beginRename(project) }   // double-click to rename in place
 
                 // The task's OWN tags. Not the inherited ones: those are on the section header this
                 // row sits under, and repeating "office" on all nine of that project's tasks would
@@ -664,6 +679,13 @@ struct ProjectListView: View {
                 }
             }
         }
+    }
+
+    /// Why a row is marked dormant, in the row's own tooltip.
+    private func dormantHelp(_ project: Project) -> String {
+        let days = appState.quietDaysByTask[project.id] ?? -1
+        if days < 0 { return "Never tracked. Marked quiet automatically — start it and the mark goes." }
+        return "Nothing tracked for \(days) days. Marked quiet automatically — start it and the mark goes."
     }
 
     private func archivedRow(_ total: ProjectTotal) -> some View {
