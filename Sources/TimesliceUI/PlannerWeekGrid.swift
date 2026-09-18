@@ -66,10 +66,15 @@ public struct PlannerWeekGrid: View {
         public let isToday: Bool
         /// In stacking order, bottom first: reserved, then tracked, then owed.
         public let blobs: [Blob]
+        /// Hours this day can't hold, drawn hanging BELOW the floor. Same hour scale as the column above,
+        /// so a 1.7h overflow is exactly as tall as 1.7h inside the day — the point being that you can see
+        /// how much of the day it would have taken.
+        public let leftovers: [Blob]
         public var id: Int { weekday }
 
         public init(weekday: Int, label: String, dayOfMonth: Int, isPast: Bool, isToday: Bool,
-                    blobs: [Blob]) {
+                    blobs: [Blob], leftovers: [Blob] = []) {
+            self.leftovers = leftovers
             self.weekday = weekday
             self.label = label
             self.dayOfMonth = dayOfMonth
@@ -85,26 +90,58 @@ public struct PlannerWeekGrid: View {
     /// Waking hours already gone today. Nil when the week being viewed isn't the current one.
     public let elapsedHoursToday: Double?
     public let highlight: Int64?
+    /// What to call the pool beneath the week. A live week's is hours with nowhere left to put them; a
+    /// finished week's is hours that never happened, and the same words don't fit both.
+    public var leftoverCaption: String = "no room for these"
     public var onPick: (Int64) -> Void
     /// Double-click: "show me this, properly". Carries the blob's allocation (negative for unallocated)
     /// and the weekday, which is everything the Metrics page needs to answer for that day.
     public var onOpen: (Int64, Int) -> Void
 
     public init(days: [DayInput], capacityHours: Double, elapsedHoursToday: Double?,
-                highlight: Int64?, onPick: @escaping (Int64) -> Void = { _ in },
+                highlight: Int64?, leftoverCaption: String = "no room for these",
+                onPick: @escaping (Int64) -> Void = { _ in },
                 onOpen: @escaping (Int64, Int) -> Void = { _, _ in }) {
         self.days = days
         self.capacityHours = capacityHours
         self.elapsedHoursToday = elapsedHoursToday
         self.highlight = highlight
+        self.leftoverCaption = leftoverCaption
         self.onPick = onPick
         self.onOpen = onOpen
     }
 
     private static let axisWidth: CGFloat = 30
-    private static let gridHeight: CGFloat = 430
+    /// Taller than it needs to be for the axis alone: every block has a minimum height so it can carry a
+    /// label, and the shorter the grid the more that floor distorts the proportions between blocks. Extra
+    /// height is the cheapest way to make the sizes honest.
+    private static let gridHeight: CGFloat = 500
+    /// Space between the week and the pool beneath it. Generous on purpose: they are two different
+    /// statements — what the week holds, and what it doesn't — and a few points of padding would read as
+    /// one continuous column.
+    private static let basementGap: CGFloat = 26
 
     public var body: some View {
+        ZStack(alignment: .topLeading) {
+            // The dividing rule, drawn across everything so the pool reads as a separate panel rather than
+            // seven columns that happen to continue.
+            if basementHeight > 0 {
+                VStack(alignment: .leading, spacing: 0) {
+                    Color.clear.frame(height: Self.gridHeight + 24 + Self.basementGap / 2 - 12)
+                    Text(leftoverCaption)
+                        .font(.system(size: 9)).foregroundStyle(.tertiary)
+                    Rectangle().fill(Color.primary.opacity(0.18)).frame(height: 1)
+                        .padding(.top, 3)
+                    Spacer(minLength: 0)
+                }
+            }
+            columnsAndAxis
+        }
+        .frame(height: Self.gridHeight + 24
+                       + (basementHeight > 0 ? basementHeight + Self.basementGap : 0))
+    }
+
+    private var columnsAndAxis: some View {
         HStack(alignment: .top, spacing: 0) {
             axis
             GeometryReader { geo in
@@ -117,7 +154,17 @@ public struct PlannerWeekGrid: View {
                 }
             }
         }
-        .frame(height: Self.gridHeight + 24)
+    }
+
+    /// How tall the basement needs to be: the worst day's overflow, on the same scale, capped so one wild
+    /// day can't push the grid off the screen.
+    private var basementHeight: CGFloat {
+        let worst = days.map { $0.leftovers.reduce(0) { $0 + $1.hours } }.max() ?? 0
+        guard worst > 0.02 else { return 0 }
+        // A floor of 78pt: the blocks in here are usually small, and scaling them faithfully made a 30m
+        // leftover a hairline in a slot too short to read. The pool's job is to be readable, not to be
+        // proportional to the emptiest possible week.
+        return min(190, max(78, height(worst) + 12))
     }
 
     // MARK: - Axis
@@ -135,6 +182,12 @@ public struct PlannerWeekGrid: View {
                 }
             }
             .frame(height: Self.gridHeight)
+            if basementHeight > 0 {
+                // No hour marks down here: the blocks say how long they are, and a second axis would imply
+                // negative time. The caption lives above the pool instead of in this 30pt gutter, where it
+                // wrapped to "leftove / r".
+                Color.clear.frame(height: Self.basementGap + basementHeight)
+            }
         }
         .frame(width: Self.axisWidth, alignment: .leading)
     }
@@ -155,7 +208,6 @@ public struct PlannerWeekGrid: View {
 
     private func column(_ day: DayInput, compact: Bool) -> some View {
         let total = day.blobs.reduce(0) { $0 + $1.hours }
-        let overflow = max(0, total - capacityHours)
         return VStack(spacing: 0) {
             header(day)
             ZStack(alignment: .bottom) {
@@ -184,7 +236,6 @@ public struct PlannerWeekGrid: View {
                     // floating in the middle of its container instead of resting on the floor — which is
                     // the one thing a "fills up" reading depends on.
                     Spacer(minLength: 0)
-                    if overflow > 0.02 { overflowCap(overflow, compact: compact) }
                     // Reversed: blobs are ordered bottom-to-top and a VStack lays out top-to-bottom.
                     ForEach(day.blobs.reversed()) { blob in
                         blobView(blob, compact: compact, scale: scale(day, total: total),
@@ -198,8 +249,44 @@ public struct PlannerWeekGrid: View {
             }
             .frame(height: Self.gridHeight)
             .opacity(day.isPast ? 0.85 : 1)
+
+            if basementHeight > 0 {
+                Color.clear.frame(height: Self.basementGap)
+                basement(day, compact: compact)
+                    .frame(height: basementHeight)
+            }
         }
         .padding(.horizontal, 2)
+    }
+
+    /// What this day couldn't hold, hanging below the floor.
+    ///
+    /// Drawn downward from the top of the basement so the blocks touch the line they fell through, and in the
+    /// same colours and dashes as the plan above — they are the same blocks, just homeless.
+    private func basement(_ day: DayInput, compact: Bool) -> some View {
+        let total = day.leftovers.reduce(0.0) { $0 + $1.hours }
+        let wanted = day.leftovers.reduce(0.0 as CGFloat) { $0 + max(12, height($1.hours)) }
+        let room = basementHeight - 8
+        let scale = wanted > room ? Double(room / wanted) : 1
+        return VStack(spacing: 1) {
+            ForEach(day.leftovers) { blob in
+                blobView(blob, compact: compact, scale: scale, weekday: day.weekday)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 3)
+        .padding(.top, 3)
+        .frame(maxWidth: .infinity)
+        // A darker well than the day above it, and no red. These blocks are hours you haven't found room
+        // for — not an error, and colouring them like one made a normal week look broken.
+        .background {
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Color.black.opacity(0.22))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 5)
+                        .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+                }
+        }
     }
 
     /// How much to squeeze an over-full day so its blobs stay inside the container.
@@ -209,7 +296,7 @@ public struct PlannerWeekGrid: View {
     /// which read as a layout fault rather than as a full day. The excess is still stated by the cap.
     private func scale(_ day: DayInput, total: Double) -> Double {
         let drawn = day.blobs.filter { $0.hours > 0.02 }
-        let chrome = CGFloat(max(0, drawn.count - 1)) + 4 + (total > capacityHours ? 14 : 0)
+        let chrome = CGFloat(max(0, drawn.count - 1)) + 4
         let available = max(20, Self.gridHeight - chrome)
         // What the blobs will actually occupy, minimum heights included — otherwise a day of many small
         // blocks is scaled as if they were hairlines and overflows its own container.
@@ -384,17 +471,6 @@ public struct PlannerWeekGrid: View {
         return lines.joined(separator: "\n")
     }
 
-    /// What won't fit in the day at all, capping the column.
-    private func overflowCap(_ hours: Double, compact: Bool) -> some View {
-        Text(compact ? "+\(Self.short(hours))" : "+\(Self.short(hours)) over")
-            .font(.system(size: 8, weight: .semibold))
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
-            .frame(height: 13)
-            .background(RoundedRectangle(cornerRadius: 3).fill(PlannerPalette.over))
-            .help("\(Self.short(hours)) more than this day holds.")
-    }
-
     private func tooltip(_ day: DayInput, total: Double) -> String {
         var lines = ["\(day.label) \(day.dayOfMonth) — \(Self.short(total)) of "
                      + "\(Self.short(capacityHours)) spoken for"]
@@ -403,7 +479,14 @@ public struct PlannerWeekGrid: View {
                          + (blob.kind == .owed ? "  (still to fit)" : ""))
         }
         let free = capacityHours - total
-        lines.append(free > 0.02 ? "\(Self.short(free)) free" : "nothing free")
+        if free > 0.02 {
+            lines.append("\(Self.short(free)) free")
+        } else if -free > 0.02 {
+            // Tracked more than a waking day holds. Not an overflowing plan — an overflowing day.
+            lines.append("\(Self.short(-free)) past a \(Self.short(capacityHours)) day")
+        } else {
+            lines.append("nothing free")
+        }
         // The rule, once per day rather than on every block: these add up to the day because each hour is
         // drawn under one allocation only. An allocation's own progress counts shared hours too, which is
         // why its bar in the list can read higher than its blocks here.

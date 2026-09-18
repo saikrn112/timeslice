@@ -49,9 +49,9 @@ struct PlannerView: View {
     /// second set of goals with their own bookkeeping.
     @State private var unit: PlanUnit = ProcessInfo.processInfo
         .environment["TIMESLICE_PLANNER_UNIT"]?.lowercased() == "month" ? .month : .week
-    /// How many periods back from the current one. 0 is now, 1 is last week, and NEGATIVE is ahead —
-    /// which is how you look at a week that hasn't happened. Nothing is tracked there, so what you see is
-    /// the plan as designed.
+    /// How many periods back from the current one. 0 is now, 1 is last week. Never negative: a week that
+    /// hasn't happened has nothing tracked in it, so browsing to one could only show the plan — which the
+    /// "intended" toggle already does, for whichever week you're looking at.
     @State private var offset = Int(ProcessInfo.processInfo
         .environment["TIMESLICE_PLANNER_OFFSET"] ?? "") ?? 0
     /// Per allocation, seconds tracked inside the viewed period.
@@ -71,6 +71,8 @@ struct PlannerView: View {
     @State private var world: (tasks: [Project], groups: [TaskProject], tags: [Tag]) = ([], [], [])
     /// What each remaining day is asked to do: its own share, and anything moved onto it.
     @State private var dailyPlan = Replan.DailyPlan(byDay: [:], unplaced: [:])
+    /// Per-day method only: weekday → allocation → hours that day never got.
+    @State private var missedByDay: [Int: [Int64: TimeInterval]] = [:]
     /// Every second tracked inside the viewed period, allocation or not — the bar's "tracked" segment.
     @State private var periodTracked: TimeInterval = 0
     /// Show the plan as designed rather than what happened.
@@ -80,6 +82,19 @@ struct PlannerView: View {
     /// that exists, being able to see it for THIS week is the same code with the actuals ignored.
     @State private var showIntended = ProcessInfo.processInfo
         .environment["TIMESLICE_PLANNER_INTENDED"] == "1"
+    /// Whether unfinished hours move into the days you have left, or stay under the day that missed them.
+    ///
+    /// Two questions, not a better and a worse answer — see `Replan.Method`. Remembered across launches
+    /// because it's a way of reading the week, not a thing you toggle while comparing.
+    @AppStorage("plannerMethod") private var methodRaw = Replan.Method.catchUp.rawValue
+    private var method: Replan.Method {
+        // A capture run can force one, so both readings are reviewable without changing your setting.
+        if let forced = ProcessInfo.processInfo.environment["TIMESLICE_PLANNER_METHOD"],
+           let parsed = Replan.Method(rawValue: forced.replacingOccurrences(of: "-", with: " ")) {
+            return parsed
+        }
+        return Replan.Method(rawValue: methodRaw) ?? .catchUp
+    }
     @State private var showAllocations = false
     /// Built once per rebuild rather than per redraw: the calendar needs every interval placed at its
     /// real clock position, and doing that inside `body` would re-query sqlite on every hover.
@@ -106,6 +121,10 @@ struct PlannerView: View {
     }
 
     var body: some View {
+        // A capture run can ask to start scrolled to the foot of the page. The window can't grow past the
+        // screen, so the leftover pool at the bottom of a tall week was unreviewable by screenshot — and
+        // reviewing by screenshot is the only way this page gets checked.
+        ScrollViewReader { scroller in
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if let plan {
@@ -124,7 +143,14 @@ struct PlannerView: View {
                             // Only the toggle here. Four legend keys in a section header wrapped
                             // mid-word — "track / ed", "unava / ilable" — because a header row has no
                             // room to reflow. It gets its own line below.
-                            accessory: { if unit == .week { intendedToggle } }) {
+                            accessory: {
+                                if unit == .week {
+                                    HStack(spacing: 10) {
+                                        methodToggle
+                                        intendedToggle
+                                    }
+                                }
+                            }) {
                         legend
                         if unit == .week {
                             PlannerWeekGrid(days: calendarDays,
@@ -132,6 +158,9 @@ struct PlannerView: View {
                                                             elapsedHoursToday: offset == 0 && !showIntended
                                                 ? elapsedHoursToday : nil,
                                             highlight: highlight,
+                                            leftoverCaption: method == .perDay ? "missed on the day"
+                                                                : (offset > 0 ? "never happened"
+                                                                              : "no room for these"),
                                             onPick: { pick($0) },
                                             onOpen: { openInMetrics(targetID: $0, weekday: $1) })
                         } else {
@@ -145,6 +174,7 @@ struct PlannerView: View {
                 } else {
                     empty
                 }
+                Color.clear.frame(height: 1).id("planner-foot")
             }
             .padding(18)
         }
@@ -152,6 +182,11 @@ struct PlannerView: View {
             adoptSharedFilter()
             rebuild()
             publishWindow()
+            if ProcessInfo.processInfo.environment["TIMESLICE_SCROLL"] == "bottom" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    withAnimation(.none) { scroller.scrollTo("planner-foot", anchor: .bottom) }
+                }
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: TimesliceNotifications.dataDidChange)) { _ in
             rebuild()
@@ -182,6 +217,7 @@ struct PlannerView: View {
                 showAllocations = false
                 rebuild()
             }
+        }
         }
     }
 
@@ -470,11 +506,14 @@ struct PlannerView: View {
                     .font(.system(.subheadline, design: .rounded)).fontWeight(.medium)
                     .frame(minWidth: 150)
                     .multilineTextAlignment(.center)
-                Button { offset = max(-8, offset - 1); rebuild(); publishWindow() } label: {
+                // Stops at the current period. A future week has nothing tracked in it, so it could only
+                // ever show the plan — and "intended" already shows the plan, for any week, without
+                // pretending to be a week you can browse to.
+                Button { offset = max(0, offset - 1); rebuild(); publishWindow() } label: {
                     Image(systemName: "chevron.right")
                 }
                 .buttonStyle(.borderless)
-                .disabled(offset <= -8)
+                .disabled(offset == 0)
                 Button("Today") { offset = 0; rebuild(); publishWindow() }
                     .buttonStyle(.link)
                     .disabled(offset == 0)
@@ -495,9 +534,7 @@ struct PlannerView: View {
         }
         f.dateFormat = "d MMM"
         let end = window.end.addingTimeInterval(-1)
-        let dates = "\(f.string(from: window.start)) – \(f.string(from: end))"
-        if offset == -1 { return "Next week · \(dates)" }
-        return offset < 0 ? "In \(-offset) weeks · \(dates)" : dates
+        return "\(f.string(from: window.start)) – \(f.string(from: end))"
     }
 
     /// The viewed window. Weeks and months both come from `Calendar`, so they line up with what the
@@ -536,13 +573,47 @@ struct PlannerView: View {
     private var calendarSubtitle: String {
         guard unit == .week else { return "one cube is one hour of the day" }
         if isFuture { return "nothing tracked yet — this is the plan as designed" }
+        if method == .perDay, !showIntended {
+            return "every day keeps its own share · what a day missed stays under it"
+        }
         return showIntended
             ? "the plan as designed, ignoring what actually happened"
             : "every column adds up to a whole day"
     }
 
-    /// True when the window being viewed hasn't happened yet.
-    private var isFuture: Bool { offset < 0 }
+    /// Never true now that browsing forward is gone — kept as one named place to change if it comes back.
+    private var isFuture: Bool { false }
+
+    /// Which of the two readings of the week to show. Hidden in the intended view, where there is nothing
+    /// to reallocate — the plan as designed is the same under either method.
+    @ViewBuilder
+    private var methodToggle: some View {
+        if !showIntended {
+            HStack(spacing: 3) {
+                ForEach(Replan.Method.allCases, id: \.rawValue) { candidate in
+                    let selected = method == candidate
+                    Button {
+                        methodRaw = candidate.rawValue
+                        rebuild()
+                    } label: {
+                        Text(candidate.rawValue)
+                            .font(.system(size: 9, weight: selected ? .bold : .regular,
+                                          design: .rounded))
+                            .foregroundStyle(selected ? Color.white : Color.secondary)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Capsule().fill(selected ? Color.accentColor
+                                                       : Color.secondary.opacity(0.14)))
+                    }
+                    .buttonStyle(.plain)
+                    .help(candidate == .catchUp
+                          ? "Unfinished hours move into the days you have left, so the week is shown as it "
+                            + "could still be finished."
+                          : "Every day keeps its own share. What you missed on a day stays under that day, "
+                            + "and nothing moves.")
+                }
+            }
+        }
+    }
 
     /// Actual against intended. Hidden for a future week, which has only one answer.
     @ViewBuilder
@@ -667,6 +738,91 @@ struct PlannerView: View {
                 Spacer(minLength: 0)
             }
         }
+    }
+
+    /// weekday → the blocks that day couldn't hold, for the basement under its column.
+    ///
+    /// An unplaceable allocation is filed under the LAST day it could have used: for something that ran out
+    /// of room, the last remaining day it claims (where it finally failed to fit); for something whose
+    /// weekdays have gone, the last of those days. That puts the block where the decision would have to be
+    /// made rather than in a pool of its own.
+    private func leftoversByDay() -> [Int: [PlannerWeekGrid.Blob]] {
+        guard unit == .week, !showIntended else { return [:] }
+        let dayNamesShort = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        if method == .perDay {
+            // One pool entry per day that fell short, under that day. This is the whole difference the
+            // method makes visible: a miss belongs to the day that missed it.
+            var out: [Int: [PlannerWeekGrid.Blob]] = [:]
+            for (weekday, shorts) in missedByDay {
+                for (id, seconds) in shorts where seconds > 60 {
+                    out[weekday, default: []].append(PlannerWeekGrid.Blob(
+                        targetID: id, name: name(forTarget: id), hours: seconds / 3600,
+                        colorHex: colorHex(forTarget: id), kind: .owed,
+                        detail: ["  \(dayNamesShort[weekday - 1]) wanted "
+                                 + "\(hours((dailyPlan.byDay[weekday]?[id]?.intended ?? 0) + seconds))"
+                                 + " and didn't get this part",
+                                 "  nothing was moved to another day — that's the catch up method"]))
+                }
+            }
+            return out.mapValues { $0.sorted { $0.hours > $1.hours } }
+        }
+        // A finished week has a pool too, and it's the more useful one: what never happened. There is no
+        // scheduling left to do, so it's simply each allocation's shortfall, filed under the last day it
+        // claimed — where the chance to do it ran out.
+        if offset > 0 {
+            let dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+            var out: [Int: [PlannerWeekGrid.Blob]] = [:]
+            for target in targets
+            where target.direction == .atLeast && !nestedIDs.contains(target.id) {
+                let missed = max(0, target.weeklySeconds - (periodActuals[target.id] ?? 0))
+                guard missed > 60 else { continue }
+                let claimed = (1...7).filter { target.weekdays.effective.contains(weekday: $0) }
+                guard let day = claimed.last else { continue }
+                out[day, default: []].append(PlannerWeekGrid.Blob(
+                    targetID: target.id, name: name(forTarget: target.id), hours: missed / 3600,
+                    colorHex: colorHex(forTarget: target.id), kind: .owed,
+                    detail: ["  never happened — \(hours(periodActuals[target.id] ?? 0)) of "
+                             + "\(hours(target.weeklySeconds)) done",
+                             "  \(dayNames[day - 1]) was its last day that week"]))
+            }
+            return out.mapValues { $0.sorted { $0.hours > $1.hours } }
+        }
+        guard offset == 0 else { return [:] }
+        let dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        var out: [Int: [PlannerWeekGrid.Blob]] = [:]
+
+        let spare = dailyPlan.leftoverRoom.filter { $0.value > 60 }.sorted { $0.key < $1.key }
+        let spareText = spare.isEmpty ? nil
+            : spare.map { "\(dayNames[$0.key - 1]) \(hours($0.value))" }.joined(separator: ", ")
+
+        for (id, seconds) in dailyPlan.unplaced where seconds > 60 {
+            let claimed = dailyPlan.claimedDays[id] ?? []
+            guard let day = claimed.last else { continue }
+            var detail = ["  \(dayNames[day - 1]) was the last day it could use, and it's full",
+                          "  nothing outranks anything: the days are shared in half-hour turns, and only "
+                          + "an allocation with fewer days left goes first"]
+            if let spareText {
+                detail.append("  free hours remain on \(spareText) — days this doesn't claim")
+                detail.append("  more weekdays would reach them; more hours a day would not")
+            } else {
+                detail.append("  every remaining day is full — more hours a day would help")
+            }
+            out[day, default: []].append(PlannerWeekGrid.Blob(
+                targetID: id, name: name(forTarget: id), hours: seconds / 3600,
+                colorHex: colorHex(forTarget: id), kind: .owed, detail: detail))
+        }
+
+        for (id, seconds) in dailyPlan.outOfDays where seconds > 60 {
+            guard let target = targets.first(where: { $0.id == id }) else { continue }
+            let claimed = (1...7).filter { target.weekdays.effective.contains(weekday: $0) }
+            guard let day = claimed.last else { continue }
+            out[day, default: []].append(PlannerWeekGrid.Blob(
+                targetID: id, name: name(forTarget: id), hours: seconds / 3600,
+                colorHex: colorHex(forTarget: id), kind: .owed,
+                detail: ["  \(dayNames[day - 1]) was its last day this week, and it has passed",
+                         "  more weekdays would help; more hours a day would not"]))
+        }
+        return out.mapValues { $0.sorted { $0.hours > $1.hours } }
     }
 
     /// Why these hours don't fit, naming the days that are full — and the spare hours they can't reach.
@@ -1047,11 +1203,23 @@ struct PlannerView: View {
 
         // What each remaining day is asked to do: its own share, plus anything moved onto it because
         // another day was missed or had run out of hours. One pass, after the credited totals exist.
-        dailyPlan = Replan.dailyPlan(input: input, plan: built, creditedByWeekday: creditByDay,
-                                     remainingWeekdays: Array(today...7),
-                                     fractionOfTodayLeft: Replan.fractionOfDayLeft(
-                                         now: now, wakingSeconds: settings.wakingSeconds,
-                                         calendar: cal))
+        switch method {
+        case .catchUp:
+            dailyPlan = Replan.dailyPlan(input: input, plan: built, creditedByWeekday: creditByDay,
+                                         remainingWeekdays: Array(today...7),
+                                         fractionOfTodayLeft: Replan.fractionOfDayLeft(
+                                             now: now, wakingSeconds: settings.wakingSeconds,
+                                             calendar: cal),
+                                         skipping: nested)
+            missedByDay = [:]
+        case .perDay:
+            // Nothing moves: each day owes its own share, and a past day's shortfall is recorded against
+            // that day rather than becoming somebody else's Friday.
+            let simple = Replan.perDayPlan(input: input, creditedByWeekday: creditByDay,
+                                           remainingWeekdays: Array(today...7), skipping: nested)
+            dailyPlan = Replan.DailyPlan(byDay: simple.byDay, unplaced: [:])
+            missedByDay = simple.missedByDay
+        }
 
         // Who else counts an allocation's hours. With the grid attributing an hour to the most specific
         // allocation, `vllm` work no longer appears under `office` in the columns — while office's progress
@@ -1141,6 +1309,7 @@ struct PlannerView: View {
         func intendedDay(_ weekday: Int) -> Planner.DayPlan? {
             plan?.days.first { $0.weekday == weekday }
         }
+        let leftovers = leftoversByDay()
 
         var out: [PlannerWeekGrid.DayInput] = []
         for offsetDays in 0..<7 {
@@ -1273,7 +1442,7 @@ struct PlannerView: View {
                     ? cal.component(.day, from: date) : cal.component(.day, from: date),
                 isPast: dayStart < startOfToday && !isFuture,
                 isToday: dayStart == startOfToday && !isFuture,
-                blobs: blobs))
+                blobs: blobs, leftovers: leftovers[weekday] ?? []))
         }
         return out
     }

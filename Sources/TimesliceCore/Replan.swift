@@ -398,12 +398,18 @@ public extension Replan {
     /// `creditedByWeekday` must be CREDITED hours: every second that counts toward an allocation, including
     /// work a narrower allocation also covers. Measuring against a one-hour-one-owner attribution made
     /// office ask for 5.6h today when kvcache had already given it an hour and a half.
+    /// - Parameter skipping: allocations to leave out entirely — in practice the nested ones, whose hours are
+    ///   already inside a parent's share. Leaving them in spends the same hours twice: the parent asks for
+    ///   them and so does the child, so a day's room drains twice as fast as it should. That was visible as
+    ///   Saturday showing "3.1h free" above a pool holding exactly 3.1h — the room had gone to a child
+    ///   allocation the day itself doesn't draw.
     static func dailyPlan(input: Planner.Input,
                           plan: Planner,
                           creditedByWeekday: [Int: [Int64: TimeInterval]],
                           remainingWeekdays: [Int],
-                          fractionOfTodayLeft: Double = 1) -> DailyPlan {
-        let floors = input.targets.filter { $0.direction == .atLeast }
+                          fractionOfTodayLeft: Double = 1,
+                          skipping: Set<Int64> = []) -> DailyPlan {
+        let floors = input.targets.filter { $0.direction == .atLeast && !skipping.contains($0.id) }
         guard !floors.isEmpty, !remainingWeekdays.isEmpty else { return DailyPlan(byDay: [:], unplaced: [:]) }
 
         func credited(_ weekday: Int, _ id: Int64) -> TimeInterval {
@@ -440,11 +446,17 @@ public extension Replan {
                               remainder: remainder,
                               days: remainingWeekdays.filter { claimed.contains($0) }))
         }
-        // Most pressing first: hours needed per day left, not hours needed.
+        // No allocation outranks another. Nothing here is told which of your goals matters more, and it
+        // shouldn't invent an answer — an earlier version sorted by "hours needed per remaining day", which
+        // is a preference dressed up as arithmetic and quietly decided that a big commitment beat a small
+        // one.
+        //
+        // The only ordering is FEASIBILITY: fewer remaining days means less freedom, so those are placed
+        // first because otherwise they cannot be placed at all. Equal freedom is a tie, broken by id purely
+        // so the answer doesn't shuffle between rebuilds — and beyond that, everything shares in turns.
         queue.sort { lhs, rhs in
-            let l = lhs.remainder / Double(max(1, lhs.days.count))
-            let r = rhs.remainder / Double(max(1, rhs.days.count))
-            return l > r
+            if lhs.days.count != rhs.days.count { return lhs.days.count < rhs.days.count }
+            return lhs.id < rhs.id
         }
 
         var intended: [Int: [Int64: TimeInterval]] = [:]
@@ -464,32 +476,54 @@ public extension Replan {
             }
         }
 
-        // Then whatever is still owed, into whatever room is left — but shared out rather than handed to
-        // the front of the queue.
+        // Then whatever is still owed, into the room that's left. Two rules decide where it goes, and both
+        // exist because of a way this got it wrong.
         //
-        // Serving each allocation's whole remainder in turn starved the small ones: two hours of stonks with
-        // one day left came sixth of seven, so raising the waking day by two hours moved stonks by four
-        // minutes and gave the rest to recon paper and vllm. Nobody would call that a plan.
+        // **Nowhere else to go comes first.** Friday's sixteen hours were being split between office — whose
+        // only remaining day IS Friday — and five allocations that still had Saturday, so office ended up
+        // with seven of its nine hours and the rest went to the pool while Saturday sat with room to spare.
+        // An allocation down to its last day has nothing to be fair about: it goes there or nowhere.
         //
-        // So the carry goes round in half-hour turns, in the same priority order. The most pressing
-        // allocation still gets served first within each round, and no allocation is reduced to crumbs
-        // because of where it sits in a list.
+        // **Then the roomiest day first.** For anything with a choice, filling its emptiest remaining day
+        // leaves the tight days for whoever has no alternative — and stops a week from loading the nearest
+        // day just because it comes first in a list.
+        //
+        // Within those, half-hour turns and equal shares, because serving each allocation's whole remainder
+        // before the next starved the small ones: two hours of stonks with one day left came sixth of seven,
+        // so raising the waking day by two hours moved stonks by four minutes.
         let quantum: TimeInterval = 30 * 60
+
+        /// The claimed remaining day with the most room left, which is where a choice should go.
+        func roomiestDay(_ work: Work) -> Int? {
+            work.days
+                .filter { (room[$0] ?? 0) > 60 }
+                .max { (room[$0] ?? 0) < (room[$1] ?? 0) }
+        }
+
+        // Allocations with a single day left, served in full first.
+        for index in queue.indices
+        where queue[index].days.count == 1 && queue[index].remainder > 60 {
+            guard let weekday = queue[index].days.first else { continue }
+            let available = max(0, room[weekday] ?? 0)
+            guard available > 60 else { continue }
+            let take = min(queue[index].remainder, available)
+            carried[weekday, default: [:]][queue[index].id, default: 0] += take
+            room[weekday] = available - take
+            queue[index].remainder -= take
+        }
+
         var progress = true
         while progress {
             progress = false
             for index in queue.indices where queue[index].remainder > 60 {
-                for weekday in queue[index].days {
-                    let available = max(0, room[weekday] ?? 0)
-                    guard available > 60 else { continue }
-                    let take = min(min(quantum, queue[index].remainder), available)
-                    guard take > 60 else { continue }
-                    carried[weekday, default: [:]][queue[index].id, default: 0] += take
-                    room[weekday] = available - take
-                    queue[index].remainder -= take
-                    progress = true
-                    break                      // one turn, then the next allocation gets its turn
-                }
+                guard let weekday = roomiestDay(queue[index]) else { continue }
+                let available = max(0, room[weekday] ?? 0)
+                let take = min(min(quantum, queue[index].remainder), available)
+                guard take > 60 else { continue }
+                carried[weekday, default: [:]][queue[index].id, default: 0] += take
+                room[weekday] = available - take
+                queue[index].remainder -= take
+                progress = true
             }
         }
 
@@ -516,5 +550,56 @@ public extension Replan {
         return DailyPlan(byDay: byDay, unplaced: unplaced, outOfDays: outOfDays,
                          leftoverRoom: room.filter { $0.value > 60 },
                          claimedDays: claimedDays)
+    }
+}
+
+public extension Replan {
+    /// The two ways of answering "what does each day owe".
+    ///
+    /// They are different questions, not a better and a worse answer:
+    ///
+    /// - **`catchUp`** reallocates. Hours an allocation still needs move into the days you have left, so the
+    ///   week is shown as it could still be finished. Useful for the week you're in, and only for that week —
+    ///   there is nothing to reallocate into once a week is over.
+    /// - **`perDay`** doesn't. Every day keeps the share it was given, and what you didn't do that day is
+    ///   simply missed, recorded under that day. Predictable, and the honest view of a week that has gone:
+    ///   Monday's missed hour is Monday's, not Friday's problem.
+    enum Method: String, Sendable, CaseIterable {
+        case catchUp = "catch up"
+        case perDay = "per day"
+    }
+
+    /// `perDay`: each day owes its own even share, less whatever that day already got. Nothing moves.
+    ///
+    /// The shortfall of a day that has passed is returned separately — it isn't owed by any remaining day,
+    /// so pretending otherwise would be the catch-up answer wearing this one's name.
+    ///
+    /// `creditedByWeekday` must be CREDITED hours, as with `dailyPlan`: every second that counts toward an
+    /// allocation, including work a narrower one also covers.
+    static func perDayPlan(input: Planner.Input,
+                           creditedByWeekday: [Int: [Int64: TimeInterval]],
+                           remainingWeekdays: [Int],
+                           skipping: Set<Int64> = []) -> (byDay: [Int: [Int64: DayShare]],
+                                                          missedByDay: [Int: [Int64: TimeInterval]]) {
+        let floors = input.targets.filter { $0.direction == .atLeast && !skipping.contains($0.id) }
+        var byDay: [Int: [Int64: DayShare]] = [:]
+        var missed: [Int: [Int64: TimeInterval]] = [:]
+
+        for target in floors {
+            let claimed = (1...7).filter { target.weekdays.effective.contains(weekday: $0) }
+            guard !claimed.isEmpty, target.weeklySeconds > 0 else { continue }
+            let perDay = target.weeklySeconds / Double(claimed.count)
+            for weekday in claimed {
+                let done = creditedByWeekday[weekday]?[target.id] ?? 0
+                let short = max(0, perDay - done)
+                guard short > 60 else { continue }
+                if remainingWeekdays.contains(weekday) {
+                    byDay[weekday, default: [:]][target.id] = DayShare(intended: short, carried: 0)
+                } else {
+                    missed[weekday, default: [:]][target.id] = short
+                }
+            }
+        }
+        return (byDay, missed)
     }
 }

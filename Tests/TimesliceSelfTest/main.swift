@@ -2621,6 +2621,67 @@ func testDailyPlan() {
     }
 }
 
+// MARK: - Per-day method
+
+/// The simple method: nothing moves. Tested alongside the reallocating one because the whole point of
+/// offering both is that they disagree, and each has to be right about its own question.
+func testPerDayPlan() {
+    print("Per-day plan:")
+    let m = plannerWorld(taskGroups: [1: 10], taskTags: [:])
+    let target = floor(1, .project(10), hours: 14)          // 2h a day, all seven days
+    let input = plannerInput([target], membership: m)
+
+    // Nothing done: every remaining day owes its own 2h, and the days that have gone are recorded as missed.
+    do {
+        let plan = Replan.perDayPlan(input: input, creditedByWeekday: [:],
+                                     remainingWeekdays: [5, 6, 7])
+        check(approx((plan.byDay[5]?[1]?.intended ?? 0) / 3600, 2, 0.01),
+              "each remaining day owes exactly its own share")
+        check(plan.byDay.values.allSatisfy { $0.values.allSatisfy { $0.carried < 60 } },
+              "and nothing is ever carried — that's the other method")
+        check(plan.missedByDay.keys.sorted() == [1, 2, 3, 4],
+              "the four days that have gone are each recorded as missed")
+        check(approx((plan.missedByDay[1]?[1] ?? 0) / 3600, 2, 0.01),
+              "each missing its own 2h, not a share of the week's shortfall")
+    }
+
+    // A day that got its share owes nothing and misses nothing.
+    do {
+        let plan = Replan.perDayPlan(input: input,
+                                     creditedByWeekday: [1: [1: 2 * 3600], 5: [1: 2 * 3600]],
+                                     remainingWeekdays: [5, 6, 7])
+        check(plan.byDay[5] == nil, "a day already at its share owes nothing")
+        check(plan.missedByDay[1] == nil, "and a past day that met its share missed nothing")
+    }
+
+    // Doing extra on one day does NOT reduce what another day owes. That's the difference from catch up,
+    // and the reason someone might want this: the days don't move under you.
+    do {
+        let plan = Replan.perDayPlan(input: input, creditedByWeekday: [5: [1: 9 * 3600]],
+                                     remainingWeekdays: [5, 6, 7])
+        check(approx((plan.byDay[6]?[1]?.intended ?? 0) / 3600, 2, 0.01),
+              "a huge day elsewhere leaves tomorrow's share untouched")
+    }
+
+    // Weekday-restricted allocations only owe on the days they claim.
+    do {
+        let weekdaysOnly = floor(2, .project(10), hours: 10, weekdays: .weekdaysOnly)
+        let input2 = plannerInput([weekdaysOnly], membership: m)
+        let plan = Replan.perDayPlan(input: input2, creditedByWeekday: [:],
+                                     remainingWeekdays: [6, 7])
+        check(plan.byDay[7] == nil, "Saturday owes nothing for a Mon-Fri allocation")
+        check(approx((plan.byDay[6]?[2]?.intended ?? 0) / 3600, 2, 0.01), "but Friday owes its 2h")
+    }
+
+    // Nested allocations are skipped here too, or their parent's hours get asked for twice.
+    do {
+        let plan = Replan.perDayPlan(input: input, creditedByWeekday: [:],
+                                     remainingWeekdays: [7], skipping: [1])
+        check(plan.byDay.isEmpty && plan.missedByDay.isEmpty,
+              "a skipped allocation asks for nothing and misses nothing")
+    }
+}
+
 // MARK: - Primary owner
 
 /// Which allocation owns an hour when several cover it — the rule that decides what a day's blocks say.
@@ -2693,7 +2754,7 @@ func testHeavyOverlap() {
     }
     let membership = plannerWorld(taskGroups: taskGroups, taskTags: taskTags)
 
-    var targets: [Target] = [
+    let targets: [Target] = [
         floor(1, .project(100), hours: 30),                       // the big group
         floor(2, .tag(901), hours: 8),
         floor(3, .tag(902), hours: 8),
@@ -5514,6 +5575,7 @@ do {
     testTagTotals()
     testTargetMath()
     testDailyPlan()
+    testPerDayPlan()
     testPrimaryOwner()
     testHeavyOverlap()
     testPalette()
@@ -5538,6 +5600,7 @@ do {
     testTagTotals()
     testTargetMath()
     testDailyPlan()
+    testPerDayPlan()
     testPrimaryOwner()
     testHeavyOverlap()
 } catch {

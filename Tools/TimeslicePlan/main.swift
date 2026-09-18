@@ -91,10 +91,21 @@ do {
                                   membership: membership, names: names,
                                   wakingSecondsPerDay: wakingHours * 3600)
         let built = Planner.plan(input)
+        // Nested allocations are skipped, exactly as the app skips them: their hours are already inside a
+        // parent's share, and counting them again drains a day's room twice. A diagnostic that models
+        // something other than the page it's diagnosing is worse than none.
+        let nested = Set(built.nestings.compactMap { nesting in
+            targets.first { names[$0.id] == nesting.innerName }?.id
+        })
         let fraction = Replan.fractionOfDayLeft(now: Date(), wakingSeconds: wakingHours * 3600)
         let daily = Replan.dailyPlan(input: input, plan: built, creditedByWeekday: credited,
                                      remainingWeekdays: Array(today...7),
-                                     fractionOfTodayLeft: fraction)
+                                     fractionOfTodayLeft: fraction,
+                                     skipping: nested)
+        if !nested.isEmpty {
+            print("\nskipped as nested: "
+                  + nested.compactMap { names[$0] }.sorted().joined(separator: ", "))
+        }
         let dayNames2 = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
         print(String(format: "\nwhat the remaining days are asked for (%.0f%% of today left):",
                      fraction * 100))
