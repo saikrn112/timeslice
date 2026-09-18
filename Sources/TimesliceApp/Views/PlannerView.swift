@@ -658,25 +658,16 @@ struct PlannerView: View {
     @ViewBuilder
     private var problems: some View {
         let noRoom = dailyPlan.unplaced.values.reduce(0, +)
-        let stranded = dailyPlan.outOfDays.values.reduce(0, +)
-        if unit == .week, offset == 0, !showIntended, noRoom > 60 || stranded > 60 {
+        if unit == .week, offset == 0, !showIntended, noRoom > 60 {
             HStack(spacing: 14) {
                 if noRoom > 60 {
-                    problem(hours(noRoom), "has no room in the days left",
+                    problem(hours(noRoom), "won't fit in the days left",
                             tooltip: droppedExplanation(
                                 dailyPlan.unplaced,
                                 heading: "These hours don't fit in the days that remain.",
                                 footer: "Whatever needs the most hours per remaining day is served first, "
                                       + "so the rest take what's left rather than every allocation losing "
                                       + "a little. More available hours would help."))
-                }
-                if stranded > 60 {
-                    problem(hours(stranded), "has no claimed days left",
-                            tooltip: droppedExplanation(
-                                dailyPlan.outOfDays,
-                                heading: "These allocations have no claimed days left this week.",
-                                footer: "More hours won't help — the days they're allowed to use have "
-                                      + "passed. Widening their weekdays would."))
                 }
                 Spacer(minLength: 0)
             }
@@ -1273,9 +1264,11 @@ struct PlannerView: View {
                 pending[blob.kind, default: []].append(blob)
                 continue
             }
-            // A block big enough to stand alone closes any group of its own kind, so the collapsed block
-            // stays where its members were rather than drifting to the top of the column.
-            flush(blob.kind)
+            // Any block big enough to stand alone closes EVERY pending group, not just its own kind.
+            // Closing only its own kind left a lone sliver waiting until the end of the loop, which put it
+            // at the top of the column — a stray 1.3h-coloured band above everything, miles from the block
+            // it belongs beside.
+            for kind in [PlannerWeekGrid.Kind.tracked, .unallocated, .owed] { flush(kind) }
             out.append(blob)
         }
         for kind in [PlannerWeekGrid.Kind.tracked, .unallocated, .owed] { flush(kind) }

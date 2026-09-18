@@ -208,11 +208,13 @@ public struct PlannerWeekGrid: View {
     /// let a full day's stack grow past the top of its own outline and over the day heading above it,
     /// which read as a layout fault rather than as a full day. The excess is still stated by the cap.
     private func scale(_ day: DayInput, total: Double) -> Double {
-        let drawable = day.blobs.filter { $0.hours > 0.02 }.count
-        let chrome = CGFloat(max(0, drawable - 1)) + 4 + (total > capacityHours ? 14 : 0)
+        let drawn = day.blobs.filter { $0.hours > 0.02 }
+        let chrome = CGFloat(max(0, drawn.count - 1)) + 4 + (total > capacityHours ? 14 : 0)
         let available = max(20, Self.gridHeight - chrome)
-        let wanted = height(min(total, capacityHours)) * CGFloat(max(1, total / capacityHours))
-        guard wanted > available else { return min(1, Double(available / max(1, wanted))) }
+        // What the blobs will actually occupy, minimum heights included — otherwise a day of many small
+        // blocks is scaled as if they were hairlines and overflows its own container.
+        let wanted = drawn.reduce(0.0 as CGFloat) { $0 + max(12, height($1.hours)) }
+        guard wanted > available else { return 1 }
         return Double(available / wanted)
     }
 
@@ -339,7 +341,7 @@ public struct PlannerWeekGrid: View {
                     .clipShape(RoundedRectangle(cornerRadius: 3))
             }
 
-            if h > 9 {
+            if true {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(blob.name)
                         .font(.system(size: compact ? 8 : 9,
@@ -356,7 +358,10 @@ public struct PlannerWeekGrid: View {
                 .padding(.top, 1)
             }
         }
-        .frame(height: max(3, h))
+        // Never thinner than a label. A three-point bar of colour with no name is unexplainable — "why is
+        // vllm at the top of Friday?" was exactly that — so a block that exists at all is drawn big enough
+        // to say what it is, and the column's scale absorbs the difference.
+        .frame(height: max(12, h))
         .opacity(dim ? 0.15 : 1)
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { onOpen(blob.targetID, weekday) }
