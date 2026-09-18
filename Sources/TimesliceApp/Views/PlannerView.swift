@@ -662,16 +662,41 @@ struct PlannerView: View {
             HStack(spacing: 14) {
                 if noRoom > 60 {
                     problem(hours(noRoom), "won't fit in the days left",
-                            tooltip: droppedExplanation(
-                                dailyPlan.unplaced,
-                                heading: "These hours don't fit in the days that remain.",
-                                footer: "Whatever needs the most hours per remaining day is served first, "
-                                      + "so the rest take what's left rather than every allocation losing "
-                                      + "a little. More available hours would help."))
+                            tooltip: noRoomExplanation())
                 }
                 Spacer(minLength: 0)
             }
         }
+    }
+
+    /// Why these hours don't fit, naming the days that are full — and the spare hours they can't reach.
+    ///
+    /// The situation that looks like a contradiction otherwise: the week reports 1.9h unclaimed while
+    /// Saturday shows 3.4h free. Both are true. What's short is office and gym, neither of which claims
+    /// Saturday, so Saturday's spare is unreachable by exactly the things that need it — and telling you
+    /// "more available hours would help" was wrong, because more hours on SATURDAY wouldn't.
+    private func noRoomExplanation() -> String {
+        let dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        var lines = ["These hours don't fit in the days that remain."]
+        for (id, seconds) in dailyPlan.unplaced.sorted(by: { $0.value > $1.value }) {
+            let days = (dailyPlan.claimedDays[id] ?? []).map { dayNames[$0 - 1] }
+            lines.append("  \(name(forTarget: id))  \(hours(seconds))"
+                         + (days.isEmpty ? "" : " — only \(days.joined(separator: ", ")) left, and full"))
+        }
+        let spare = dailyPlan.leftoverRoom
+            .filter { $0.value > 60 }
+            .sorted { $0.key < $1.key }
+        if !spare.isEmpty {
+            lines.append("")
+            let described = spare.map { "\(dayNames[$0.key - 1]) \(hours($0.value))" }
+            lines.append("Free hours do remain — " + described.joined(separator: ", ")
+                         + " — but on days these allocations don't claim. Giving them those weekdays "
+                         + "would reach it; more available hours would not.")
+        } else {
+            lines.append("")
+            lines.append("Every remaining day is full, so more available hours would help.")
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func problem(_ amount: String, _ text: String, tooltip: String) -> some View {

@@ -343,8 +343,17 @@ public extension Replan {
     struct DailyPlan: Sendable {
         /// weekday → allocation → what that day is being asked for.
         public let byDay: [Int: [Int64: DayShare]]
+        /// Per allocation, the remaining weekdays it is allowed to use. Lets a caller say WHICH days were
+        /// full rather than only that something didn't fit.
+        public var claimedDays: [Int64: [Int]] = [:]
         /// Hours that don't fit because the days that remain are full. MORE AVAILABLE HOURS WOULD HELP.
         public let unplaced: [Int64: TimeInterval]
+        /// Per remaining weekday, hours nothing was able to use.
+        ///
+        /// Needed to explain the situation that otherwise looks like a contradiction: the week reports very
+        /// little spare while one day shows hours free, because what's short is stuck on days that ARE full
+        /// and the free hours are on a day those allocations don't claim.
+        public let leftoverRoom: [Int: TimeInterval]
         /// Hours that don't fit because the allocation's own claimed days have already passed. More hours
         /// would NOT help — the days it is allowed to use are gone.
         ///
@@ -354,10 +363,14 @@ public extension Replan {
         public let outOfDays: [Int64: TimeInterval]
 
         public init(byDay: [Int: [Int64: DayShare]], unplaced: [Int64: TimeInterval],
-                    outOfDays: [Int64: TimeInterval] = [:]) {
+                    outOfDays: [Int64: TimeInterval] = [:],
+                    leftoverRoom: [Int: TimeInterval] = [:],
+                    claimedDays: [Int64: [Int]] = [:]) {
+            self.claimedDays = claimedDays
             self.byDay = byDay
             self.unplaced = unplaced
             self.outOfDays = outOfDays
+            self.leftoverRoom = leftoverRoom
         }
     }
 
@@ -451,15 +464,32 @@ public extension Replan {
             }
         }
 
-        // Then whatever is still owed, into whatever room is left, earliest day first.
-        for index in queue.indices {
-            for weekday in queue[index].days where queue[index].remainder > 60 {
-                let available = max(0, room[weekday] ?? 0)
-                guard available > 60 else { continue }
-                let take = min(queue[index].remainder, available)
-                carried[weekday, default: [:]][queue[index].id, default: 0] += take
-                room[weekday] = available - take
-                queue[index].remainder -= take
+        // Then whatever is still owed, into whatever room is left — but shared out rather than handed to
+        // the front of the queue.
+        //
+        // Serving each allocation's whole remainder in turn starved the small ones: two hours of stonks with
+        // one day left came sixth of seven, so raising the waking day by two hours moved stonks by four
+        // minutes and gave the rest to recon paper and vllm. Nobody would call that a plan.
+        //
+        // So the carry goes round in half-hour turns, in the same priority order. The most pressing
+        // allocation still gets served first within each round, and no allocation is reduced to crumbs
+        // because of where it sits in a list.
+        let quantum: TimeInterval = 30 * 60
+        var progress = true
+        while progress {
+            progress = false
+            for index in queue.indices where queue[index].remainder > 60 {
+                for weekday in queue[index].days {
+                    let available = max(0, room[weekday] ?? 0)
+                    guard available > 60 else { continue }
+                    let take = min(min(quantum, queue[index].remainder), available)
+                    guard take > 60 else { continue }
+                    carried[weekday, default: [:]][queue[index].id, default: 0] += take
+                    room[weekday] = available - take
+                    queue[index].remainder -= take
+                    progress = true
+                    break                      // one turn, then the next allocation gets its turn
+                }
             }
         }
 
@@ -474,6 +504,8 @@ public extension Replan {
         }
         var unplaced: [Int64: TimeInterval] = [:]
         var outOfDays: [Int64: TimeInterval] = [:]
+        var claimedDays: [Int64: [Int]] = [:]
+        for work in queue { claimedDays[work.id] = work.days }
         for work in queue where work.remainder > 60 {
             if work.days.isEmpty {
                 outOfDays[work.id] = work.remainder
@@ -481,6 +513,8 @@ public extension Replan {
                 unplaced[work.id] = work.remainder
             }
         }
-        return DailyPlan(byDay: byDay, unplaced: unplaced, outOfDays: outOfDays)
+        return DailyPlan(byDay: byDay, unplaced: unplaced, outOfDays: outOfDays,
+                         leftoverRoom: room.filter { $0.value > 60 },
+                         claimedDays: claimedDays)
     }
 }

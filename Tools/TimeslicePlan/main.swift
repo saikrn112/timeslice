@@ -70,6 +70,55 @@ do {
         }
     }
 
+    // What each remaining day is asked for, per allocation, split into its own share and what was moved
+    // onto it. This is what the week grid draws, so a disagreement between the two is a view bug.
+    if let week = calendar.dateInterval(of: .weekOfYear, for: Date()) {
+        let floors = targets.filter { $0.direction == .atLeast }
+        let today = calendar.component(.weekday, from: Date())
+        let intervals = try store.intervals(from: week.start, to: week.end)
+        var credited: [Int: [Int64: TimeInterval]] = [:]
+        for interval in intervals {
+            let end = interval.end ?? Date()
+            guard end > interval.start else { continue }
+            let weekday = calendar.component(.weekday, from: interval.start)
+            let seconds = end.timeIntervalSince(interval.start)
+            for target in floors
+            where membership.taskIDs(for: target.subject).contains(interval.projectID) {
+                credited[weekday, default: [:]][target.id, default: 0] += seconds
+            }
+        }
+        let input = Planner.Input(targets: targets, reservations: reservations,
+                                  membership: membership, names: names,
+                                  wakingSecondsPerDay: wakingHours * 3600)
+        let built = Planner.plan(input)
+        let fraction = Replan.fractionOfDayLeft(now: Date(), wakingSeconds: wakingHours * 3600)
+        let daily = Replan.dailyPlan(input: input, plan: built, creditedByWeekday: credited,
+                                     remainingWeekdays: Array(today...7),
+                                     fractionOfTodayLeft: fraction)
+        let dayNames2 = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        print(String(format: "\nwhat the remaining days are asked for (%.0f%% of today left):",
+                     fraction * 100))
+        for weekday in today...7 {
+            guard let shares = daily.byDay[weekday], !shares.isEmpty else { continue }
+            let room = built.days.first { $0.weekday == weekday }
+                .map { ($0.capacitySeconds - $0.reservedSeconds)
+                        * (weekday == today ? fraction : 1) / 3600 } ?? 0
+            print(String(format: "  %@  room %.1fh", dayNames2[weekday - 1], room))
+            for (id, share) in shares.sorted(by: { $0.value.total > $1.value.total }) {
+                print(String(format: "      %-24@ own %.2fh  moved %.2fh",
+                             (names[id] ?? "?") as NSString,
+                             share.intended / 3600, share.carried / 3600))
+            }
+        }
+        for (id, seconds) in daily.unplaced {
+            print(String(format: "  no room: %@ %.2fh", (names[id] ?? "?") as NSString, seconds / 3600))
+        }
+        for (id, seconds) in daily.outOfDays {
+            print(String(format: "  no days left: %@ %.2fh", (names[id] ?? "?") as NSString,
+                         seconds / 3600))
+        }
+    }
+
     let plan = Planner.plan(Planner.Input(
         targets: targets, reservations: reservations, membership: membership, names: names,
         wakingSecondsPerDay: wakingHours * 3600))
