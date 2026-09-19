@@ -151,6 +151,13 @@ struct MainWindowView: View {
             SettingsPanel(settings: settings, store: appState.storeForEditing,
                           sync: sync, auth: auth)
         }
+        // So a capture run can review the panel: it's a popover, and `screencapture -l` images one
+        // window, so the only way to see it is to have the app open it itself.
+        .onAppear {
+            if ProcessInfo.processInfo.environment["TIMESLICE_OPEN_SETTINGS"] == "1" {
+                showSettings = true
+            }
+        }
     }
 
     private var privacyIndicator: some View {

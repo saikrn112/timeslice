@@ -22,6 +22,9 @@ struct MetricsView: View {
     @State private var summary: RangeSummary?
     @State private var buckets: [Bucket] = []
     @State private var daySegments: [DaySegment] = []
+    /// Lane index → owning device, from `Aggregations.dayTimeline`. Holds a row for every device this
+    /// database knows about, so an idle machine keeps its place instead of disappearing for the day.
+    @State private var laneOwners: [String?] = []
     @State private var rankedTotals: [ProjectTotal] = []
     @State private var weekdayAvgs: [WeekdayAverage] = []
 
@@ -365,12 +368,12 @@ struct MetricsView: View {
             if daySegments.isEmpty {
                 placeholder("Nothing tracked on this day")
             } else {
-                let lanes = Aggregations.laneCount(daySegments)
+                let lanes = max(laneOwners.count, Aggregations.laneCount(daySegments))
                 HStack(spacing: 6) {
                     // Device names down the left edge, one per lane, so each row says which machine
                     // it came from. Names only — the times live on their own line below, where
                     // there's room to read them.
-                    if timelineDevices.count > 1 {
+                    if laneOwners.count > 1 {
                         deviceLaneLabels(lanes: lanes)
                     }
                 Chart(daySegments) { seg in
@@ -602,9 +605,11 @@ struct MetricsView: View {
 
     /// Devices contributing to this day, in the same first-appearance order the lanes use.
     private var timelineDevices: [String?] {
-        // Same order the lanes were assigned with, or the labels would sit beside the wrong rows.
-        Aggregations.orderedDevices(
-            daySegments, deviceOrder: (try? appState.storeForEditing.deviceOrder()) ?? [])
+        // The rows themselves, deduplicated — one device can own several lanes when its own blocks
+        // overlap. Derived from the lane map so this list and the rows can never disagree.
+        var seen: [String?] = []
+        for owner in laneOwners where !seen.contains(where: { $0 == owner }) { seen.append(owner) }
+        return seen
     }
 
     /// Short display name for a device: its user-set label, else the raw id, else "unknown" for
@@ -620,13 +625,11 @@ struct MetricsView: View {
     /// Name only: the per-lane time made these long enough to be unreadable sideways, so the totals
     /// moved to their own line under the plot.
     private func deviceLaneLabels(lanes: Int) -> some View {
-        // Lane -> device taken from the segments themselves, so a label can't drift from the row it
-        // names (one device may span several lanes when its own blocks overlap).
-        var owner: [Int: String?] = [:]
-        for seg in daySegments where owner[seg.lane] == nil { owner[seg.lane] = seg.deviceID }
+        // Lane -> device comes from `dayTimeline`, not from the segments: a device with nothing today
+        // has no segment to read a name off, and deriving it here is what made an idle machine vanish.
         return VStack(spacing: 0) {
             ForEach(0..<lanes, id: \.self) { lane in
-                let device = owner[lane] ?? nil
+                let device = lane < laneOwners.count ? laneOwners[lane] : nil
                 Text(deviceName(device))
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -2282,9 +2285,12 @@ struct MetricsView: View {
             .filter { $0.seconds > 0 }
             .sorted { $0.seconds > $1.seconds }
         if isDay {
-            daySegments = Aggregations.daySegments(
-                intervals: all, day: range.start,
-                deviceOrder: (try? appState.storeForEditing.deviceOrder()) ?? [])
+            let known = (try? store.deviceOrder()) ?? []
+            let timeline = Aggregations.dayTimeline(
+                Aggregations.daySegments(intervals: all, day: range.start),
+                deviceOrder: known, knownDevices: known)
+            daySegments = timeline.segments
+            laneOwners = timeline.laneOwners
             // Stable legend: first appearance order along the day, computed once here.
             // One entry per GROUP (or per Inbox task), in first-appearance order — a day with
             // 30 tasks across 5 groups gets 5 chips, not 30.

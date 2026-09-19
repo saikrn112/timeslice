@@ -96,14 +96,32 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Re-mark quiet tasks the moment the threshold changes, rather than at the next reload.
+    ///
+    /// Reading the threshold at reload time (below) is enough for correctness but wrong to use: turning
+    /// "Quiet after" from 30d down to 10d left the list unchanged until something else happened to
+    /// trigger a reload, which reads as the setting doing nothing. Only this one key needs watching —
+    /// everything else the settings own is read at render time by whoever draws it.
+    func observeQuietThreshold(_ settings: AppSettings) {
+        settings.$dormantAfterDays
+            .dropFirst()
+            .removeDuplicates()
+            // The NEW value, threaded through: `@Published` fires in willSet, so `AppSettings` hasn't
+            // written it to UserDefaults yet and re-reading the store here would recompute with the old
+            // threshold — the setting would appear to lag one change behind.
+            .sink { [weak self] days in self?.recomputeDormancy(days: days) }
+            .store(in: &cancellables)
+    }
+
     /// Which tasks have gone quiet, and for how long.
     ///
-    /// The threshold is read from `AppSettings` at the time of the reload rather than injected, so changing
-    /// it takes effect on the next reload without this type needing to observe the settings object.
-    private func recomputeDormancy() {
+    /// The threshold is read from `AppSettings` at the point of use rather than injected, so a reload and
+    /// a settings change both land on the same code.
+    private func recomputeDormancy(days override: Int? = nil) {
         // A capture run can force a threshold, so the quiet state is reviewable on a database where
         // everything has been touched this month.
         let days = ProcessInfo.processInfo.environment["TIMESLICE_DORMANT_DAYS"].flatMap { Int($0) }
+            ?? override
             ?? UserDefaults.standard.object(forKey: "dormantAfterDays") as? Int ?? 30
         let activity = (try? store.lastActivityByProject()) ?? [:]
         dormantTaskIDs = Dormancy.dormantTaskIDs(lastActivity: activity, tasks: projects,

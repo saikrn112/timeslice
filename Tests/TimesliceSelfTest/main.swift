@@ -2802,6 +2802,84 @@ func testHistoricalWeek() {
           "a week with nothing tracked owes all of it")
 }
 
+/// Every device this database knows about keeps a row on the day timeline, whether or not it recorded
+/// anything that day. A missing row is indistinguishable from a missing machine, and rows that appear and
+/// disappear as you scrub between days make the timeline unreadable.
+func testDayTimelineRows() {
+    print("Day timeline rows:")
+    func seg(_ id: Int64, _ from: Double, _ to: Double, _ device: String?) -> DaySegment {
+        DaySegment(id: id, projectID: 1, startHour: from, endHour: to, deviceID: device)
+    }
+    let order = ["mac", "phone", "studio"]
+
+    // Only the Mac worked today; the phone and the studio still get a row each.
+    let onlyMac = Aggregations.dayTimeline([seg(1, 9, 10, "mac"), seg(2, 11, 12, "mac")],
+                                           deviceOrder: order, knownDevices: order)
+    check(onlyMac.laneOwners == ["mac", "phone", "studio"],
+          "an idle device keeps its row, in the canonical order")
+    check(onlyMac.laneCount == 3, "three known devices means three rows")
+    check(onlyMac.segments.allSatisfy { $0.lane == 0 },
+          "the only device that worked owns the first row")
+    check(onlyMac.segments.count == 2, "no segment is dropped by reserving empty rows")
+
+    // A device with overlapping blocks takes two rows of its own, and the idle ones come after — not
+    // interleaved into the middle of its block.
+    let overlap = Aggregations.dayTimeline([seg(1, 9, 12, "mac"), seg(2, 10, 11, "mac"),
+                                            seg(3, 14, 15, "studio")],
+                                           deviceOrder: order, knownDevices: order)
+    check(overlap.laneOwners == ["mac", "mac", "phone", "studio"],
+          "overlap widens a device's own block of rows")
+    check(overlap.segments.filter { $0.deviceID == "mac" }.map(\.lane).sorted() == [0, 1],
+          "the overlapping pair is on two rows, neither hidden")
+    check(overlap.segments.first { $0.deviceID == "studio" }?.lane == 3,
+          "the studio's blocks land on the studio's row, not the phone's empty one")
+    check(!overlap.segments.contains { $0.lane == 2 },
+          "nothing is ever drawn on an idle device's row")
+
+    // Nothing tracked at all: still one row per known device, so the rows don't jump when you scrub
+    // onto an empty day.
+    let empty = Aggregations.dayTimeline([], deviceOrder: order, knownDevices: order)
+    check(empty.laneOwners == ["mac", "phone", "studio"], "an empty day keeps every row")
+    check(empty.segments.isEmpty, "an empty day invents no segments")
+
+    // One device is the ordinary case and must look exactly as it did: a single full-height row.
+    let single = Aggregations.dayTimeline([seg(1, 9, 10, "mac")],
+                                          deviceOrder: ["mac"], knownDevices: ["mac"])
+    check(single.laneCount == 1, "one device is one row")
+    check(single.laneOwners == ["mac"], "and that row is the device")
+
+    // A single device with overlapping blocks still fans out within its own row.
+    let singleOverlap = Aggregations.dayTimeline([seg(1, 9, 12, "mac"), seg(2, 10, 11, "mac")],
+                                                deviceOrder: ["mac"], knownDevices: ["mac"])
+    check(singleOverlap.laneCount == 2, "one device's overlap still needs two rows")
+    check(singleOverlap.laneOwners == ["mac", "mac"], "both rows belong to it")
+
+    // Rows recorded before device attribution existed sort last and keep a row of their own.
+    let unattributed = Aggregations.dayTimeline([seg(1, 9, 10, nil), seg(2, 11, 12, "mac")],
+                                                deviceOrder: order, knownDevices: ["mac"])
+    check(unattributed.laneOwners == ["mac", nil], "unattributed rows sort after named devices")
+    check(unattributed.segments.first { $0.deviceID == nil }?.lane == 1,
+          "and their blocks follow their row")
+
+    // A device absent from deviceOrder is still placed deterministically rather than dropped.
+    let stranger = Aggregations.dayTimeline([], deviceOrder: ["mac"],
+                                            knownDevices: ["mac", "zz-laptop", "aa-laptop"])
+    check(stranger.laneOwners == ["mac", "aa-laptop", "zz-laptop"],
+          "unranked devices come after ranked ones, ordered by id")
+
+    // No devices at all — the very first launch. One row, unnamed, never zero.
+    let none = Aggregations.dayTimeline([], deviceOrder: [], knownDevices: [])
+    check(none.laneCount == 1, "there is always at least one row to draw into")
+    check(none.laneOwners == [nil], "and it belongs to nobody")
+
+    // knownDevices is additive, not a filter: a device that recorded today but isn't in the list yet
+    // (a peer's first sync) must not lose its row.
+    let newPeer = Aggregations.dayTimeline([seg(1, 9, 10, "phone")],
+                                           deviceOrder: order, knownDevices: ["mac"])
+    check(newPeer.laneOwners == ["mac", "phone"], "a device seen only in today's data still gets a row")
+    check(newPeer.segments.first?.lane == 1, "and its blocks sit on it")
+}
+
 func testDormancy() {
     print("Dormancy:")
     let calendar = Calendar.current
@@ -5796,6 +5874,7 @@ do {
     testDailyPlan()
     testPlannerWeekFacts()
     testHistoricalWeek()
+    testDayTimelineRows()
     testDormancy()
     testPerDayPlan()
     testPrimaryOwner()
@@ -5824,6 +5903,7 @@ do {
     testDailyPlan()
     testPlannerWeekFacts()
     testHistoricalWeek()
+    testDayTimelineRows()
     testDormancy()
     testPerDayPlan()
     testPrimaryOwner()

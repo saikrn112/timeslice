@@ -563,8 +563,13 @@ public enum Aggregations {
 
     /// Devices in order of first appearance — a stable, caller-visible row order.
     /// nil (unattributed) sorts last so named devices keep the top rows.
+    /// `alwaysInclude` adds devices that recorded NOTHING on this day. A row is how the timeline says
+    /// "this machine", so a machine that was simply idle should still have one — otherwise an empty day
+    /// on the laptop is indistinguishable from the laptop not existing, and the rows move under you as
+    /// you scrub between days.
     public static func orderedDevices(_ segments: [DaySegment],
-                                      deviceOrder: [String] = []) -> [String?] {
+                                      deviceOrder: [String] = [],
+                                      alwaysInclude: [String] = []) -> [String?] {
         // Sorted by id, NOT by first appearance. First-appearance order changed as soon as an
         // earlier block arrived from a peer, so a device's row moved on its own between syncs —
         // whichever device happened to have the earliest synced block took the top lane. Sorting by
@@ -573,7 +578,7 @@ public enum Aggregations {
         // nil (unattributed, pre-attribution rows) sorts last so named devices keep the top lanes.
         // A device absent from THIS day simply contributes no lane; the ones present keep their
         // relative order, so scrubbing back through days doesn't reshuffle the rows either.
-        let ids = Set(segments.map(\.deviceID))
+        let ids = Set(segments.map(\.deviceID)).union(alwaysInclude.map { Optional($0) })
         let rank = Dictionary(uniqueKeysWithValues: deviceOrder.enumerated().map { ($1, $0) })
         let named = ids.compactMap { $0 }.sorted {
             // Anything the caller didn't rank sorts after everything it did, by id, so an
@@ -597,6 +602,49 @@ public enum Aggregations {
             }
             return placed
         }
+    }
+
+    /// A day's segments packed into lanes, WITH the device each lane belongs to.
+    ///
+    /// `assignLanes` alone can't answer "what is this row?" for a device that recorded nothing today:
+    /// it has no segments, so it leaves no trace in the output and the lane simply doesn't exist. The
+    /// view then derived lane ownership from the segments themselves, which meant an idle machine
+    /// vanished from the timeline. Lane ownership is decided here, once, and empty rows are kept.
+    public struct DayTimeline: Sendable, Equatable {
+        public var segments: [DaySegment]
+        /// Lane index → owning device (nil = unattributed rows). One entry per row, empty rows included.
+        public var laneOwners: [String?]
+        public var laneCount: Int { max(1, laneOwners.count) }
+        public init(segments: [DaySegment], laneOwners: [String?]) {
+            self.segments = segments
+            self.laneOwners = laneOwners
+        }
+    }
+
+    public static func dayTimeline(_ segments: [DaySegment], deviceOrder: [String] = [],
+                                  knownDevices: [String] = []) -> DayTimeline {
+        let sorted = segments.sorted { $0.startHour < $1.startHour }
+        let devices = orderedDevices(sorted, deviceOrder: deviceOrder, alwaysInclude: knownDevices)
+        // One device (or none): the timeline is a single full-height row, with internal overlaps fanned
+        // out as before. No labels are drawn in this case, so every lane has the same owner.
+        guard devices.count > 1 else {
+            let packed = packByOverlap(sorted, baseLane: 0)
+            let lanes = max(1, (packed.map(\.lane).max() ?? 0) + 1)
+            return DayTimeline(segments: packed.sorted { $0.startHour < $1.startHour },
+                               laneOwners: Array(repeating: devices.first ?? nil, count: lanes))
+        }
+        var out: [DaySegment] = []
+        var owners: [String?] = []
+        for device in devices {
+            let mine = sorted.filter { $0.deviceID == device }
+            // The reason this function exists: an idle device still takes its row.
+            guard !mine.isEmpty else { owners.append(device); continue }
+            let packed = packByOverlap(mine, baseLane: owners.count)
+            let used = (packed.map(\.lane).max() ?? owners.count) - owners.count + 1
+            owners.append(contentsOf: Array(repeating: device, count: used))
+            out.append(contentsOf: packed)
+        }
+        return DayTimeline(segments: out.sorted { $0.startHour < $1.startHour }, laneOwners: owners)
     }
 
     /// How many lanes `segments` needs — 1 when nothing overlaps.
