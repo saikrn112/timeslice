@@ -88,6 +88,12 @@ struct ProjectListView: View {
         // Stop pinning an empty project once it has tasks (it now shows on its own) or when the
         // scope changes — otherwise it would linger in Today forever.
         .onChange(of: appState.scope) { _, _ in justCreatedProjectID = nil }
+        // A capture run can open straight into All Time, so the quiet tasks Today hides are reviewable.
+        .onAppear {
+            if ProcessInfo.processInfo.environment["TIMESLICE_SCOPE"] == "all" {
+                appState.scope = .allTime
+            }
+        }
         .onChange(of: appState.projects) { _, _ in
             if let id = justCreatedProjectID,
                appState.projects.contains(where: { $0.taskProjectID == id }) {

@@ -19,8 +19,13 @@ public enum Dormancy {
     ///     been tracked at all, which counts as silent — the day it was created is not activity.
     ///   - tasks: every task to consider. Finished and archived ones are left out by the caller, because a
     ///     task you deliberately closed is not one that drifted.
+    ///   - created: task id → when it was written down, for tasks nothing has ever been tracked against.
+    ///     Without it a task is quiet the moment you create it, which is wrong in itself and worse once
+    ///     quiet tasks are hidden from Today: a task you just wrote down would never appear there at all.
+    ///     A task with no creation date recorded keeps the old behaviour.
     ///   - afterDays: days of silence required. Zero or less turns the whole idea off.
     public static func dormantTaskIDs(lastActivity: [Int64: Date],
+                                      created: [Int64: Date] = [:],
                                       tasks: [Project],
                                       afterDays: Int,
                                       now: Date = Date(),
@@ -29,9 +34,13 @@ public enum Dormancy {
         var out: Set<Int64> = []
         for task in tasks where !task.finished && !task.archived {
             guard let days = daysSince(lastActivity[task.id], now: now, calendar: calendar) else {
-                // Never tracked. Counts as dormant, so a list of things you wrote down and never started
-                // doesn't read as a list of things you are doing.
-                out.insert(task.id)
+                // Never tracked: the clock runs from when it was written down instead. A list of things
+                // you noted and never started should still go quiet — just not on the day you note them.
+                if let since = daysSince(created[task.id], now: now, calendar: calendar) {
+                    if since >= afterDays { out.insert(task.id) }
+                } else {
+                    out.insert(task.id)      // no creation date recorded (pre-column rows)
+                }
                 continue
             }
             if days >= afterDays { out.insert(task.id) }

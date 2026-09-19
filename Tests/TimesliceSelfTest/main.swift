@@ -2909,6 +2909,27 @@ func testDormancy() {
                                   now: now, calendar: calendar).contains(2) == false,
           "and a longer threshold spares a task just under it")
 
+    // A task nothing has ever been tracked against goes quiet from when it was WRITTEN DOWN. Without
+    // this, a task is quiet the second you create it — and because Today hides quiet tasks, a task you
+    // just added would never appear there at all.
+    let fresh = [task(10), task(11), task(12)]
+    let created: [Int64: Date] = [10: now, 11: daysAgo(40)]
+    let byCreation = Dormancy.dormantTaskIDs(lastActivity: [:], created: created, tasks: fresh,
+                                             afterDays: 30, now: now, calendar: calendar)
+    check(!byCreation.contains(10), "a task written down today is not already quiet")
+    check(byCreation.contains(11), "one written down 40 days ago and never started is")
+    check(byCreation.contains(12), "and one with no creation date recorded keeps the old behaviour")
+    check(Dormancy.dormantTaskIDs(lastActivity: [:], created: created, tasks: fresh, afterDays: 0,
+                                  now: now, calendar: calendar).isEmpty,
+          "off is still off, whatever the creation dates say")
+    check(!Dormancy.dormantTaskIDs(lastActivity: [11: daysAgo(1)], created: created, tasks: fresh,
+                                   afterDays: 30, now: now, calendar: calendar).contains(11),
+          "tracking it beats its creation date — activity is what the rule is about")
+    // Exactly at the threshold, matching the tracked case (>= afterDays).
+    check(Dormancy.dormantTaskIDs(lastActivity: [:], created: [10: daysAgo(30)], tasks: [task(10)],
+                                  afterDays: 30, now: now, calendar: calendar).contains(10),
+          "the creation clock uses the same boundary as the activity clock")
+
     // Counted by calendar day, so the time of day at either end doesn't shift the answer.
     let lateNight = calendar.date(from: DateComponents(year: 2026, month: 8, day: 19, hour: 23))!
     let earlyNow = calendar.date(from: DateComponents(year: 2026, month: 9, day: 18, hour: 1))!

@@ -80,7 +80,23 @@ final class AppState: ObservableObject {
 
     /// The active-task totals to display for the current scope.
     var visibleTotals: [ProjectTotal] {
-        scope == .today ? todayTotals : allTimeTotals
+        // Quiet tasks leave Today — the point of marking them at all. A task untouched for weeks isn't
+        // what today is about; it keeps its moon in All Time, and returns to Today the moment you track
+        // it, because dormancy is derived rather than stored.
+        //
+        // Filtered HERE and not in `todayTotals`, because the menu-bar popover and the global switcher
+        // read that list too, and starting a quiet task is precisely how it stops being quiet. Hiding it
+        // there would leave it unreachable from the surface you'd use to revive it.
+        scope == .today
+            ? todayTotals.filter { !dormantTaskIDs.contains($0.project.id) }
+            : allTimeTotals
+    }
+
+    /// Ids of the rows ↑/↓ can land on in the window, matching what the list actually shows.
+    private var arrowableIDs: [Int64] {
+        scope == .today
+            ? selectableProjects.filter { !dormantTaskIDs.contains($0.id) }.map(\.id)
+            : selectableProjects.map(\.id)
     }
 
     func reload() {
@@ -109,7 +125,12 @@ final class AppState: ObservableObject {
             // The NEW value, threaded through: `@Published` fires in willSet, so `AppSettings` hasn't
             // written it to UserDefaults yet and re-reading the store here would recompute with the old
             // threshold — the setting would appear to lag one change behind.
-            .sink { [weak self] days in self?.recomputeDormancy(days: days) }
+            .sink { [weak self] days in
+                guard let self else { return }
+                self.recomputeDormancy(days: days)
+                // Today's contents depend on the quiet set now, so the lists have to be rebuilt too.
+                self.recomputeTotals()
+            }
             .store(in: &cancellables)
     }
 
@@ -124,8 +145,9 @@ final class AppState: ObservableObject {
             ?? override
             ?? UserDefaults.standard.object(forKey: "dormantAfterDays") as? Int ?? 30
         let activity = (try? store.lastActivityByProject()) ?? [:]
-        dormantTaskIDs = Dormancy.dormantTaskIDs(lastActivity: activity, tasks: projects,
-                                                 afterDays: days)
+        dormantTaskIDs = Dormancy.dormantTaskIDs(lastActivity: activity,
+                                                 created: (try? store.projectCreationDates()) ?? [:],
+                                                 tasks: projects, afterDays: days)
         var quiet: [Int64: Int] = [:]
         for task in projects {
             quiet[task.id] = Dormancy.daysSince(activity[task.id]) ?? -1
@@ -536,7 +558,9 @@ final class AppState: ObservableObject {
     func moveSelection(by delta: Int) {
         // A switcher hold cycles the frozen recency order; everything else (↑/↓ in the list)
         // walks the displayed order.
-        let ids = switcherOrder ?? selectableProjects.map(\.id)
+        // Not `selectableProjects` directly: in Today the list hides quiet tasks, and stepping onto a
+        // row that isn't on screen looks like the arrow key doing nothing.
+        let ids = switcherOrder ?? arrowableIDs
         guard !ids.isEmpty else { return }
         let currentIndex = selectedProjectID.flatMap { ids.firstIndex(of: $0) } ?? 0
         let next = (currentIndex + delta + ids.count) % ids.count

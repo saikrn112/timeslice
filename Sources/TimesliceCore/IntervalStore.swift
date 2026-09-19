@@ -1121,6 +1121,24 @@ public final class IntervalStore {
         return map
     }
 
+    /// When each task was written down. Only dormancy needs it, so it's a query rather than another
+    /// field on `Project`.
+    ///
+    /// `created_at` is SQLite text in UTC, so the conversion is left to SQLite (`strftime('%s', …)`)
+    /// rather than reconstructing a formatter here. Rows predating the column come back absent.
+    public func projectCreationDates() throws -> [Int64: Date] {
+        let stmt = try prepare("SELECT id, strftime('%s', created_at) FROM projects "
+                               + "WHERE created_at IS NOT NULL")
+        defer { sqlite3_finalize(stmt) }
+        var map: [Int64: Date] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard sqlite3_column_type(stmt, 1) != SQLITE_NULL else { continue }
+            map[sqlite3_column_int64(stmt, 0)] =
+                Date(timeIntervalSince1970: sqlite3_column_double(stmt, 1))
+        }
+        return map
+    }
+
     /// Start of the earliest recorded interval, if any — bounds the "All time" range.
     public func earliestIntervalStart() throws -> Date? {
         let stmt = try prepare("SELECT MIN(start_utc) FROM intervals")
