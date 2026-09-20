@@ -59,3 +59,9 @@ The token is a file rather than a Keychain item because macOS keys Keychain ACLs
 signature, and an ad-hoc signed app gets a new signature on every rebuild — which means a login
 password prompt every time. With a real Developer ID the Keychain is the better home; see the
 note in `Sources/TimesliceCore/GoogleOAuth.swift`.
+
+---
+
+Building the same thing in another app? `drive-appdata-sync.md` is the implementation handoff — the
+file model, the merge rules, and the traps (scope mismatch, duplicate file names, main-actor
+deadlock) written out so they don't have to be rediscovered.
