@@ -302,6 +302,18 @@ migrations correct in a way hand-written SQL would not.
 - **Read Apple's docs early.** The reference pages are JS-rendered; fetch
   `https://developer.apple.com/tutorials/data/documentation/<path>.json` instead.
 
+## Drive sync
+
+Two documents, both in the notes vault (that's where this project's docs live, not `docs/`):
+
+- `~/workspace/persona/Notes/Projects/timeslice/artifacts/drive_appdata_sync.md` — how the sync is
+  built and why, written trap-first: the scope that 403s everything, Drive permitting duplicate
+  file names, the main-actor deadlock, the payload compatibility rules. Read this before touching
+  `DriveAPI`, `DriveSyncTransport`, `SyncPayload` or `SyncController`.
+- `~/workspace/persona/Notes/Projects/timeslice/artifacts/google_drive_setup.md` — creating an
+  OAuth client and pointing the app at it. Also inlined in README.md's Sync section, so a clone
+  is self-sufficient.
+
 ## Where things live
 
 - `Sources/TimesliceCore/` — `IntervalStore` (sqlite3, schema + migrations), `Aggregations`

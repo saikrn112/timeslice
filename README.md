@@ -61,8 +61,7 @@ below follows it. Hover any bar for the numbers; the solid inner bar is focused 
 - **Metrics**: day timeline, hours-per-day vs a goal, focus %, and where your time went — grouped
   by task or project. Drag across the timeline to measure working vs idle in any stretch.
 - **Sync across devices** (optional): sign in with Google and your devices stay in step through
-  your *own* Drive — no account with us, no server we run. Off by default; see
-  [docs/google-setup.md](docs/google-setup.md).
+  your *own* Drive — no account with us, no server we run. Off by default; setup below.
 - **Screen-share safe**: one toggle (**Fn + ⌘ + ⇧ + P**) hides everything at once — the menu-bar
   task name and the windows themselves (they stay visible to you but come out
   blank in any capture, including full-screen). The timer keeps running the whole time.
@@ -98,6 +97,47 @@ the script anytime to update.
 
 > Dev: `swift build` / `swift run TimesliceApp` for iteration; `swift run TimesliceSelfTest` for
 > the core-logic checks. Data lives at `~/Library/Application Support/Timeslice/timeslice.db`.
+
+## Sync (optional)
+
+Timeslice works fully offline; this is only for keeping several devices in step. There is no
+account and no server — your devices meet in a hidden, app-private folder in **your** Google Drive.
+
+The repo ships **without** OAuth credentials: a credential committed to a public repo can never be
+un-published, only rotated, and GitHub's push protection rejects it outright. So you supply your
+own, once.
+
+1. <https://console.cloud.google.com/> → create or pick a project
+2. **APIs & Services → Library → Google Drive API → Enable** (per-project; without it every
+   request fails with 403)
+3. **Credentials → Create credentials → OAuth client ID → Desktop app**
+4. **OAuth consent screen** → add the scope
+   `https://www.googleapis.com/auth/drive.appdata` — the narrow one: a hidden per-app folder,
+   invisible in your Drive and unreadable by other apps, so Timeslice can see nothing else of yours
+5. If publishing status is **Testing**, add your account under **Test users**
+
+```bash
+mkdir -p ~/.config/timeslice
+cat > ~/.config/timeslice/env <<'ENV'
+TIMESLICE_GOOGLE_CLIENT_ID="<your-id>.apps.googleusercontent.com"
+TIMESLICE_GOOGLE_CLIENT_SECRET="<your-client-secret>"
+ENV
+chmod 600 ~/.config/timeslice/env
+```
+
+Restart Timeslice, then **Settings → Sync across devices → Sign in with Google**. **Settings →
+Test** runs a live round trip (create → list → download → delete) so you can confirm it works
+without a second device.
+
+> Why a secret for a "public" client? Google's token endpoint requires `client_secret` even for
+> Desktop clients using PKCE. It isn't a real secret for an installed app — anyone can extract it
+> from a binary — which is exactly why PKCE is mandatory here: the per-attempt verifier protects the
+> exchange, and the `127.0.0.1` redirect means a copied credential can't receive your codes.
+
+Your token is stored at `~/Library/Application Support/Timeslice/google-token.json` (0600). It's a
+file rather than a Keychain item because macOS keys Keychain ACLs to the code signature, and an
+ad-hoc signed build gets a new signature every rebuild — which would mean a password prompt on
+every launch.
 
 ## License
 

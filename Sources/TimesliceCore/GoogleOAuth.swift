@@ -15,7 +15,8 @@ public enum GoogleOAuth {
     ///
     /// Kept out of source because GitHub push protection rightly rejects a committed OAuth
     /// credential, and because a credential in public git history can never be un-published — only
-    /// rotated. A fork supplies its own client; see docs/google-setup.md.
+    /// rotated. A fork supplies its own client; see the Sync section of README.md, or
+    /// `~/workspace/persona/Notes/Projects/timeslice/artifacts/google_drive_setup.md`.
     ///
     /// Google requires `client_secret` at the TOKEN endpoint even for a Desktop client using PKCE
     /// (it answers "client_secret is missing." otherwise), so it can't simply be dropped. For an

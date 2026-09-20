@@ -692,6 +692,13 @@ struct PlannerView: View {
                     // "wanted" of 73.6h for a week whose allocations only ask for 71h.
                     let towards = periodActuals.values.reduce(0, +)
                     figure("goal", goalSeconds, .secondary)
+                    // The room that week had, so the goal has a denominator. Without it "missed 11.7h"
+                    // can't be read as either "the week was overbooked" or "the hours were there".
+                    // Same position as in the intended view, which reads goal then available.
+                    figure("available", max(0, budget.capacity - unavailableInWindow()), .secondary)
+                        .help("Awake hours across the whole week — \(Int(settings.wakingHours))h a day, "
+                              + "set in Settings. Every hour of it was gone by the end of the week, so "
+                              + "this is what the goal had to fit inside, not what's left.")
                     figure("done", towards, .accentColor)
                     figure("missed", max(0, goalSeconds - towards),
                            goalSeconds - towards > 60 ? Self.overColor : .green)
