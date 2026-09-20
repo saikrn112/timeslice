@@ -385,10 +385,11 @@ public extension Replan {
     ///   hours is all it can be asked for however far behind you are; the rest moves to tomorrow. Computing
     ///   a day's intention without reference to its room is how "3.7h of office today" survived on an
     ///   evening that couldn't hold it.
-    /// - **The week's remainder is spent down as the days are filled**, chronologically, so the days
-    ///   together never ask for more than the week still needs. The nearest day keeps its full share and
-    ///   the shortfall lands on the furthest one, because shaving a little off every day gives figures that
-    ///   are all slightly wrong and none of them memorable.
+    /// - **The week's remainder is spread EVENLY over the days that remain**, so the days together never ask
+    ///   for more than the week still needs and no single day carries the discrepancy. An earlier version gave
+    ///   the nearest days their full nominal share and let the difference land on the furthest one — 7h · 7h ·
+    ///   7h · 7h · 6h for a 35h allocation with an hour already done — which reads as the last day being
+    ///   special when nothing about it is. `evenShares` equalises what each remaining day ends up holding.
     /// - **Whatever fits nowhere is reported rather than drawn.** A column claiming an impossible hour is
     ///   worse than a card saying the week is over by that much.
     ///
@@ -462,15 +463,31 @@ public extension Replan {
         var intended: [Int: [Int64: TimeInterval]] = [:]
         var carried: [Int: [Int64: TimeInterval]] = [:]
 
-        // Each day's own share first, so a day that has room keeps its plan intact.
-        for index in queue.indices {
+        // Each day's share of what is LEFT, spread evenly over the days that remain.
+        //
+        // This reverses an earlier rule that gave the nearest days their full nominal share and let the
+        // difference land on the furthest one. On a 35h Mon–Fri allocation with an hour already done, that
+        // printed 7h · 7h · 7h · 7h · 6h — every day its textbook figure and Friday carrying the discrepancy,
+        // which reads as Friday being special when nothing about Friday is. Even shares print 6.8h five times:
+        // the same total, and the number means "this is what a day has to look like from here".
+        for index in queue.indices where queue[index].remainder > 60 {
+            let shares = evenShares(remaining: queue[index].remainder,
+                                    over: queue[index].days,
+                                    credited: Dictionary(uniqueKeysWithValues:
+                                        queue[index].days.map { ($0, credited($0, queue[index].id)) }))
             for weekday in queue[index].days where queue[index].remainder > 60 {
                 let available = max(0, room[weekday] ?? 0)
-                guard available > 60 else { continue }
-                let want = max(0, queue[index].perDay - credited(weekday, queue[index].id))
+                guard available > 60, let want = shares[weekday], want > 60 else { continue }
                 let take = min(min(want, queue[index].remainder), available)
                 guard take > 60 else { continue }
-                intended[weekday, default: [:]][queue[index].id] = take
+                // The even share can exceed the day's textbook figure — that excess IS catching up, and
+                // saying so is what makes the tooltip worth reading. Reported separately, drawn as one block.
+                let nominal = max(0, queue[index].perDay - credited(weekday, queue[index].id))
+                let own = min(take, nominal)
+                intended[weekday, default: [:]][queue[index].id, default: 0] += own
+                if take - own > 60 {
+                    carried[weekday, default: [:]][queue[index].id, default: 0] += take - own
+                }
                 room[weekday] = available - take
                 queue[index].remainder -= take
             }
@@ -567,6 +584,33 @@ public extension Replan {
     enum Method: String, Sendable, CaseIterable {
         case catchUp = "catch up"
         case perDay = "per day"
+    }
+
+    /// Spread `remaining` over `days` so the days end up holding as close to the same amount as possible,
+    /// counting what each has already got.
+    ///
+    /// Water-filling, not simple division: a day that has already done more than the even total can't give
+    /// hours back, so it drops out and the rest share what's left. Simple division would hand it a negative
+    /// share, and clamping that to zero would under-plan the week by exactly the overshoot.
+    ///
+    /// Returns the ADDITIONAL hours for each day; a day at or above the level gets nothing.
+    public static func evenShares(remaining: TimeInterval, over days: [Int],
+                                  credited: [Int: TimeInterval]) -> [Int: TimeInterval] {
+        guard remaining > 0, !days.isEmpty else { return [:] }
+        var active = Set(days)
+        while !active.isEmpty {
+            let done = active.reduce(0.0) { $0 + (credited[$1] ?? 0) }
+            let level = (remaining + done) / Double(active.count)
+            // Anyone already past the level is excluded and the level recomputed without them.
+            if let over = active.first(where: { (credited[$0] ?? 0) >= level }) {
+                active.remove(over)
+                continue
+            }
+            var out: [Int: TimeInterval] = [:]
+            for day in active { out[day] = level - (credited[day] ?? 0) }
+            return out
+        }
+        return [:]
     }
 
     /// `perDay`: each day owes its own even share, less whatever that day already got. Nothing moves.

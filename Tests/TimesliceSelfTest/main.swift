@@ -2585,8 +2585,13 @@ func testDailyPlan() {
         let total = ([5, 6].reduce(0.0) { $0 + shares(daily, $1, 1).total }) / 3600
         check(approx(total, 10.4, 0.05),
               "the days together ask for exactly what the week still needs")
-        check(approx(shares(daily, 5, 1).intended / 3600, 3.8, 0.05),
-              "today keeps its full remaining share")
+        // Even TOTALS, not even asks: Thursday already holds 3.2h, so it is asked for 3.6h and Friday for
+        // 6.8h, leaving both days at 6.8h. The old rule gave Thursday its full 3.8h remainder and left
+        // Friday holding the difference, which is what made one day of a week look arbitrarily special.
+        check(approx(shares(daily, 5, 1).total / 3600, 3.6, 0.05),
+              "today is asked for its share of what's left, not its textbook remainder")
+        check(approx(shares(daily, 6, 1).total / 3600, 6.8, 0.05),
+              "so the two days end up holding the same 6.8h")
     }
 
     // An allocation whose own days are gone can't be caught up, and must not be dumped on a day it

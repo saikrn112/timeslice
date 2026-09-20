@@ -295,7 +295,7 @@ public struct PlannerWeekGrid: View {
                     }
                 }
                 .padding(3)
-                .frame(height: box)
+                .frame(height: height(counted))
                 .clipped()
 
             }
@@ -349,7 +349,7 @@ public struct PlannerWeekGrid: View {
     private func scale(_ day: DayInput, total: Double) -> Double {
         let drawn = day.blobs.filter { $0.hours > 0.02 }
         let chrome = CGFloat(max(0, drawn.count - 1)) + 4
-        let available = max(20, height(day.capacityHours ?? capacityHours) - chrome)
+        let available = max(20, height(day.countedHours ?? day.capacityHours ?? capacityHours) - chrome)
         // What the blobs will actually occupy, minimum heights included — otherwise a day of many small
         // blocks is scaled as if they were hairlines and overflows its own container.
         let wanted = drawn.reduce(0.0 as CGFloat) { $0 + max(12, height($1.hours)) }

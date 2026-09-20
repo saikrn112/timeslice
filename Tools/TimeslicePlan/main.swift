@@ -222,6 +222,57 @@ do {
         }
     }
 
+    // The month, week by week — the same `PlannerMonth.rollups` the month view draws, so "why is my
+    // backlog sitting in the pool instead of moving forward" is answerable as arithmetic.
+    // `--month 0` is this month, `1` the previous one.
+    if let monthArg = value(for: "--month"), let back = Int(monthArg) {
+        let cal = Calendar.current
+        let now = Date()
+        let base = cal.date(byAdding: .month, value: -back, to: now) ?? now
+        if let month = cal.dateInterval(of: .month, for: base) {
+            let intervals = try store.intervals(from: month.start, to: month.end)
+            let floors = targets.filter { $0.direction == .atLeast }
+            let nested = Set(plan.nestings.compactMap { nesting in
+                targets.first { names[$0.id] == nesting.innerName }?.id
+            })
+            for methodName in ["catch up", "per week"] {
+                let method: Replan.Method = methodName == "catch up" ? .catchUp : .perDay
+                let rollups = PlannerMonth.rollups(
+                    month: month, intervals: intervals, floors: floors, membership: membership,
+                    nested: nested, wakingSeconds: wakingHours * 3600, method: method,
+                    fractionOfTodayLeft: Replan.fractionOfDayLeft(
+                        now: now, wakingSeconds: wakingHours * 3600, calendar: cal),
+                    now: now, calendar: cal)
+                print("")
+                print("month by week — \(methodName)")
+                for r in rollups {
+                    let asked = r.owed.values.reduce(0.0) { $0 + $1.total }
+                    print("  \(r.span.firstDay)–\(r.span.lastDay): counted \(hrs(r.capacity))"
+                          + " · room \(hrs(r.room)) · asked \(hrs(asked))"
+                          + " · free after \(hrs(max(0, r.room - asked)))"
+                          + " · pool \(hrs(r.leftover.values.reduce(0, +)))")
+                    for (id, share) in r.owed.sorted(by: { $0.value.total > $1.value.total })
+                    where share.total > 60 {
+                        print("      plan \(names[id] ?? "?"): \(hrs(share.total))"
+                              + " (own \(hrs(share.intended)), moved in \(hrs(share.carried)))"
+                              + " of want \(hrs(r.want[id] ?? 0))")
+                    }
+                    for (id, seconds) in r.leftover.sorted(by: { $0.value > $1.value })
+                    where seconds > 60 {
+                        print("      pool \(names[id] ?? "?"): \(hrs(seconds))")
+                    }
+                }
+                let goalTotal = floors.filter { !nested.contains($0.id) }
+                    .reduce(0.0) { $0 + PlannerMonth.goal(for: $1, month: month, calendar: cal) }
+                let placed = rollups.reduce(0.0) { $0 + $1.owed.values.reduce(0) { $0 + $1.total } }
+                let pooled = rollups.reduce(0.0) { $0 + $1.leftover.values.reduce(0, +) }
+                let room = rollups.reduce(0.0) { $0 + $1.room }
+                print("  month goal \(hrs(goalTotal)) · room left \(hrs(room))"
+                      + " · planned \(hrs(placed)) · pooled \(hrs(pooled))")
+            }
+        }
+    }
+
     print("")
     // Nested allocations are skipped: they don't compete for capacity, so their ceiling is the whole
     // week and saying so is noise.
