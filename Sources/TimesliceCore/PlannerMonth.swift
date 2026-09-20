@@ -166,8 +166,12 @@ public enum PlannerMonth {
         public var want: [Int64: TimeInterval]
         /// Allocation → hours planned into this week, its own share and anything moved here. Drawn dashed.
         public var owed: [Int64: Share]
-        /// Allocation → hours wanted here that fitted nowhere in the rest of the month. The pool under the
-        /// column, filed under the week they came FROM so a finished month reads as a retrospective.
+        /// Allocation → hours the month found no room for, pooled under this column.
+        ///
+        /// Where they sit is what the method decides once nothing more can be planned, and it mirrors the week
+        /// view exactly: under `catchUp` an allocation's unplaceable hours accumulate under the LAST week that
+        /// could have used them — where the decision would have to be made — and under `perDay` they stay under
+        /// the week that missed them.
         public var leftover: [Int64: TimeInterval]
         /// Everything tracked in the month's part of this week, whatever it was against.
         public var total: TimeInterval { tracked.values.reduce(0, +) + unallocated }
@@ -317,12 +321,24 @@ public enum PlannerMonth {
             }
         }
 
-        // MARK: Whatever the month couldn't absorb, under the week it came from
+        // MARK: Whatever the month couldn't absorb
 
+        // Under catch up it goes to the last week that could have taken it, one block per allocation — the
+        // same rule the week view uses when it files office's unplaceable hours under Friday, the last day it
+        // claims. Under per week it stays under the week that missed it, because not moving anything is the
+        // whole point of that method.
         var leftover = [[Int64: TimeInterval]](repeating: [:], count: spans.count)
         for (id, byOrigin) in debt {
-            for (origin, seconds) in byOrigin where seconds > 60 {
-                leftover[origin][id, default: 0] += seconds
+            let total = byOrigin.values.filter { $0 > 60 }.reduce(0, +)
+            guard total > 60 else { continue }
+            if method == .catchUp {
+                // The last week with a day this allocation claims. `ceiling` records exactly that.
+                guard let last = spans.indices.last(where: { ceiling[$0][id] != nil }) else { continue }
+                leftover[last][id, default: 0] += total
+            } else {
+                for (origin, seconds) in byOrigin where seconds > 60 {
+                    leftover[origin][id, default: 0] += seconds
+                }
             }
         }
 

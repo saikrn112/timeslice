@@ -2982,8 +2982,20 @@ func testPlannerMonthWeeks() {
 
     let officeLeft = finished.reduce(0.0) { $0 + ($1.leftover[1] ?? 0) }
     check(approx(officeLeft, 154 * 3600, 60), "none of it happened, so all of it is leftover")
-    check(approx(finished[0].leftover[1] ?? 0, finished[0].want[1] ?? 0, 60),
-          "filed under the week it was wanted in, not swept to the end of the month")
+    // Where the pool sits is the week view's rule one unit up: catch up accumulates an allocation's
+    // unplaceable hours under the LAST week that could have used them — where the decision would have to be
+    // made — and per week leaves each week's own miss under that week.
+    check(finished[0].leftover[1] == nil,
+          "catch up doesn't strand office's hours under a week that is already over")
+    check(approx(finished[4].leftover[1] ?? 0, 154 * 3600, 60),
+          "it accumulates them under the last week office claims a day in")
+    let perWeek = PlannerMonth.rollups(month: september, intervals: [], floors: floors,
+                                       membership: membership, wakingSeconds: waking,
+                                       method: .perDay, now: after, calendar: cal)
+    check(approx(perWeek[0].leftover[1] ?? 0, perWeek[0].want[1] ?? 0, 60),
+          "per week keeps each week's own miss under that week")
+    check(approx(perWeek.reduce(0.0) { $0 + ($1.leftover[1] ?? 0) }, 154 * 3600, 60),
+          "and the two methods pool exactly the same hours, in different places")
 
     // In hindsight the method still decides WHERE the pool sits, which is the week view's rule one unit up.
     let hindsight = PlannerMonth.neverHappened(floors: floors, month: september,
