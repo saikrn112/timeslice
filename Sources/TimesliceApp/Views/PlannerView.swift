@@ -100,6 +100,13 @@ struct PlannerView: View {
     /// real clock position, and doing that inside `body` would re-query sqlite on every hover.
     @State private var calendarDays: [PlannerWeekGrid.DayInput] = []
     @State private var monthWeeks: [[PlannerMonthCalendar.DayCell]] = []
+    /// The month's weeks as filling containers — the same reading as the week view, one level up.
+    @State private var monthWeekColumns: [PlannerWeekGrid.DayInput] = []
+    /// Their spans, so a double-click can say which week it meant.
+    @State private var monthSpans: [PlannerMonth.WeekSpan] = []
+    /// The tallest span, which is the axis for all of them: a five-day week has to look shorter than a
+    /// seven-day one, and it can only do that against a shared scale.
+    @State private var monthWeekCapacity: Double = 0
     /// Tap an allocation, in the rail or the grid, to dim everything else. The one interaction on the
     /// page, because "where does THIS one actually land" is the question a week of overlapping colours
     /// can't answer at a glance.
@@ -137,6 +144,26 @@ struct PlannerView: View {
                                       + unit.rawValue.lowercased(),
                             accessory: { EmptyView() }) {
                         railStrip(plan)
+                    }
+                    // The month gets the week-by-week containers FIRST, with the day grid under them:
+                    // "is this month behind" is a question about weeks, and the day cells answer a
+                    // different one (which days went well) at a resolution that can't add up to a verdict.
+                    if unit == .month, !monthWeekColumns.isEmpty {
+                        section("How full each week is", subtitle: monthWeekSubtitle,
+                                accessory: { EmptyView() }) {
+                            weekSpanLegend
+                            PlannerWeekGrid(days: monthWeekColumns,
+                                            capacityHours: monthWeekCapacity,
+                                            elapsedHoursToday: nil,
+                                            highlight: highlight,
+                                            // Same distinction the week view draws: a finished month's pool
+                                            // is hours that never happened, a live one's is hours with
+                                            // nowhere left to go.
+                                            leftoverCaption: offset > 0 ? "never happened"
+                                                                        : "no room left in the month",
+                                            onPick: { pick($0) },
+                                            onOpen: { openWeekInMetrics(targetID: $0, spanIndex: $1) })
+                        }
                     }
                     section(unit == .week ? "How full each day is" : "Month, day by day",
                             subtitle: calendarSubtitle,
@@ -349,6 +376,15 @@ struct PlannerView: View {
     private func publishWindow() {
         appState.sharedFilter.day = periodWindow()?.start
         appState.sharedFilter.unit = unit == .week ? .week : .month
+    }
+
+    /// The week columns' own keys. `legend` describes whichever grid the unit implies, and in month view
+    /// that's the hour cubes below — "done / hour it wanted to reach" says nothing about these blocks.
+    private var weekSpanLegend: some View {
+        FlowRow(spacing: 12) {
+            legendKey(filled: true, "tracked")
+            legendKey(filled: false, "this week wants")
+        }
     }
 
     /// What the two block styles mean, once, in nine words. The alternative is a tooltip nobody hovers
@@ -1228,9 +1264,16 @@ struct PlannerView: View {
                                             alsoCounts: alsoCounts,
                                             calendar: cal)
             monthWeeks = []
+            monthWeekColumns = []
+            monthSpans = []
         } else {
             calendarDays = []
             monthWeeks = buildMonthCells(store: store, owner: owner, nested: nested, calendar: cal)
+            let built = buildMonthWeekColumns(store: store, floors: floors, nested: nested,
+                                              membership: membership, calendar: cal)
+            monthWeekColumns = built.columns
+            monthSpans = built.spans
+            monthWeekCapacity = built.capacity
         }
     }
 
@@ -1450,6 +1493,108 @@ struct PlannerView: View {
         let rest = sorted.dropFirst(5)
         return rest.isEmpty ? shown
             : shown + ["  + \(rest.count) more  \(hours(rest.reduce(0) { $0 + $1.value }))"]
+    }
+
+    private var monthWeekSubtitle: String {
+        offset > 0
+            ? "where that month's shortfall would have had to go · nothing leaves the month"
+            : "a week that fell short pushes into the weeks this month has left · nothing leaves the month"
+    }
+
+    /// Open the week a column stands for in Metrics, with the clicked allocation pinned.
+    ///
+    /// The span's first day, not the week's: a column only represents the part of the week inside the month,
+    /// and landing on a day in the previous month would answer about hours this column never counted.
+    private func openWeekInMetrics(targetID: Int64, spanIndex: Int) {
+        guard let span = monthSpans.first(where: { $0.index == spanIndex }) else { return }
+        let subjects = targets.first { $0.id == targetID }.map { [$0.subject] } ?? []
+        appState.metricsHandoff = AppState.MetricsHandoff(day: span.window.start, subjects: subjects)
+    }
+
+    /// The month's weeks as filling containers, with the pool of what the month couldn't absorb.
+    ///
+    /// All of the arithmetic is `PlannerMonth.rollups`; this turns it into blocks. The stacking order matches
+    /// the week view exactly — tracked, off-plan, untracked, then what's still owed — because the two grids
+    /// are the same statement at two scales and a different order would make them look like different ideas.
+    private func buildMonthWeekColumns(store: IntervalStore, floors: [Target], nested: Set<Int64>,
+                                       membership: SubjectMembership, calendar cal: Calendar)
+    -> (columns: [PlannerWeekGrid.DayInput], spans: [PlannerMonth.WeekSpan], capacity: Double) {
+        guard let month = periodWindow() else { return ([], [], 0) }
+        let now = Date()
+        let startOfToday = cal.startOfDay(for: now)
+        let intervals = (try? store.intervals(from: month.start, to: month.end)) ?? []
+        let rollups = PlannerMonth.rollups(
+            month: month, intervals: intervals, floors: floors, membership: membership,
+            nested: nested, wakingSeconds: settings.wakingSeconds,
+            weeks: unit.weeks,
+            fractionOfTodayLeft: Replan.fractionOfDayLeft(now: now,
+                                                          wakingSeconds: settings.wakingSeconds,
+                                                          calendar: cal),
+            now: now, calendar: cal)
+        guard !rollups.isEmpty else { return ([], [], 0) }
+
+        var columns: [PlannerWeekGrid.DayInput] = []
+        for rollup in rollups {
+            var blobs: [PlannerWeekGrid.Blob] = []
+            for (id, seconds) in rollup.tracked.sorted(by: { $0.value > $1.value }) where seconds > 60 {
+                let creditedHere: TimeInterval = rollup.credited[id] ?? seconds
+                var detail: [String] = []
+                if creditedHere - seconds > 60 {
+                    detail.append("+\(hours(creditedHere - seconds)) more counts toward this, drawn under a "
+                                  + "narrower allocation")
+                }
+                blobs.append(PlannerWeekGrid.Blob(
+                    targetID: id, name: name(forTarget: id), hours: seconds / 3600,
+                    colorHex: colorHex(forTarget: id), kind: .tracked, detail: detail))
+            }
+            if rollup.unallocated > 60 {
+                blobs.append(PlannerWeekGrid.Blob(targetID: -2, name: "off-plan",
+                                                  hours: rollup.unallocated / 3600,
+                                                  colorHex: "#8E8E93", kind: .unallocated))
+            }
+            if rollup.untracked > 60 {
+                blobs.append(PlannerWeekGrid.Blob(targetID: -3, name: "untracked",
+                                                  hours: rollup.untracked / 3600,
+                                                  colorHex: "#8E8E93", kind: .untracked))
+            }
+            for (id, share) in rollup.owed.sorted(by: { $0.value.total > $1.value.total })
+            where share.total > 60 {
+                var detail: [String] = []
+                if share.carried > 60, share.intended > 60 {
+                    detail = ["  \(hours(share.intended)) this week's own share",
+                              "  \(hours(share.carried)) moved here from an earlier week"]
+                } else if share.carried > 60 {
+                    detail = ["  all of it moved here from an earlier week"]
+                }
+                blobs.append(PlannerWeekGrid.Blob(
+                    targetID: id, name: name(forTarget: id), hours: share.total / 3600,
+                    colorHex: colorHex(forTarget: id), kind: .owed, detail: detail))
+            }
+
+            let leftovers = rollup.leftover.sorted { $0.value > $1.value }
+                .filter { $0.value > 60 }
+                .map { pair in
+                    PlannerWeekGrid.Blob(
+                        targetID: pair.key, name: name(forTarget: pair.key),
+                        hours: pair.value / 3600, colorHex: colorHex(forTarget: pair.key),
+                        kind: .owed,
+                        detail: ["  wanted in this week and never done",
+                                 "  no week left in the month could take it either"])
+                }
+
+            let span = rollup.span
+            columns.append(PlannerWeekGrid.DayInput(
+                weekday: span.index,
+                label: "\(span.firstDay)–\(span.lastDay)",
+                dayOfMonth: nil,
+                isPast: span.window.end <= startOfToday,
+                isToday: span.window.start <= startOfToday && startOfToday < span.window.end,
+                blobs: Self.collapsingSlivers(blobs),
+                leftovers: leftovers,
+                capacityHours: rollup.capacity / 3600))
+        }
+        let capacity = rollups.map { $0.capacity / 3600 }.max() ?? 0
+        return (columns, rollups.map(\.span), capacity)
     }
 
     /// The month as full weeks of day cells, including the leading and trailing days that complete the

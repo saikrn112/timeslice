@@ -2880,6 +2880,176 @@ func testDayTimelineRows() {
     check(newPeer.segments.first?.lane == 1, "and its blocks sit on it")
 }
 
+/// The month as weeks, and the one thing that makes it different from the week view: a week that fell short
+/// pushes its hours into the weeks the MONTH has left, and only what the month can't absorb is a leftover.
+func testPlannerMonthWeeks() {
+    print("Planner month weeks:")
+    // An explicit Sunday-first Gregorian calendar, so the span shapes below don't depend on the locale the
+    // test happens to run under.
+    var cal = Calendar(identifier: .gregorian)
+    cal.firstWeekday = 1
+    cal.timeZone = .current
+    func at(_ day: Int, _ hour: Int = 0) -> Date {
+        cal.date(from: DateComponents(year: 2026, month: 9, day: day, hour: hour))!
+    }
+    // September 2026 starts on a Tuesday and has 30 days.
+    let september = DateInterval(start: at(1),
+                                 end: cal.date(from: DateComponents(year: 2026, month: 10, day: 1))!)
+
+    // MARK: Spans
+
+    let spans = PlannerMonth.weekSpans(month: september, calendar: cal)
+    check(spans.count == 5, "September 2026 touches five calendar weeks")
+    check(spans.map(\.days) == [5, 7, 7, 7, 4], "with the first and last ones short")
+    check(spans.map(\.firstDay) == [1, 6, 13, 20, 27], "each starting where the week does")
+    check(spans.map(\.lastDay) == [5, 12, 19, 26, 30], "and the last ending with the month")
+    check(spans.map(\.index) == [1, 2, 3, 4, 5], "numbered in calendar order")
+    check(spans[0].weekdays == [3, 4, 5, 6, 7], "the first span is Tuesday to Saturday")
+    check(spans[4].weekdays == [1, 2, 3, 4], "and the last is Sunday to Wednesday")
+    check(spans.allSatisfy { $0.window.start >= september.start && $0.window.end <= september.end },
+          "no span reaches outside the month")
+    check(zip(spans, spans.dropFirst()).allSatisfy { $0.window.end == $1.window.start },
+          "and together they cover it without a gap or an overlap")
+    check(spans.reduce(0) { $0 + $1.days } == 30, "every day of the month is in exactly one span")
+
+    // A month that begins on the calendar's first weekday has no short first week.
+    let february = DateInterval(start: cal.date(from: DateComponents(year: 2026, month: 2, day: 1))!,
+                                end: cal.date(from: DateComponents(year: 2026, month: 3, day: 1))!)
+    let febSpans = PlannerMonth.weekSpans(month: february, calendar: cal)
+    check(febSpans.first?.days == 7, "February 2026 starts on a Sunday, so its first week is whole")
+    check(febSpans.reduce(0) { $0 + $1.days } == 28, "and its spans still cover the month exactly")
+
+    // MARK: Rollups
+
+    let monFri = Weekdays(rawValue: (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5))
+    let weekend = Weekdays(rawValue: (1 << 0) | (1 << 6))
+    let membership = plannerWorld(taskGroups: [1: 10, 2: nil], taskTags: [2: [99]])
+    let office = floor(1, .project(10), hours: 35, weekdays: monFri)
+    let stonks = floor(2, .tag(99), hours: 2, weekdays: weekend)
+    let floors = [office, stonks]
+    let waking: TimeInterval = 12 * 3600
+
+    // A month entirely in the past: no week has room, so nothing can be reallocated anywhere.
+    let after = cal.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 12))!
+    let finished = PlannerMonth.rollups(month: september, intervals: [], floors: floors,
+                                        membership: membership, wakingSeconds: waking,
+                                        weeks: 4, now: after, calendar: cal)
+    check(finished.count == 5, "one rollup per span")
+    check(finished.allSatisfy { $0.capacity == Double($0.span.days) * waking },
+          "a span's capacity is its own days, not a padded week")
+    check(finished.allSatisfy { approx($0.untracked, $0.capacity, 60) },
+          "a finished month with nothing tracked is untracked from end to end")
+    check(finished.allSatisfy { $0.owed.isEmpty },
+          "and nothing is planned into weeks that have gone")
+
+    // The whole month's ask, shared out by claimed days — and it must total what the rest of the page says
+    // the month wants (weeklySeconds x weeks), or the columns and the rail disagree.
+    let officeWant = finished.reduce(0.0) { $0 + ($1.want[1] ?? 0) }
+    check(approx(officeWant, 140 * 3600, 60), "the month asks for four weeks of office, no more")
+    let stonksWant = finished.reduce(0.0) { $0 + ($1.want[2] ?? 0) }
+    check(approx(stonksWant, 8 * 3600, 60), "and four weeks of stonks")
+    // 22 weekdays in September 2026; the first span holds 4 of them.
+    check(approx(finished[0].want[1] ?? 0, 140 * 3600 * 4 / 22, 60),
+          "a short first week asks for its share of the month, not a whole week's worth")
+
+    let officeLeft = finished.reduce(0.0) { $0 + ($1.leftover[1] ?? 0) }
+    check(approx(officeLeft, 140 * 3600, 60), "none of it happened, so all of it is leftover")
+    check(approx(finished[0].leftover[1] ?? 0, finished[0].want[1] ?? 0, 60),
+          "filed under the week it was wanted in, not swept to the end of the month")
+    check(finished[4].leftover[2] != nil,
+          "the last span holds a Sunday, so the weekend allocation wanted something of it")
+
+    // A span with none of an allocation's days asks nothing of it.
+    let august = DateInterval(start: cal.date(from: DateComponents(year: 2026, month: 8, day: 1))!,
+                              end: at(1))
+    let augSpans = PlannerMonth.weekSpans(month: august, calendar: cal)
+    check(augSpans.first?.weekdays == [7], "1 August 2026 is a Saturday, alone in its week")
+    let augRollups = PlannerMonth.rollups(month: august, intervals: [], floors: floors,
+                                          membership: membership, wakingSeconds: waking,
+                                          weeks: 4, now: after, calendar: cal)
+    check(augRollups[0].want[1] == nil, "a Mon-Fri allocation asks nothing of a Saturday-only week")
+    check(augRollups[0].want[2] != nil, "while a weekend one asks for its Saturday")
+
+    // MARK: Reallocation forward, inside the month
+
+    // Mid-month: three weeks gone with nothing done, two to go. Today is Sunday 20 September, half spent.
+    let now = at(20, 6)
+    let live = PlannerMonth.rollups(month: september, intervals: [], floors: floors,
+                                    membership: membership, wakingSeconds: waking,
+                                    weeks: 4, fractionOfTodayLeft: 0.5, now: now, calendar: cal)
+    check(live[0].owed.isEmpty && live[1].owed.isEmpty && live[2].owed.isEmpty,
+          "weeks that have gone are planned nothing — there is nowhere to put it")
+    check((live[3].owed[1]?.carried ?? 0) > 3600,
+          "the shortfall of the weeks that went shows up in the week in progress")
+    check((live[3].owed[1]?.intended ?? 0) > 3600,
+          "alongside that week's own share, counted separately")
+    check(live[0].leftover.isEmpty == false || live[3].owed.isEmpty == false,
+          "something must have happened to those hours")
+
+    // THE INVARIANT: hours are neither invented nor lost. Everything wanted is either planned into a week
+    // or reported as leftover.
+    let wanted = live.reduce(0.0) { $0 + $1.want.values.reduce(0, +) }
+    let planned = live.reduce(0.0) { $0 + $1.owed.values.reduce(0) { $0 + $1.total } }
+    let leftover = live.reduce(0.0) { $0 + $1.leftover.values.reduce(0, +) }
+    check(approx(planned + leftover, wanted, 5 * 60),
+          "planned plus leftover is exactly what the month asked for")
+
+    // No week is asked for more hours than it has left.
+    for rollup in live {
+        let asked = rollup.owed.values.reduce(0) { $0 + $1.total }
+        check(asked <= rollup.room + 60,
+              "week \(rollup.span.index) is never asked for more than it has left")
+    }
+    // And an allocation can't be asked to use days it doesn't claim.
+    for rollup in live {
+        let claimedDays = rollup.span.weekdays.filter { weekday in
+            Weekdays(rawValue: (1 << 0) | (1 << 6)).contains(weekday: weekday)
+        }.count
+        let asked = rollup.owed[2]?.total ?? 0
+        check(asked <= Double(claimedDays) * waking + 60,
+              "week \(rollup.span.index) can't give stonks hours on days it doesn't claim")
+    }
+
+    // Work already done reduces what's owed rather than being ignored.
+    let did = [Interval(id: 1, projectID: 1, start: at(7, 9), end: at(7, 17))]      // 8h, Monday week 2
+    let credited = PlannerMonth.rollups(month: september, intervals: did, floors: floors,
+                                       membership: membership, wakingSeconds: waking,
+                                       weeks: 4, fractionOfTodayLeft: 0.5, now: now, calendar: cal)
+    check(approx(credited[1].tracked[1] ?? 0, 8 * 3600, 60), "the week it happened in owns those hours")
+    check(approx(credited[1].credited[1] ?? 0, 8 * 3600, 60), "and is credited them")
+    // The obligation shrinks by what was done. NOT `planned`, which is pinned by how much room the
+    // remaining weeks have: when they are already full, eight hours done comes off the LEFTOVER instead.
+    // Asserting that planned itself falls is the mistake that made this check fail.
+    let creditedPlanned = credited.reduce(0.0) { $0 + $1.owed.values.reduce(0) { $0 + $1.total } }
+    let creditedLeftover = credited.reduce(0.0) { $0 + $1.leftover.values.reduce(0, +) }
+    check(approx(creditedPlanned + creditedLeftover, wanted - 8 * 3600, 5 * 60),
+          "eight hours done is eight hours fewer for the month to find room for")
+    check(approx(credited[1].untracked, credited[1].capacity - 8 * 3600, 60),
+          "and the untracked band of that week shrinks by exactly as much")
+
+    // MARK: Sharing room, with no allocation outranking another
+
+    let none = PlannerMonth.share(room: 0, wants: [1: 5 * 3600, 2: 5 * 3600])
+    check(none.placed.isEmpty, "no room places nothing")
+    check(approx(none.leftover.values.reduce(0, +), 10 * 3600, 1), "and everything comes back")
+
+    let plenty = PlannerMonth.share(room: 20 * 3600, wants: [1: 5 * 3600, 2: 2 * 3600])
+    check(approx(plenty.placed[1] ?? 0, 5 * 3600, 1) && approx(plenty.placed[2] ?? 0, 2 * 3600, 1),
+          "room for everything places everything, unrounded")
+    check(plenty.leftover.isEmpty, "with nothing left over")
+
+    let tight = PlannerMonth.share(room: 2 * 3600, wants: [1: 10 * 3600, 2: 10 * 3600])
+    check(approx(tight.placed[1] ?? 0, 3600, 1) && approx(tight.placed[2] ?? 0, 3600, 1),
+          "a contested hour is split evenly, in half-hour turns")
+    check(approx(tight.leftover.values.reduce(0, +), 18 * 3600, 1), "and the rest is reported")
+
+    let lopsided = PlannerMonth.share(room: 2 * 3600, wants: [1: 3600, 2: 100 * 3600])
+    check(approx(lopsided.placed[1] ?? 0, 3600, 1),
+          "a small want isn't starved by a large one — there is no priority")
+    check(approx(lopsided.placed[2] ?? 0, 3600, 1), "they take the same turns")
+    check(approx(lopsided.placed.values.reduce(0, +), 2 * 3600, 60), "and the room is spent exactly")
+}
+
 func testDormancy() {
     print("Dormancy:")
     let calendar = Calendar.current
@@ -5896,6 +6066,7 @@ do {
     testPlannerWeekFacts()
     testHistoricalWeek()
     testDayTimelineRows()
+    testPlannerMonthWeeks()
     testDormancy()
     testPerDayPlan()
     testPrimaryOwner()
@@ -5925,6 +6096,7 @@ do {
     testPlannerWeekFacts()
     testHistoricalWeek()
     testDayTimelineRows()
+    testPlannerMonthWeeks()
     testDormancy()
     testPerDayPlan()
     testPrimaryOwner()

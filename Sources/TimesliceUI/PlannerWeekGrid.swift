@@ -61,7 +61,13 @@ public struct PlannerWeekGrid: View {
     public struct DayInput: Identifiable, Sendable {
         public let weekday: Int
         public let label: String
-        public let dayOfMonth: Int
+        /// The chip beside the label. Nil for a column that isn't one day — a week of a month names its
+        /// range in `label` instead, and a single number there would be a lie about which day it is.
+        public let dayOfMonth: Int?
+        /// This column's own ceiling, when it differs from the grid's. A month's first week can hold five
+        /// days, not seven, so drawing it as tall as the others would invent room it never had; the column
+        /// is drawn short and floor-aligned instead, which is also the fastest way to SEE a partial week.
+        public let capacityHours: Double?
         public let isPast: Bool
         public let isToday: Bool
         /// In stacking order, bottom first: reserved, then tracked, then owed.
@@ -72,8 +78,9 @@ public struct PlannerWeekGrid: View {
         public let leftovers: [Blob]
         public var id: Int { weekday }
 
-        public init(weekday: Int, label: String, dayOfMonth: Int, isPast: Bool, isToday: Bool,
-                    blobs: [Blob], leftovers: [Blob] = []) {
+        public init(weekday: Int, label: String, dayOfMonth: Int?, isPast: Bool, isToday: Bool,
+                    blobs: [Blob], leftovers: [Blob] = [], capacityHours: Double? = nil) {
+            self.capacityHours = capacityHours
             self.leftovers = leftovers
             self.weekday = weekday
             self.label = label
@@ -145,7 +152,7 @@ public struct PlannerWeekGrid: View {
         HStack(alignment: .top, spacing: 0) {
             axis
             GeometryReader { geo in
-                let columnWidth = geo.size.width / 7
+                let columnWidth = geo.size.width / CGFloat(max(1, days.count))
                 HStack(spacing: 0) {
                     ForEach(days) { day in
                         column(day, compact: columnWidth < 96)
@@ -192,9 +199,13 @@ public struct PlannerWeekGrid: View {
         .frame(width: Self.axisWidth, alignment: .leading)
     }
 
-    /// Every four hours, plus the top of the day so the ceiling is labelled.
+    /// Every four hours for a day, plus the ceiling so the top is labelled.
+    ///
+    /// The step grows with the scale: a month's week columns are seven waking days tall, and a mark every
+    /// four hours there is twenty-one labels stacked into 500 points.
     private var marks: [Double] {
-        var out = Array(stride(from: 0.0, to: capacityHours, by: 4))
+        let step: Double = capacityHours > 30 ? 12 : 4
+        var out = Array(stride(from: 0.0, to: capacityHours - step / 2, by: step))
         out.append(capacityHours)
         return out
     }
@@ -208,8 +219,14 @@ public struct PlannerWeekGrid: View {
 
     private func column(_ day: DayInput, compact: Bool) -> some View {
         let total = day.blobs.reduce(0) { $0 + $1.hours }
+        // A column can be shorter than the grid: a month's first week may hold five days where the others
+        // hold seven. Drawn floor-aligned inside the full height, so every column shares a baseline — which
+        // is the whole basis of comparing how full they are.
+        let cap = day.capacityHours ?? capacityHours
+        let box = height(cap)
         return VStack(spacing: 0) {
             header(day)
+            Spacer(minLength: 0)
             ZStack(alignment: .bottom) {
                 // The container: one waking day, outlined, so "how full is this" has a visible ceiling.
                 RoundedRectangle(cornerRadius: 5)
@@ -226,9 +243,9 @@ public struct PlannerWeekGrid: View {
                 // Pinned to the top of the column rather than floating just above the stack, where it
                 // collided with whatever block happened to reach it — "stonks 1h" and "4h free" printed over
                 // each other.
-                if capacityHours - total > 1.2 {
+                if cap - total > 1.2 {
                     VStack(spacing: 0) {
-                        Text("\(Self.short(capacityHours - total)) \(day.isToday ? "left" : "free")")
+                        Text("\(Self.short(cap - total)) \(day.isToday ? "left" : "free")")
                             .font(.system(size: compact ? 8 : 9))
                             .foregroundStyle(.tertiary)
                         Spacer(minLength: 0)
@@ -249,11 +266,11 @@ public struct PlannerWeekGrid: View {
                     }
                 }
                 .padding(3)
-                .frame(height: Self.gridHeight)
+                .frame(height: box)
                 .clipped()
 
             }
-            .frame(height: Self.gridHeight)
+            .frame(height: box)
             .opacity(day.isPast ? 0.85 : 1)
 
             if basementHeight > 0 {
@@ -303,7 +320,7 @@ public struct PlannerWeekGrid: View {
     private func scale(_ day: DayInput, total: Double) -> Double {
         let drawn = day.blobs.filter { $0.hours > 0.02 }
         let chrome = CGFloat(max(0, drawn.count - 1)) + 4
-        let available = max(20, Self.gridHeight - chrome)
+        let available = max(20, height(day.capacityHours ?? capacityHours) - chrome)
         // What the blobs will actually occupy, minimum heights included — otherwise a day of many small
         // blocks is scaled as if they were hairlines and overflows its own container.
         let wanted = drawn.reduce(0.0 as CGFloat) { $0 + max(12, height($1.hours)) }
@@ -314,12 +331,14 @@ public struct PlannerWeekGrid: View {
     private func header(_ day: DayInput) -> some View {
         HStack(spacing: 4) {
             Text(day.label).font(.system(size: 11, weight: day.isToday ? .semibold : .regular))
-            Text("\(day.dayOfMonth)")
-                .font(.system(size: 11, design: .rounded))
-                .foregroundStyle(day.isToday ? Color.white : Color.secondary.opacity(0.7))
-                .padding(.horizontal, day.isToday ? 5 : 0)
-                .padding(.vertical, day.isToday ? 1 : 0)
-                .background { if day.isToday { Capsule().fill(Color.accentColor) } }
+            if let dayOfMonth = day.dayOfMonth {
+                Text("\(dayOfMonth)")
+                    .font(.system(size: 11, design: .rounded))
+                    .foregroundStyle(day.isToday ? Color.white : Color.secondary.opacity(0.7))
+                    .padding(.horizontal, day.isToday ? 5 : 0)
+                    .padding(.vertical, day.isToday ? 1 : 0)
+                    .background { if day.isToday { Capsule().fill(Color.accentColor) } }
+            }
         }
         .foregroundStyle(day.isToday ? Color.primary
                          : (day.isPast ? Color.secondary.opacity(0.55) : .secondary))
@@ -478,18 +497,19 @@ public struct PlannerWeekGrid: View {
     }
 
     private func tooltip(_ day: DayInput, total: Double) -> String {
-        var lines = ["\(day.label) \(day.dayOfMonth) — \(Self.short(total)) of "
-                     + "\(Self.short(capacityHours)) spoken for"]
+        let cap = day.capacityHours ?? capacityHours
+        let heading = day.dayOfMonth.map { "\(day.label) \($0)" } ?? day.label
+        var lines = ["\(heading) — \(Self.short(total)) of \(Self.short(cap)) spoken for"]
         for blob in day.blobs.reversed() where blob.hours > 0.02 {
             lines.append("  \(blob.name)  \(Self.short(blob.hours))"
                          + (blob.kind == .owed ? "  (still to fit)" : ""))
         }
-        let free = capacityHours - total
+        let free = cap - total
         if free > 0.02 {
             lines.append("\(Self.short(free)) free")
         } else if -free > 0.02 {
-            // Tracked more than a waking day holds. Not an overflowing plan — an overflowing day.
-            lines.append("\(Self.short(-free)) past a \(Self.short(capacityHours)) day")
+            // Tracked more than the column holds. Not an overflowing plan — an overflowing day.
+            lines.append("\(Self.short(-free)) past \(Self.short(cap))")
         } else {
             lines.append("nothing free")
         }
