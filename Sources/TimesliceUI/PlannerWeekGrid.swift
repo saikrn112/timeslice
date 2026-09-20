@@ -21,6 +21,10 @@ import TimesliceCore
 public struct PlannerWeekGrid: View {
     public enum Kind: Sendable {
         case reserved, tracked, unallocated, owed
+        /// Days of a neighbouring month. A month view's columns are whole calendar weeks, so the first and
+        /// last of them reach outside; those hours are drawn cross-hatched at the TOP of the column, above
+        /// everything the month counts, because the column fills from the floor with its own hours.
+        case otherMonth
         /// Hours that went by with nothing recorded. On a past day it's the rest of the day; on today it's
         /// the elapsed part that wasn't tracked. Either way it is gone, and drawing it is what makes a
         /// column add up to a whole day instead of trailing off into ambiguous empty space.
@@ -64,10 +68,16 @@ public struct PlannerWeekGrid: View {
         /// The chip beside the label. Nil for a column that isn't one day — a week of a month names its
         /// range in `label` instead, and a single number there would be a lie about which day it is.
         public let dayOfMonth: Int?
-        /// This column's own ceiling, when it differs from the grid's. A month's first week can hold five
-        /// days, not seven, so drawing it as tall as the others would invent room it never had; the column
-        /// is drawn short and floor-aligned instead, which is also the fastest way to SEE a partial week.
+        /// This column's own ceiling, when it differs from the grid's.
         public let capacityHours: Double?
+        /// How much of that ceiling belongs to the window being viewed. A month's columns are whole calendar
+        /// weeks, so the first and last reach into a neighbouring month; "free" has to measure against the
+        /// part this month owns, or a week with six days in another month reads as nearly empty.
+        public let countedHours: Double?
+        /// Drawn pinned to the TOP of the column, above everything it counts: the days of a neighbouring
+        /// month. Pinned rather than stacked, because the gap beneath it is this month's free hours and a
+        /// stacked cap would sit straight on top of the work instead of at the ceiling.
+        public let cap: Blob?
         public let isPast: Bool
         public let isToday: Bool
         /// In stacking order, bottom first: reserved, then tracked, then owed.
@@ -79,8 +89,11 @@ public struct PlannerWeekGrid: View {
         public var id: Int { weekday }
 
         public init(weekday: Int, label: String, dayOfMonth: Int?, isPast: Bool, isToday: Bool,
-                    blobs: [Blob], leftovers: [Blob] = [], capacityHours: Double? = nil) {
+                    blobs: [Blob], leftovers: [Blob] = [], capacityHours: Double? = nil,
+                    countedHours: Double? = nil, cap: Blob? = nil) {
             self.capacityHours = capacityHours
+            self.countedHours = countedHours
+            self.cap = cap
             self.leftovers = leftovers
             self.weekday = weekday
             self.label = label
@@ -223,6 +236,7 @@ public struct PlannerWeekGrid: View {
         // hold seven. Drawn floor-aligned inside the full height, so every column shares a baseline — which
         // is the whole basis of comparing how full they are.
         let cap = day.capacityHours ?? capacityHours
+        let counted = day.countedHours ?? cap
         let box = height(cap)
         return VStack(spacing: 0) {
             header(day)
@@ -243,9 +257,24 @@ public struct PlannerWeekGrid: View {
                 // Pinned to the top of the column rather than floating just above the stack, where it
                 // collided with whatever block happened to reach it — "stonks 1h" and "4h free" printed over
                 // each other.
-                if cap - total > 1.2 {
+                // Days of a neighbouring month, at the ceiling. Everything this month counts is below it.
+                if let outside = day.cap, outside.hours > 0.02 {
                     VStack(spacing: 0) {
-                        Text("\(Self.short(cap - total)) \(day.isToday ? "left" : "free")")
+                        blobView(outside, compact: compact, scale: 1, weekday: day.weekday)
+                            .frame(height: max(12, height(outside.hours)))
+                        Spacer(minLength: 0)
+                    }
+                    .padding(3)
+                    .frame(height: box)
+                }
+
+                if counted - total > 1.2 {
+                    VStack(spacing: 0) {
+                        // Under the cap when there is one, so the two don't print over each other.
+                        if let outside = day.cap, outside.hours > 0.02 {
+                            Color.clear.frame(height: max(12, height(outside.hours)) + 2)
+                        }
+                        Text("\(Self.short(counted - total)) \(day.isToday ? "left" : "free")")
                             .font(.system(size: compact ? 8 : 9))
                             .foregroundStyle(.tertiary)
                         Spacer(minLength: 0)
@@ -357,6 +386,13 @@ public struct PlannerWeekGrid: View {
         let h = height(blob.hours) * CGFloat(scale)
         ZStack(alignment: .topLeading) {
             switch blob.kind {
+            case .otherMonth:
+                Hatch(color: .secondary, crossed: true).clipShape(RoundedRectangle(cornerRadius: 3))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(Color.primary.opacity(0.10),
+                                          style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                    }
             case .reserved:
                 Hatch(color: .secondary).clipShape(RoundedRectangle(cornerRadius: 3))
             case .tracked:
@@ -497,9 +533,12 @@ public struct PlannerWeekGrid: View {
     }
 
     private func tooltip(_ day: DayInput, total: Double) -> String {
-        let cap = day.capacityHours ?? capacityHours
+        let cap = day.countedHours ?? day.capacityHours ?? capacityHours
         let heading = day.dayOfMonth.map { "\(day.label) \($0)" } ?? day.label
         var lines = ["\(heading) — \(Self.short(total)) of \(Self.short(cap)) spoken for"]
+        if let outside = day.cap, outside.hours > 0.02 {
+            lines.append("\(outside.name) — not counted here")
+        }
         for blob in day.blobs.reversed() where blob.hours > 0.02 {
             lines.append("  \(blob.name)  \(Self.short(blob.hours))"
                          + (blob.kind == .owed ? "  (still to fit)" : ""))
@@ -534,8 +573,14 @@ public struct PlannerWeekGrid: View {
 /// still choose to do, so it should look like neither.
 public struct Hatch: View {
     let color: Color
+    /// Lines both ways. Used for hours that belong to a neighbouring month: they have to read as "not part of
+    /// this column's arithmetic", and a single-direction hatch already means reserved time.
+    let crossed: Bool
 
-    public init(color: Color) { self.color = color }
+    public init(color: Color, crossed: Bool = false) {
+        self.color = color
+        self.crossed = crossed
+    }
 
     public var body: some View {
         GeometryReader { geo in
@@ -547,6 +592,14 @@ public struct Hatch: View {
                     path.move(to: CGPoint(x: x, y: size.height))
                     path.addLine(to: CGPoint(x: x + size.height, y: 0))
                     x += step
+                }
+                if crossed {
+                    var back = -size.height
+                    while back < size.width + size.height {
+                        path.move(to: CGPoint(x: back, y: 0))
+                        path.addLine(to: CGPoint(x: back + size.height, y: size.height))
+                        back += step
+                    }
                 }
                 context.stroke(path, with: .color(color.opacity(0.30)), lineWidth: 1)
             }
