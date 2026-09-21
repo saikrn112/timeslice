@@ -99,7 +99,6 @@ struct PlannerView: View {
     /// Built once per rebuild rather than per redraw: the calendar needs every interval placed at its
     /// real clock position, and doing that inside `body` would re-query sqlite on every hover.
     @State private var calendarDays: [PlannerWeekGrid.DayInput] = []
-    @State private var monthWeeks: [[PlannerMonthCalendar.DayCell]] = []
     /// The month's weeks as filling containers — the same reading as the week view, one level up.
     @State private var monthWeekColumns: [PlannerWeekGrid.DayInput] = []
     /// Their spans, so a double-click can say which week it meant.
@@ -166,35 +165,30 @@ struct PlannerView: View {
                                             onOpen: { openWeekInMetrics(targetID: $0, spanIndex: $1) })
                         }
                     }
-                    section(unit == .week ? "How full each day is" : "Month, day by day",
-                            subtitle: calendarSubtitle,
-                            // Only the toggle here. Four legend keys in a section header wrapped
-                            // mid-word — "track / ed", "unava / ilable" — because a header row has no
-                            // room to reflow. It gets its own line below.
-                            accessory: {
-                                if unit == .week {
+                    // The month used to carry a second grid of hour cubes, one per day. It looked good and
+                    // said nothing the week columns don't: a day's cubes answer "did this day go well", which
+                    // is the week view's question at a resolution too fine to add up to a verdict about a
+                    // month. Removed rather than kept for decoration.
+                    if unit == .week {
+                        section("How full each day is", subtitle: calendarSubtitle,
+                                // Only the toggles here. Four legend keys in a section header wrapped
+                                // mid-word — "track / ed", "unava / ilable" — because a header row has no
+                                // room to reflow. They get their own line below.
+                                accessory: {
                                     HStack(spacing: 10) {
                                         methodToggle
                                         intendedToggle
                                     }
-                                }
-                            }) {
-                        legend
-                        if unit == .week {
+                                }) {
+                            legend
                             PlannerWeekGrid(days: calendarDays,
                                             capacityHours: settings.wakingSeconds / 3600,
-                                                            elapsedHoursToday: offset == 0 && !showIntended
+                                            elapsedHoursToday: offset == 0 && !showIntended
                                                 ? elapsedHoursToday : nil,
                                             highlight: highlight,
                                             leftoverCaption: leftoverCaption,
                                             onPick: { pick($0) },
                                             onOpen: { openInMetrics(targetID: $0, weekday: $1) })
-                        } else {
-                            PlannerMonthCalendar(weeks: monthWeeks,
-                                                 capacityHours: settings.wakingSeconds / 3600,
-                                                 highlight: highlight,
-                                                 onPick: { pick($0) },
-                                                 onOpen: { openInMetrics(day: $0) })
                         }
                     }
                 } else {
@@ -399,29 +393,13 @@ struct PlannerView: View {
     /// or a paragraph nobody reads.
     private var legend: some View {
         FlowRow(spacing: 12) {
-            // The month grid has no owed blobs and no hatching, so it doesn't get their keys. A legend
-            // naming things that aren't on screen is worse than none.
-            if !(unit == .week && (showIntended || isFuture)) {
-                legendKey(filled: true, unit == .week ? "tracked" : "done")
+            // The intended view draws no tracked blocks, so naming them would describe something that isn't
+            // on screen.
+            if !(showIntended || isFuture) {
+                legendKey(filled: true, "tracked")
             }
-            if unit == .week {
-                legendKey(filled: false, showIntended || isFuture ? "planned"
-                                     : (offset > 0 ? "never happened" : "this day wants"))
-
-            } else {
-                // One cube is one hour; the outlined one is where the day's allocations wanted to reach.
-                HStack(spacing: 4) {
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(Color.primary.opacity(0.07))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 1.5)
-                                .strokeBorder(Color.primary.opacity(0.55), lineWidth: 1)
-                        }
-                        .frame(width: 8, height: 8)
-                    Text("hour it wanted to reach").font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                }
-            }
+            legendKey(filled: false, showIntended || isFuture ? "planned"
+                                 : (offset > 0 ? "never happened" : "this day wants"))
             if highlight != nil {
                 // Clears it on BOTH pages: it set the shared filter, so it has to unset it, or Metrics
                 // would still be filtered by an allocation this page says it isn't showing.
@@ -614,7 +592,7 @@ struct PlannerView: View {
     }
 
     private var calendarSubtitle: String {
-        guard unit == .week else { return "one cube is one hour of the day" }
+        guard unit == .week else { return monthWeekSubtitle }
         if isFuture { return "nothing tracked yet — this is the plan as designed" }
         if method == .perDay, !showIntended {
             return "every day keeps its own share · what a day missed stays under it"
@@ -1298,12 +1276,10 @@ struct PlannerView: View {
                                             breakdown: viewedFacts.mapValues { $0.breakdown },
                                             alsoCounts: alsoCounts,
                                             calendar: cal)
-            monthWeeks = []
             monthWeekColumns = []
             monthSpans = []
         } else {
             calendarDays = []
-            monthWeeks = buildMonthCells(store: store, owner: owner, nested: nested, calendar: cal)
             let built = buildMonthWeekColumns(store: store, floors: floors, nested: nested,
                                               membership: membership, calendar: cal)
             monthWeekColumns = built.columns
@@ -1716,100 +1692,6 @@ struct PlannerView: View {
             colorHex: "#8E8E93", kind: .otherMonth,
             detail: ["  this calendar week reaches outside the month",
                      "  " + tracked])
-    }
-
-    /// The month as full weeks of day cells, including the leading and trailing days that complete the
-    /// first and last rows — a month grid that stopped at the 1st wouldn't be a calendar.
-    ///
-    /// Each cell carries what it was, and what its allocations wanted of it. The gap between those two is
-    /// the only thing a month view has to say per day, and it's drawn as a line rather than written.
-    private func buildMonthCells(store: IntervalStore, owner: (Int64) -> Int64?,
-                                 nested: Set<Int64>,
-                                 calendar cal: Calendar) -> [[PlannerMonthCalendar.DayCell]] {
-        guard let month = periodWindow(),
-              let firstRow = cal.dateInterval(of: .weekOfYear, for: month.start),
-              let lastRow = cal.dateInterval(of: .weekOfYear,
-                                             for: month.end.addingTimeInterval(-1))
-        else { return [] }
-
-        let intervals = (try? store.intervals(from: firstRow.start, to: lastRow.end)) ?? []
-        let now = Date()
-        let startOfToday = cal.startOfDay(for: now)
-        let waking = settings.wakingSeconds / 3600
-        let tasks = (try? store.listProjects(includeArchived: true)) ?? []
-        let taskNames = Dictionary(tasks.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
-
-        // Per date, per allocation (or -2 for work no allocation covers), hours.
-        var byDate: [Date: [Int64: Double]] = [:]
-        var unallocatedNames: [Date: [String: Double]] = [:]
-        for interval in intervals {
-            let end = interval.end ?? now
-            guard end > interval.start else { continue }
-            let day = cal.startOfDay(for: interval.start)
-            let hours = end.timeIntervalSince(interval.start) / 3600
-            // Nested allocations own their hours here too. Sending them to "off-plan" said the work
-            // belonged to nothing, when it belonged to the narrowest allocation covering it.
-            if let id = owner(interval.projectID) {
-                byDate[day, default: [:]][id, default: 0] += hours
-            } else {
-                byDate[day, default: [:]][-2, default: 0] += hours
-                unallocatedNames[day, default: [:]][taskNames[interval.projectID] ?? "?",
-                                                   default: 0] += hours
-            }
-        }
-
-        let floors = targets.filter { $0.direction == .atLeast && !nested.contains($0.id) }
-        var rows: [[PlannerMonthCalendar.DayCell]] = []
-        var cursor = firstRow.start
-        while cursor < lastRow.end {
-            var row: [PlannerMonthCalendar.DayCell] = []
-            for _ in 0..<7 {
-                let weekday = cal.component(.weekday, from: cursor)
-                // The label for work no allocation covers names the biggest task in it, so the grey
-                // block isn't anonymous. Built in steps: inline, the type-checker gave up on it.
-                let biggestOther: String? = unallocatedNames[cursor]?
-                    .max { $0.value < $1.value }?.key
-                let otherLabel: String = biggestOther.map { "off-plan · \($0)" } ?? "off-plan"
-                let entries: [(Int64, Double)] = (byDate[cursor] ?? [:])
-                    .filter { $0.value > 1.0 / 60 }
-                    .sorted { $0.value > $1.value }
-                    .map { ($0.key, $0.value) }
-                let slices: [PlannerMonthCalendar.Slice] = entries.map { pair in
-                    let allocated = pair.0 >= 0
-                    return PlannerMonthCalendar.Slice(
-                        id: pair.0,
-                        name: allocated ? name(forTarget: pair.0) : otherLabel,
-                        hours: pair.1,
-                        colorHex: allocated ? colorHex(forTarget: pair.0) : "#8E8E93")
-                }
-
-                // What this weekday's allocations ask for, spread evenly over the days each claims.
-                var wanted = 0.0
-                for target in floors {
-                    let claimed = target.weekdays.effective
-                    guard claimed.contains(weekday: weekday) else { continue }
-                    wanted += target.weeklySeconds / Double(max(1, claimed.selectedCount)) / 3600
-                }
-                let unavailable = 0.0
-
-                row.append(PlannerMonthCalendar.DayCell(
-                    date: cursor, dayOfMonth: cal.component(.day, from: cursor),
-                    inMonth: cursor >= month.start && cursor < month.end,
-                    isToday: cursor == startOfToday, isPast: cursor < startOfToday,
-                    unavailableHours: min(waking, unavailable),
-                    tracked: slices,
-                    wantedHours: min(max(0, waking - unavailable), wanted)))
-                guard let next = cal.date(byAdding: .day, value: 1, to: cursor) else { break }
-                cursor = next
-            }
-            rows.append(row)
-        }
-        return rows
-    }
-
-    /// Open a specific date in Metrics, with nothing pinned. The month view's double-click.
-    private func openInMetrics(day: Date) {
-        appState.metricsHandoff = AppState.MetricsHandoff(day: day, subjects: [])
     }
 
     private func name(for target: Target, tasks: [Project]? = nil) -> String {

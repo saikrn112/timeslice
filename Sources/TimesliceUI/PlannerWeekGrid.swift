@@ -140,6 +140,8 @@ public struct PlannerWeekGrid: View {
     /// statements — what the week holds, and what it doesn't — and a few points of padding would read as
     /// one continuous column.
     private static let basementGap: CGFloat = 26
+    /// Every block gets at least this much height so it can carry a label. Load-bearing in `fitScale`.
+    private static let minBlobHeight: CGFloat = 12
 
     public var body: some View {
         ZStack(alignment: .topLeading) {
@@ -316,10 +318,7 @@ public struct PlannerWeekGrid: View {
     /// Drawn downward from the top of the basement so the blocks touch the line they fell through, and in the
     /// same colours and dashes as the plan above — they are the same blocks, just homeless.
     private func basement(_ day: DayInput, compact: Bool) -> some View {
-        let total = day.leftovers.reduce(0.0) { $0 + $1.hours }
-        let wanted = day.leftovers.reduce(0.0 as CGFloat) { $0 + max(12, height($1.hours)) }
-        let room = basementHeight - 8
-        let scale = wanted > room ? Double(room / wanted) : 1
+        let scale = fitScale(day.leftovers, room: basementHeight - 8, spacing: 1)
         return VStack(spacing: 1) {
             ForEach(day.leftovers) { blob in
                 blobView(blob, compact: compact, scale: scale, weekday: day.weekday)
@@ -328,7 +327,10 @@ public struct PlannerWeekGrid: View {
         }
         .padding(.horizontal, 3)
         .padding(.top, 3)
-        .frame(maxWidth: .infinity)
+        // Fixed to the well, and clipped: the wells are a row of identical panels, and one of them growing
+        // to fit its contents made the pool look like a different component in that column.
+        .frame(maxWidth: .infinity, maxHeight: basementHeight, alignment: .top)
+        .clipped()
         // A darker well than the day above it, and no red. These blocks are hours you haven't found room
         // for — not an error, and colouring them like one made a normal week look broken.
         .background {
@@ -348,13 +350,39 @@ public struct PlannerWeekGrid: View {
     /// which read as a layout fault rather than as a full day. The excess is still stated by the cap.
     private func scale(_ day: DayInput, total: Double) -> Double {
         let drawn = day.blobs.filter { $0.hours > 0.02 }
-        let chrome = CGFloat(max(0, drawn.count - 1)) + 4
-        let available = max(20, height(day.countedHours ?? day.capacityHours ?? capacityHours) - chrome)
-        // What the blobs will actually occupy, minimum heights included — otherwise a day of many small
-        // blocks is scaled as if they were hairlines and overflows its own container.
-        let wanted = drawn.reduce(0.0 as CGFloat) { $0 + max(12, height($1.hours)) }
-        guard wanted > available else { return 1 }
-        return Double(available / wanted)
+        let available = max(20, height(day.countedHours ?? day.capacityHours ?? capacityHours) - 4)
+        return fitScale(drawn, room: available, spacing: 1)
+    }
+
+    /// The largest scale at which these blocks fit `room`, given that each one is floored at
+    /// `minBlobHeight` so it can carry a label.
+    ///
+    /// Not `room / Σ heights`: the floor is applied AFTER scaling, so any block that scales below it springs
+    /// back up and the stack overflows. A naive ratio therefore under-shrinks by 12pt for every small block —
+    /// which is what pushed a month's pool blocks out of their well and clipped the last one. Solved by
+    /// iterating: pin the blocks already at the floor, share what's left among the rest, repeat until the
+    /// partition stops changing.
+    private func fitScale(_ blobs: [Blob], room: CGFloat, spacing: CGFloat) -> Double {
+        guard !blobs.isEmpty, room > 0 else { return 1 }
+        let heights = blobs.map { height($0.hours) }
+        let gaps = spacing * CGFloat(max(0, blobs.count - 1))
+        var scale = 1.0
+        // At most one pass per block: each iteration pins at least one more, or returns.
+        for _ in 0...blobs.count {
+            let used = heights.reduce(0) { $0 + max(Self.minBlobHeight, $1 * CGFloat(scale)) } + gaps
+            if used <= room { return scale }
+            let flexible = heights.filter { $0 * CGFloat(scale) > Self.minBlobHeight }
+            let pinned = heights.count - flexible.count
+            let budget = room - gaps - Self.minBlobHeight * CGFloat(pinned)
+            let sum = flexible.reduce(0, +)
+            // Not even the floors fit. Clipping is the honest outcome, and the well stays the shape of every
+            // other well rather than stretching to hold one bad month.
+            guard sum > 0, budget > 0 else { return scale }
+            let next = Double(budget / sum)
+            guard next < scale else { return scale }
+            scale = next
+        }
+        return scale
     }
 
     private func header(_ day: DayInput) -> some View {
@@ -509,7 +537,7 @@ public struct PlannerWeekGrid: View {
         // Never thinner than a label. A three-point bar of colour with no name is unexplainable — "why is
         // vllm at the top of Friday?" was exactly that — so a block that exists at all is drawn big enough
         // to say what it is, and the column's scale absorbs the difference.
-        .frame(height: max(12, h))
+        .frame(height: max(Self.minBlobHeight, h))
         .opacity(dim ? 0.15 : 1)
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { onOpen(blob.targetID, weekday) }
