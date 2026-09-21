@@ -24,6 +24,16 @@ import Foundation
 /// its true 35h, which is exactly what the week view says about that same week. `weeklySeconds × 4` had the two
 /// pages disagreeing by 14h about a week they both display.
 public enum PlannerMonth {
+    /// How finely the month is cut up. The rules are identical either way — one algorithm, whatever the
+    /// resolution — so this only decides what a column stands for.
+    public enum Resolution: String, Sendable, CaseIterable {
+        case week, day
+    }
+
+    /// One unit of the month: a calendar week with the month's part identified, or a single day.
+    ///
+    /// Named for the week case because that came first; a day is the degenerate one — one weekday, nothing
+    /// outside the month, and `firstDay == lastDay`.
     /// One calendar week that the month touches, with the month's part identified.
     public struct WeekSpan: Sendable, Equatable, Identifiable {
         /// 1-based, in calendar order — the column's identity.
@@ -52,6 +62,34 @@ public enum PlannerMonth {
             self.outsideWeekdays = outsideWeekdays
             self.firstDay = firstDay
             self.lastDay = lastDay
+        }
+    }
+
+    /// The month's units at `resolution`: its calendar weeks, or its days.
+    ///
+    /// A day unit has NO out-of-month part. At week resolution a column is a real calendar week and the
+    /// neighbouring month's days are marked on it; at day resolution there is nothing to mark, because a day
+    /// either belongs to the month or isn't drawn at all.
+    public static func units(month: DateInterval, resolution: Resolution,
+                             calendar: Calendar) -> [WeekSpan] {
+        switch resolution {
+        case .week:
+            return weekSpans(month: month, calendar: calendar)
+        case .day:
+            var out: [WeekSpan] = []
+            var cursor = calendar.startOfDay(for: month.start)
+            while cursor < month.end {
+                guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
+                let day = calendar.component(.day, from: cursor)
+                out.append(WeekSpan(index: out.count + 1,
+                                    week: DateInterval(start: cursor, end: next),
+                                    inMonth: DateInterval(start: cursor, end: next),
+                                    weekdays: [calendar.component(.weekday, from: cursor)],
+                                    outsideWeekdays: [],
+                                    firstDay: day, lastDay: day))
+                cursor = next
+            }
+            return out
         }
     }
 
@@ -196,11 +234,12 @@ public enum PlannerMonth {
                                membership: SubjectMembership,
                                nested: Set<Int64> = [],
                                wakingSeconds: TimeInterval,
+                               resolution: Resolution = .week,
                                method: Replan.Method = .catchUp,
                                fractionOfTodayLeft: Double = 1,
                                now: Date = Date(),
                                calendar: Calendar = .current) -> [WeekRollup] {
-        let spans = weekSpans(month: month, calendar: calendar)
+        let spans = units(month: month, resolution: resolution, calendar: calendar)
         guard !spans.isEmpty else { return [] }
         let startOfToday = calendar.startOfDay(for: now)
         let asking = floors.filter { $0.direction == .atLeast && !nested.contains($0.id) }
@@ -274,49 +313,66 @@ public enum PlannerMonth {
         /// Debt still looking for somewhere to go: allocation → origin span → seconds.
         var debt: [Int64: [Int: TimeInterval]] = [:]
 
+        // One pass, chronological, and the only rule this page has at any resolution:
+        //
+        // 1. Every unit's own shortfall becomes debt. A unit that is over has no room, so its debt simply
+        //    carries forward — the past needs no special case.
+        // 2. An allocation asks each open unit for an EVEN slice of everything it still owes, counting only
+        //    the units ahead that it can actually use. No unit is singled out to carry the discrepancy, which
+        //    is what made a week read 7h · 7h · 7h · 7h · 6h.
+        // 3. When a unit can't satisfy everyone, its room is shared in half-hour turns. NOT in id order,
+        //    which was a priority hiding as an implementation detail: office, being first, took 65% of a
+        //    month's remaining room for 51% of its remaining work.
+        // Every unit's shortfall, up front. Accumulating it as the loop walked meant a unit couldn't see what
+        // the units AFTER it still wanted, so the early ones under-asked, the last one was handed everything,
+        // and the pool grew by the difference.
         for index in spans.indices {
-            // This span's own shortfall becomes debt originating here. A span that is over has no room, so its
-            // shortfall simply carries — no special case for the past.
             for (id, wanted) in want[index] {
                 let short = wanted - (credited[index][id] ?? 0)
                 if short > 60 { debt[id, default: [:]][index, default: 0] += short }
             }
+        }
 
-            // Its own share first, so a week with room keeps its plan intact rather than having it rationed
-            // against work moved in from elsewhere.
-            for id in want[index].keys.sorted() {
-                guard room[index] > 60, let mine = debt[id]?[index], mine > 60 else { continue }
-                let take = min(min(mine, room[index]), max(0, headroom[index][id] ?? 0))
-                guard take > 60 else { continue }
-                owed[index][id, default: Share()].intended += take
-                room[index] -= take
-                headroom[index][id] = (headroom[index][id] ?? 0) - take
-                debt[id]?[index] = mine - take
+        for index in spans.indices {
+            guard room[index] > 60 else { continue }
+
+            var wants: [Int64: TimeInterval] = [:]
+            for target in asking {
+                guard ceiling[index][target.id] != nil else { continue }   // doesn't claim a day here
+                let owing = (debt[target.id] ?? [:]).values.reduce(0, +)
+                guard owing > 60 else { continue }
+                let asked: TimeInterval
+                switch method {
+                case .catchUp:
+                    // Units from here on that this allocation claims and that still have room.
+                    let ahead = spans.indices.filter {
+                        $0 >= index && ceiling[$0][target.id] != nil && room[$0] > 60
+                    }
+                    asked = owing / Double(max(1, ahead.count))
+                case .perDay:
+                    // Its own share of this unit and nothing else: per week moves nothing between units.
+                    asked = max(0, (want[index][target.id] ?? 0) - (credited[index][target.id] ?? 0))
+                }
+                let capped = min(min(asked, owing), max(0, headroom[index][target.id] ?? 0))
+                if capped > 60 { wants[target.id] = capped }
             }
 
-            // Then anything carried from an earlier week, shared in half-hour turns so nothing is starved.
-            // `perDay` stops here: a week that fell short keeps its shortfall, which falls through to the pool
-            // under that week rather than becoming another week's problem.
-            guard method == .catchUp else { continue }
-            var carriedWants: [Int64: TimeInterval] = [:]
-            for (id, byOrigin) in debt {
-                guard ceiling[index][id] != nil else { continue }       // can't use this week's days at all
-                let older = byOrigin.filter { $0.key < index }.values.reduce(0, +)
-                let capped = min(older, max(0, headroom[index][id] ?? 0))
-                if capped > 60 { carriedWants[id] = capped }
-            }
-            let split = share(room: room[index], wants: carriedWants)
-            for (id, amount) in split.placed where amount > 60 {
-                owed[index][id, default: Share()].carried += amount
+            for (id, amount) in share(room: room[index], wants: wants).placed where amount > 60 {
+                // Split at this unit's nominal share: below it is the plan, above it is catching up. One block
+                // is drawn for the total; the split is what the tooltip explains.
+                let nominal = max(0, (want[index][id] ?? 0) - (credited[index][id] ?? 0))
+                let own = min(amount, nominal)
+                owed[index][id, default: Share()].intended += own
+                if amount - own > 60 { owed[index][id, default: Share()].carried += amount - own }
                 room[index] -= amount
                 headroom[index][id] = (headroom[index][id] ?? 0) - amount
-                // Oldest debt first: a week that fell short a fortnight ago is the one to clear.
-                var remaining = amount
-                for origin in (debt[id] ?? [:]).keys.sorted() where origin < index && remaining > 0 {
+                // Oldest debt first, so the unit that fell short earliest is the one being cleared.
+                var left = amount
+                for origin in (debt[id] ?? [:]).keys.sorted() where left > 0 {
                     let here = debt[id]?[origin] ?? 0
-                    let taken = min(here, remaining)
+                    let taken = min(here, left)
                     debt[id]?[origin] = here - taken
-                    remaining -= taken
+                    left -= taken
                 }
             }
         }
