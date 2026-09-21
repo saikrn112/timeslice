@@ -218,6 +218,10 @@ struct PlannerView: View {
             adoptSharedFilter()
             rebuild()
             publishWindow()
+            // A capture run can open the allocations sheet, which is otherwise a click away.
+            if ProcessInfo.processInfo.environment["TIMESLICE_OPEN_ALLOCATIONS"] == "1" {
+                showAllocations = true
+            }
             if ProcessInfo.processInfo.environment["TIMESLICE_SCROLL"] == "bottom" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                     withAnimation(.none) { scroller.scrollTo("planner-foot", anchor: .bottom) }

@@ -39,6 +39,27 @@ public extension Target {
         return window.intersects(range) && window.end > range.start && range.end > window.start
     }
 
+    /// Whether `day` falls in a period this allocation actually runs in.
+    ///
+    /// Always true unless `interval > 1`. For "every 2 weeks" the periods are counted from the anchor's own
+    /// period — week 0 active, week 1 skipped, week 2 active — which is why the anchor is `startsOn` and why
+    /// an interval without one is treated as every period: there would be nothing to count from.
+    func runsIn(day: Date, calendar: Calendar = .current) -> Bool {
+        guard interval > 1, period != .once, let anchor = startsOn else { return true }
+        let unit: Calendar.Component
+        switch period {
+        case .day: unit = .day
+        case .week: unit = .weekOfYear
+        case .month: unit = .month
+        case .once: return true
+        }
+        let from = calendar.dateInterval(of: unit, for: anchor)?.start ?? anchor
+        let to = calendar.dateInterval(of: unit, for: day)?.start ?? day
+        guard let elapsed = calendar.dateComponents([unit], from: from, to: to).value(for: unit)
+        else { return true }
+        return elapsed >= 0 && elapsed % interval == 0
+    }
+
     /// Days in `range` that this allocation both claims by weekday and lies inside its window.
     ///
     /// The denominator of every goal. Counted by walking days rather than arithmetic on lengths, because a
@@ -50,7 +71,8 @@ public extension Target {
         var cursor = calendar.startOfDay(for: range.start)
         while cursor < range.end {
             let inWindow = window.map { $0.start <= cursor && cursor < $0.end } ?? true
-            if inWindow, claimed.contains(weekday: calendar.component(.weekday, from: cursor)) {
+            if inWindow, claimed.contains(weekday: calendar.component(.weekday, from: cursor)),
+               runsIn(day: cursor, calendar: calendar) {
                 days += 1
             }
             guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }

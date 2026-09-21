@@ -3228,6 +3228,45 @@ func testAllocationWindows() {
     check(ceiling.applies(to: october, calendar: cal),
           "but it still applies, so it can be shown and checked")
 
+    // MARK: Every-N
+
+    // 8h every OTHER week, Mon–Fri, anchored to Thursday 1 October. Weeks containing 1, 15 and 29 Oct run;
+    // the ones between are skipped.
+    let fortnight = Target(id: 11, subject: .tag(1), seconds: 8 * 3600, direction: .atLeast,
+                           period: .week, weekdays: monFri, startsOn: day(10, 1), interval: 2)
+    check(fortnight.runsIn(day: day(10, 1), calendar: cal), "the anchor's own week runs")
+    check(!fortnight.runsIn(day: day(10, 8), calendar: cal), "the next one is skipped")
+    check(fortnight.runsIn(day: day(10, 15), calendar: cal), "the one after that runs")
+    check(!fortnight.runsIn(day: day(10, 22), calendar: cal), "and so on, alternating")
+    check(fortnight.runsIn(day: day(10, 29), calendar: cal), "week four of the cycle runs")
+    // Claimed weekdays in the running weeks only: 1–2, 12–16, 26–30 → 2 + 5 + 5 = 12.
+    check(fortnight.claimedDays(in: october, calendar: cal) == 12,
+          "only the weekdays of running weeks are claimed")
+    check(approx(fortnight.ask(in: october, calendar: cal), 8 * 3600 / 5 * 12, 60),
+          "so October asks for 19.2h rather than a weekly 8h times four and a half")
+    check(approx(fortnight.ask(in: span(day(10, 12), day(10, 19)), calendar: cal), 8 * 3600, 60),
+          "a running week asks its full weekly amount")
+    check(fortnight.ask(in: span(day(10, 5), day(10, 12)), calendar: cal) == 0,
+          "and a skipped week asks nothing at all")
+
+    // An interval with no anchor cannot be phased, so it behaves as every period rather than guessing.
+    let unanchored = Target(id: 12, subject: .tag(1), seconds: 8 * 3600, direction: .atLeast,
+                            period: .week, weekdays: monFri, interval: 2)
+    check(unanchored.claimedDays(in: october, calendar: cal) == 22,
+          "every-N without a start date falls back to every period")
+
+    // Monthly, every other month, from October: October runs, November doesn't, December does.
+    let everyOther = Target(id: 13, subject: .tag(1), seconds: 20 * 3600, direction: .atLeast,
+                            period: .month, startsOn: day(10, 1), interval: 2)
+    check(everyOther.ask(in: october, calendar: cal) > 0, "October runs")
+    check(everyOther.ask(in: span(day(11, 1), day(12, 1)), calendar: cal) == 0, "November is skipped")
+    check(everyOther.ask(in: span(day(12, 1), day(12, 31)), calendar: cal) > 0, "December runs")
+
+    // An interval of 1 is exactly what every allocation did before this existed.
+    let plain = Target(id: 14, subject: .tag(1), seconds: 8 * 3600, direction: .atLeast,
+                       period: .week, weekdays: monFri, startsOn: day(10, 1), interval: 1)
+    check(plain.claimedDays(in: october, calendar: cal) == 22, "interval 1 claims every weekday")
+
     // MARK: The identity the planner depends on
 
     // Whatever the shape, the shares of the periods an allocation spans add up to what it asks in total.

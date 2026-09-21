@@ -257,6 +257,13 @@ public struct Target: Identifiable, Hashable, Sendable {
     /// existing rows carry real creation dates.
     public let startsOn: Date?
     public let endsOn: Date?
+    /// Every how many periods it applies: 1 = every week, 2 = every other week, and so on.
+    ///
+    /// Needs `startsOn` as its anchor — "every 2 weeks" is meaningless without knowing which week is the
+    /// first one — so an interval above 1 with no start date behaves as 1. The cycle is counted in whole
+    /// calendar periods from the anchor's own period, not in days, so a fortnightly allocation lands on the
+    /// same weekday pattern regardless of where the anchor sits inside its week.
+    public let interval: Int
 
     public var isLive: Bool { completedAt == nil }
 
@@ -264,9 +271,10 @@ public struct Target: Identifiable, Hashable, Sendable {
                 direction: Direction, period: Period,
                 createdAt: Date = Date(), completedAt: Date? = nil, sortOrder: Int = 0,
                 weekdays: Weekdays = .all, shape: TargetShape = .flexible,
-                startsOn: Date? = nil, endsOn: Date? = nil) {
+                startsOn: Date? = nil, endsOn: Date? = nil, interval: Int = 1) {
         self.startsOn = startsOn
         self.endsOn = endsOn
+        self.interval = max(1, interval)
         self.id = id
         self.subject = subject
         self.seconds = seconds

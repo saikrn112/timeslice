@@ -147,20 +147,23 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         /// delete one by being the most recent writer.
         public var startsOn: TimeInterval?
         public var endsOn: TimeInterval?
+        /// Every how many periods. Absent means "no opinion", and 1 is the value every build had implicitly.
+        public var interval: Int?
 
         public init(uid: String, subjectKind: String, subjectUID: String, seconds: TimeInterval,
                     direction: String, period: String, updatedAt: TimeInterval,
                     createdAt: TimeInterval? = nil, completedAt: TimeInterval? = nil,
                     weekdays: Int? = nil, shapeKind: Int? = nil, shapeMin: TimeInterval? = nil,
                     shapeCount: Int? = nil,
-                    startsOn: TimeInterval? = nil, endsOn: TimeInterval? = nil) {
+                    startsOn: TimeInterval? = nil, endsOn: TimeInterval? = nil,
+                    interval: Int? = nil) {
             self.uid = uid; self.subjectKind = subjectKind; self.subjectUID = subjectUID
             self.seconds = seconds; self.direction = direction; self.period = period
             self.updatedAt = updatedAt
             self.createdAt = createdAt; self.completedAt = completedAt
             self.weekdays = weekdays
             self.shapeKind = shapeKind; self.shapeMin = shapeMin; self.shapeCount = shapeCount
-            self.startsOn = startsOn; self.endsOn = endsOn
+            self.startsOn = startsOn; self.endsOn = endsOn; self.interval = interval
         }
     }
 

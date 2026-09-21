@@ -77,7 +77,8 @@ public struct SyncEngine {
                                      completedAt: $0.completedAt, weekdays: $0.weekdays,
                                      shapeKind: $0.shapeKind, shapeMin: $0.shapeMin,
                                      shapeCount: $0.shapeCount,
-                                     startsOn: $0.startsOn, endsOn: $0.endsOn)
+                                     startsOn: $0.startsOn, endsOn: $0.endsOn,
+                                     interval: $0.interval)
         }
 
         let feedbackRecords = try store.feedbackForExport().map {
@@ -288,7 +289,8 @@ public struct SyncEngine {
                                            createdAt: t.createdAt, completedAt: t.completedAt,
                                            weekdays: t.weekdays, shapeKind: t.shapeKind,
                                            shapeMin: t.shapeMin, shapeCount: t.shapeCount,
-                                           startsOn: t.startsOn, endsOn: t.endsOn) {
+                                           startsOn: t.startsOn, endsOn: t.endsOn,
+                                           interval: t.interval) {
                 report.targetsApplied += 1
             }
         }
