@@ -972,8 +972,13 @@ struct PlannerView: View {
     /// and that is the figure its week columns sum to. With `× 4` the rail said 140h while the grid on the same
     /// page showed 154h spread across the weeks.
     private func goalSeconds(for target: Target) -> TimeInterval {
-        guard unit == .month, let month = periodWindow() else { return target.weeklySeconds }
-        return PlannerMonth.goal(for: target, month: month, calendar: Calendar.current)
+        // One expression for both units: what this allocation asks of the window on screen. `targets` is
+        // already projected onto that window, so for a week this is just its hours — but going through
+        // `ask(in:)` keeps the month and week answers derived from the same rule.
+        guard let window = periodWindow() else { return target.weeklySeconds }
+        return unit == .month
+            ? PlannerMonth.goal(for: target, month: window, calendar: Calendar.current)
+            : target.ask(in: window, calendar: Calendar.current)
     }
 
     /// What the allocations ask for over the viewed window, with nested ones left out because their hours
@@ -1170,7 +1175,17 @@ struct PlannerView: View {
 
     private func rebuild() {
         let store = appState.storeForEditing
-        targets = (try? store.listTargets()) ?? []
+        // Projected onto the window being viewed: an allocation outside it disappears entirely, and one
+        // inside it becomes a plain weekly target asking exactly what it asks of THIS window. That keeps
+        // `Planner` and `Replan` — which work in weekday numbers with no dates — free of windows, cycles and
+        // one-offs, rather than threading dates through both.
+        let stored = (try? store.listTargets()) ?? []
+        let calendar = Calendar.current
+        let viewedWindow = periodWindow()
+            ?? calendar.dateInterval(of: .weekOfYear, for: Date())
+        targets = viewedWindow.map { window in
+            stored.compactMap { $0.projected(onto: window, calendar: calendar) }
+        } ?? stored
         world = ((try? store.listProjects(includeArchived: true)) ?? [],
                  (try? store.listTaskProjects()) ?? [],
                  (try? store.listTags()) ?? [])

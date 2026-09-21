@@ -83,9 +83,9 @@ struct TargetsSheet: View {
                 .padding(16)
             }
         }
-        // 950 rather than 680: the row now carries repeat-every, the day bubbles and both dates, and at 680
-        // the date labels pushed "Archive" onto two lines.
-        .frame(width: 950, height: 560)
+        // 760 rather than 680: the row gained a Custom… button, and a one-off's summary ("once · 21 Sep")
+        // is wider than the glyph it replaced. Everything heavier lives in the panel behind it.
+        .frame(width: 760, height: 560)
         .onAppear { reload() }
     }
 
@@ -347,6 +347,9 @@ struct TargetsSheet: View {
     /// Which end of which allocation's window has its calendar open. One at a time.
     private struct CalendarTarget: Equatable { let id: Int64; let isStart: Bool }
     @State private var calendarFor: CalendarTarget?
+    /// Which allocation's Custom panel is open.
+    @State private var customFor: Int64? = ProcessInfo.processInfo
+        .environment["TIMESLICE_OPEN_CUSTOM"].flatMap { Int64($0) }
 
     /// One subject and its allocation controls.
     ///
@@ -402,8 +405,6 @@ struct TargetsSheet: View {
                          interval: existing.interval)
                 }.buttonStyle(.borderless)
 
-                intervalStepper(existing, subject: subject)
-
                 Picker("", selection: Binding(
                     get: { existing.period },
                     set: { period in
@@ -417,11 +418,9 @@ struct TargetsSheet: View {
                              startsOn: seedsToday ? today : existing.startsOn,
                              endsOn: seedsToday ? today : existing.endsOn,
                              interval: existing.interval)
-                        // Open the calendar straight away: a one-off with no dates asks for nothing, so
-                        // leaving it to be discovered would mean an allocation that silently does nothing.
-                        if seedsToday {
-                            calendarFor = CalendarTarget(id: existing.id, isStart: true)
-                        }
+                        // A one-off with no dates asks for nothing, so choosing it opens the panel that
+                        // owns them rather than leaving an inert allocation to be discovered.
+                        if seedsToday { customFor = existing.id }
                     }
                 )) {
                     ForEach(Target.Period.allCases, id: \.self) { p in
@@ -437,10 +436,7 @@ struct TargetsSheet: View {
                     weekdayBubbles(for: existing)
                 }
 
-                dateField(label: "from", date: existing.startsOn, target: existing, subject: subject,
-                          isStart: true)
-                dateField(label: "until", date: existing.endsOn, target: existing, subject: subject,
-                          isStart: false)
+                customButton(existing, subject: subject)
 
                 // Retire rather than delete: the allocation leaves the live list but keeps its
                 // history, which is the whole reason for the state.
@@ -491,117 +487,180 @@ struct TargetsSheet: View {
     /// leaving `weekdays` at its `.all` default meant editing the HOURS silently reset the day
     /// bubbles to all seven. Picking days and then adjusting the number lost the days, which is the
     /// order anyone would naturally work in.
-    /// Every how many periods it runs: "every week", "every 2 weeks".
+    /// One button for everything the row doesn't show: when it starts, when it stops, and whether it repeats.
     ///
-    /// Shown only when there is something to say. An interval needs a start date as its anchor — "every other
-    /// week" is meaningless without knowing which week is the first — so raising it above 1 sets one, and the
-    /// control is hidden for a one-off, which happens exactly once by definition.
-    @ViewBuilder
-    private func intervalStepper(_ target: Target, subject: TargetSubject) -> some View {
-        if target.period != .once {
-            Stepper(value: Binding(
-                get: { target.interval },
-                set: { count in
-                    // Raising it above 1 anchors to today if nothing anchors it yet, because the cycle has to
-                    // count from somewhere; Core falls back to "every period" without an anchor, which would
-                    // make the control look broken.
-                    let anchor = count > 1 ? (target.startsOn
-                                              ?? Calendar.current.startOfDay(for: Date())) : target.startsOn
-                    save(subject: subject, seconds: target.seconds, direction: target.direction,
-                         period: target.period, weekdays: target.weekdays,
-                         startsOn: anchor, endsOn: target.endsOn, interval: count)
-                }), in: 1...12) {
-                // The number is always shown, even at 1: "every 1 week" is how the control explains what the
-                // stepper does, and an unlabelled pair of arrows explains nothing.
-                Text("every \(target.interval)")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            .help(target.interval == 1
-                  ? "Every \(target.period.rawValue). Raise it for every other one, and so on."
-                  : "Every \(target.interval) \(target.period.rawValue)s, counted from "
-                    + "\(Self.dayText(target.startsOn ?? Date())).")
-            .fixedSize()
+    /// The row keeps the three things you change constantly — hours, how often, which days — and this holds
+    /// the rest, the way a calendar app puts recurrence behind "Custom…". When something non-default is set
+    /// the button says what, so the row still tells the truth at a glance.
+    private func customButton(_ target: Target, subject: TargetSubject) -> some View {
+        let summary = Self.customSummary(target)
+        return Button(summary ?? "Custom…") {
+            customFor = target.id
+        }
+        .buttonStyle(.borderless)
+        .font(.system(size: 10, design: .rounded))
+        .foregroundStyle(summary == nil ? Color.secondary : Color.accentColor)
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+        .help(summary == nil
+              ? "Dates, one-off, and how often it repeats"
+              : "\(summary!) — click to change")
+        .popover(isPresented: Binding(get: { customFor == target.id },
+                                     set: { if !$0 { customFor = nil } }),
+                 arrowEdge: .bottom) {
+            customPanel(target, subject: subject)
         }
     }
 
-    /// One end of the window: a date, or the word for having none.
-    ///
-    /// "always" and "never" are buttons rather than empty fields, because an unbounded allocation is a
-    /// deliberate state and an empty date field reads as something you forgot to fill in.
-    private func dateField(label: String, date: Date?, target: Target,
-                           subject: TargetSubject, isStart: Bool) -> some View {
-        let unboundedWord = isStart ? "always" : "never"
-        return HStack(spacing: 3) {
-            if date != nil {
-                Text(label).font(.system(size: 9)).foregroundStyle(.tertiary)
-            }
-            if let date {
-                // A button that opens a calendar, not a `DatePicker(.compact)`: the system field is ~200pt
-                // wide and renders "10/ 1/2026", which pushed "Archive" onto two lines even at 950. This is
-                // 60pt and reads "1 Oct", and the popover behind it is a full month to click in.
-                Button(Self.dayText(date)) {
-                    calendarFor = CalendarTarget(id: target.id, isStart: isStart)
+    /// What's non-default about this allocation, in as few words as possible. Nil when nothing is.
+    private static func customSummary(_ target: Target) -> String? {
+        var parts: [String] = []
+        if target.period == .once { parts.append("once") }
+        if target.interval > 1 { parts.append("every \(target.interval)") }
+        if let start = target.startsOn, let end = target.endsOn,
+           Calendar.current.isDate(start, inSameDayAs: end) {
+            parts.append(dayText(start))
+        } else {
+            if let start = target.startsOn { parts.append("from \(dayText(start))") }
+            if let end = target.endsOn { parts.append("until \(dayText(end))") }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// The full options, in plain rows: does it repeat, when does it start, when does it stop.
+    @ViewBuilder
+    private func customPanel(_ target: Target, subject: TargetSubject) -> some View {
+        let today = Calendar.current.startOfDay(for: Date())
+        let start = target.startsOn ?? today
+        let end = target.endsOn ?? start
+
+        VStack(alignment: .leading, spacing: 14) {
+            Text("When this applies").font(.system(size: 13, weight: .semibold))
+
+            row("Repeats") {
+                Picker("", selection: Binding(
+                    get: { target.period == .once },
+                    set: { once in
+                        // A one-off needs dates or it asks for nothing, so choosing it seeds today.
+                        save(subject: subject, seconds: target.seconds, direction: target.direction,
+                             period: once ? .once : .week, weekdays: target.weekdays,
+                             startsOn: once ? (target.startsOn ?? today) : target.startsOn,
+                             endsOn: once ? (target.endsOn ?? today) : target.endsOn,
+                             interval: once ? 1 : target.interval)
+                    })) {
+                    Text("Every").tag(false)
+                    Text("Just once").tag(true)
                 }
-                .buttonStyle(.borderless)
-                .font(.system(size: 10, design: .rounded))
-                .popover(isPresented: Binding(
-                    get: { calendarFor == CalendarTarget(id: target.id, isStart: isStart) },
-                    set: { if !$0 { calendarFor = nil } }), arrowEdge: .bottom) {
-                    VStack(spacing: 8) {
-                        Text(isStart ? "First day it applies" : "Last day it applies")
-                            .font(.system(size: 11, weight: .semibold))
-                        DatePicker("", selection: Binding(
-                            get: { date },
-                            set: { picked in
-                                // Kept ordered here rather than validated later: an end before its start is an
-                                // empty window, which Core would honestly report as asking for nothing.
-                                if isStart {
-                                    let end = target.endsOn.map { max($0, picked) }
-                                    write(target, subject: subject, startsOn: picked, endsOn: end)
-                                } else {
-                                    let start = target.startsOn.map { min($0, picked) }
-                                    write(target, subject: subject, startsOn: start, endsOn: picked)
-                                }
-                            }), displayedComponents: .date)
-                        .datePickerStyle(.graphical)
-                        .labelsHidden()
-                        .frame(width: 230)
-                        Button("Done") { calendarFor = nil }.font(.system(size: 11))
+                .pickerStyle(.segmented)
+                .frame(width: 150)
+                .labelsHidden()
+
+                if target.period != .once {
+                    Stepper(value: Binding(
+                        get: { target.interval },
+                        set: { count in
+                            // Above 1 the cycle needs an anchor to count from, so it takes today if the
+                            // allocation has no start date yet.
+                            let anchor = count > 1 ? (target.startsOn ?? today) : target.startsOn
+                            save(subject: subject, seconds: target.seconds,
+                                 direction: target.direction, period: target.period,
+                                 weekdays: target.weekdays, startsOn: anchor,
+                                 endsOn: target.endsOn, interval: count)
+                        }), in: 1...12) {
+                        Text("\(target.interval) \(target.period.rawValue)\(target.interval == 1 ? "" : "s")")
+                            .font(.system(size: 11)).monospacedDigit()
                     }
-                    .padding(12)
+                    .fixedSize()
                 }
-                Button {
-                    // A one-off must keep its dates: without them it asks for nothing at all.
-                    guard target.period != .once else { return }
-                    write(target, subject: subject,
-                          startsOn: isStart ? nil : target.startsOn,
-                          endsOn: isStart ? target.endsOn : nil)
-                } label: {
-                    Image(systemName: "xmark.circle.fill").font(.system(size: 9))
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.tertiary)
-                .opacity(target.period == .once ? 0 : 1)
-                .help("No \(isStart ? "start" : "end") — \(unboundedWord)")
-            } else {
-                Button(unboundedWord) {
-                    let today = Calendar.current.startOfDay(for: Date())
-                    let seeded = isStart
-                        ? today
-                        : (Calendar.current.date(byAdding: .month, value: 1,
-                                                 to: target.startsOn ?? today) ?? today)
-                    write(target, subject: subject,
-                          startsOn: isStart ? seeded : target.startsOn,
-                          endsOn: isStart ? target.endsOn : seeded)
-                }
-                .buttonStyle(.borderless)
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-                .frame(width: 96, alignment: .leading)
-                .help(isStart ? "No start date — applies to every period before now too"
-                              : "No end date — runs until you archive it")
             }
+
+            if target.period == .once {
+                row("On") {
+                    dayButton(start, target: target, subject: subject, isStart: true)
+                    Text("to").font(.system(size: 10)).foregroundStyle(.secondary)
+                    dayButton(end, target: target, subject: subject, isStart: false)
+                }
+                Text("Its hours are the whole job, spread over the days above.")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+            } else {
+                row("Starts") {
+                    Toggle("", isOn: Binding(
+                        get: { target.startsOn != nil },
+                        set: { on in
+                            write(target, subject: subject, startsOn: on ? today : nil,
+                                  endsOn: target.endsOn)
+                        })).labelsHidden().toggleStyle(.switch).controlSize(.mini)
+                    if target.startsOn != nil {
+                        dayButton(start, target: target, subject: subject, isStart: true)
+                    } else {
+                        Text("any time before now counts too")
+                            .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    }
+                }
+                row("Ends") {
+                    Toggle("", isOn: Binding(
+                        get: { target.endsOn != nil },
+                        set: { on in
+                            let month = Calendar.current.date(byAdding: .month, value: 1, to: start)
+                            write(target, subject: subject, startsOn: target.startsOn,
+                                  endsOn: on ? month : nil)
+                        })).labelsHidden().toggleStyle(.switch).controlSize(.mini)
+                    if target.endsOn != nil {
+                        dayButton(end, target: target, subject: subject, isStart: false)
+                    } else {
+                        Text("runs until you archive it")
+                            .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    }
+                }
+            }
+
+            HStack { Spacer(); Button("Done") { customFor = nil }.keyboardShortcut(.defaultAction) }
+        }
+        .padding(16)
+        .frame(width: 330)
+    }
+
+    private func row<Content: View>(_ title: String,
+                                   @ViewBuilder _ content: () -> Content) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            Text(title).font(.system(size: 11)).foregroundStyle(.secondary)
+                .frame(width: 56, alignment: .leading)
+            content()
+        }
+    }
+
+    /// A date as a button that opens a month to click in — the system's compact field is 200pt and renders
+    /// "10/ 1/2026", which is both wider and harder to read than "1 Oct".
+    private func dayButton(_ date: Date, target: Target, subject: TargetSubject,
+                           isStart: Bool) -> some View {
+        Button(Self.dayText(date)) {
+            calendarFor = CalendarTarget(id: target.id, isStart: isStart)
+        }
+        .buttonStyle(.bordered)
+        .font(.system(size: 11, design: .rounded))
+        .popover(isPresented: Binding(
+            get: { calendarFor == CalendarTarget(id: target.id, isStart: isStart) },
+            set: { if !$0 { calendarFor = nil } }), arrowEdge: .bottom) {
+            VStack(spacing: 8) {
+                DatePicker("", selection: Binding(
+                    get: { date },
+                    set: { picked in
+                        // Kept in order here rather than validated later: an end before its start is an empty
+                        // window, which Core honestly reports as asking for nothing.
+                        if isStart {
+                            write(target, subject: subject, startsOn: picked,
+                                  endsOn: target.endsOn.map { max($0, picked) })
+                        } else {
+                            write(target, subject: subject,
+                                  startsOn: target.startsOn.map { min($0, picked) }, endsOn: picked)
+                        }
+                    }), displayedComponents: .date)
+                .datePickerStyle(.graphical)
+                .labelsHidden()
+                .frame(width: 230)
+                Button("Done") { calendarFor = nil }.font(.system(size: 11))
+            }
+            .padding(12)
         }
     }
 

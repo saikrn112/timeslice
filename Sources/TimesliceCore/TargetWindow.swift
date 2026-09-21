@@ -104,6 +104,44 @@ public extension Target {
         }
     }
 
+    /// This allocation rewritten as a plain weekly one for the window being viewed — or nil if it doesn't
+    /// apply there at all.
+    ///
+    /// The planner's day-level machinery (`Planner`, `Replan`) works in weekday numbers with no dates, so it
+    /// cannot test a window or an every-N cycle. Rather than thread dates through all of it, each target is
+    /// projected onto the viewed window first: the hours become what it actually asks of that window, the
+    /// weekday mask is narrowed to the days that are genuinely eligible there, and the interval is spent. What
+    /// comes out is an ordinary weekly allocation, so every existing figure keeps working unchanged.
+    ///
+    /// A one-off on a single Wednesday projects onto that week as "4h, Wednesdays only" — which is exactly
+    /// what it means, and the planner then places it with the same rules as everything else.
+    func projected(onto window: DateInterval, calendar: Calendar = .current) -> Target? {
+        guard applies(to: window, calendar: calendar) else { return nil }
+        let asked = direction == .atLeast ? ask(in: window, calendar: calendar) : seconds
+        // Eligible days: inside the window, claimed by the mask, and in a running cycle.
+        var mask = Weekdays(rawValue: 0)
+        var cursor = calendar.startOfDay(for: window.start)
+        let claimed = weekdays.effective
+        let dayWin = dayWindow(calendar: calendar)
+        while cursor < window.end {
+            let weekday = calendar.component(.weekday, from: cursor)
+            let inWindow = dayWin.map { $0.start <= cursor && cursor < $0.end } ?? true
+            if inWindow, claimed.contains(weekday: weekday), runsIn(day: cursor, calendar: calendar),
+               !mask.contains(weekday: weekday) {
+                mask = mask.toggling(weekday: weekday)
+            }
+            guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+        // A floor with no eligible day in this window asks nothing here; a ceiling still applies.
+        if direction == .atLeast && (mask.rawValue == 0 || asked <= 0) { return nil }
+        return Target(id: id, subject: subject, seconds: asked, direction: direction,
+                      period: .week, createdAt: createdAt, completedAt: completedAt,
+                      sortOrder: sortOrder,
+                      weekdays: mask.rawValue == 0 ? weekdays : mask, shape: shape,
+                      startsOn: startsOn, endsOn: endsOn, interval: 1)
+    }
+
     /// What this allocation asks of `range`: its per-claimed-day rate times the claimed days it has there.
     ///
     /// Replaces every ad-hoc `weeklySeconds × someNumberOfWeeks` in the planner. A week wholly inside a

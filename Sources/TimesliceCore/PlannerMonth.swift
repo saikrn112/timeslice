@@ -142,15 +142,10 @@ public enum PlannerMonth {
     /// different goals for the same month.
     public static func goal(for target: Target, month: DateInterval,
                             calendar: Calendar) -> TimeInterval {
-        let claimed = target.weekdays.effective
-        var days = 0
-        var cursor = calendar.startOfDay(for: month.start)
-        while cursor < month.end {
-            if claimed.contains(weekday: calendar.component(.weekday, from: cursor)) { days += 1 }
-            guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
-            cursor = next
-        }
-        return target.weeklySeconds / Double(max(1, claimed.selectedCount)) * Double(days)
+        // `ask(in:)` already intersects the weekday mask with the allocation's window and skips the periods
+        // an every-N cycle doesn't run in, so a bounded allocation stops inflating the months either side of
+        // it and a one-off asks for its own days rather than a weekly rate.
+        target.ask(in: month, calendar: calendar)
     }
 
     /// Every floor's month goal, for the rail, the headline and the verdict.
@@ -294,13 +289,14 @@ public enum PlannerMonth {
         // The physical ceiling on catching up here: an allocation can't use hours on days it doesn't claim, so a
         // weekends-only allocation can absorb at most two waking days per week however far behind it is.
         var ceiling = [[Int64: TimeInterval]](repeating: [:], count: spans.count)
-        for target in asking where target.weeklySeconds > 0 {
-            let claimed = target.weekdays.effective
-            let perDay = target.weeklySeconds / Double(max(1, claimed.selectedCount))
+        for target in asking {
             for (index, span) in spans.enumerated() {
-                let mine = span.weekdays.filter { claimed.contains(weekday: $0) }.count
+                // Claimed days here, honouring the window and the cycle — not just the weekday mask.
+                let mine = target.claimedDays(in: span.inMonth, calendar: calendar)
                 guard mine > 0 else { continue }
-                want[index][target.id] = perDay * Double(mine)
+                let asked = target.ask(in: span.inMonth, calendar: calendar)
+                guard asked > 0 else { continue }
+                want[index][target.id] = asked
                 ceiling[index][target.id] = Double(mine) * wakingSeconds
             }
         }
