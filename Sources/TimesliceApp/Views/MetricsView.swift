@@ -1850,6 +1850,9 @@ struct MetricsView: View {
                 case .day: return .day
                 case .week: return .week
                 case .month: return .month
+                // A one-off spans its own window; the month is the nearest recurring bucket and the row
+                // states its dates anyway.
+                case .once: return .month
                 }
             }()
             // Anchored INSIDE the range you're looking at, not at `now`. Keeping the budget's own

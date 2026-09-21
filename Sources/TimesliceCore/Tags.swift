@@ -204,17 +204,29 @@ public struct Target: Identifiable, Hashable, Sendable {
 
     public enum Period: String, Sendable, CaseIterable {
         case day, week, month
+        /// Not a rate at all: `seconds` is the WHOLE job, spread across the allocation's window.
+        ///
+        /// "6h of visa paperwork on 14 Oct", "20h of conference prep across 12–20 Oct". Requires a window —
+        /// without one there is nothing to spread over, and `ask(in:)` returns zero rather than guessing.
+        case once
 
         /// Nominal length, used to normalise a target onto a range of a different size.
         /// A month is 30 days here: targets are intentions, not accounting, and a calendar-exact
         /// month would make the same target read differently in February than in March.
+        ///
+        /// `once` has no nominal length — its length is its window — so it answers 0 and callers that
+        /// divide by it must exclude it first.
         public var nominalDays: Double {
             switch self {
             case .day: return 1
             case .week: return 7
             case .month: return 30
+            case .once: return 0
             }
         }
+
+        /// Whether `seconds` means "per period" rather than "in total".
+        public var isRate: Bool { self != .once }
     }
 
     public let id: Int64
@@ -237,13 +249,24 @@ public struct Target: Identifiable, Hashable, Sendable {
     /// How the total wants to be spread. Read by the planner; the metrics page ignores it, because
     /// how you MEANT to spread the hours doesn't change how many you recorded.
     public let shape: TargetShape
+    /// The first and last day this allocation applies to, inclusive, or nil for unbounded.
+    ///
+    /// Deliberately NOT `createdAt`/`completedAt`, which record when the row was written and when it was
+    /// retired. These are intent: "8h/week of thesis from 1 Oct until 15 Nov", or the single day a one-off
+    /// belongs to. Conflating the two would silently rewrite every past period's goals, because the
+    /// existing rows carry real creation dates.
+    public let startsOn: Date?
+    public let endsOn: Date?
 
     public var isLive: Bool { completedAt == nil }
 
     public init(id: Int64, subject: TargetSubject, seconds: TimeInterval,
                 direction: Direction, period: Period,
                 createdAt: Date = Date(), completedAt: Date? = nil, sortOrder: Int = 0,
-                weekdays: Weekdays = .all, shape: TargetShape = .flexible) {
+                weekdays: Weekdays = .all, shape: TargetShape = .flexible,
+                startsOn: Date? = nil, endsOn: Date? = nil) {
+        self.startsOn = startsOn
+        self.endsOn = endsOn
         self.id = id
         self.subject = subject
         self.seconds = seconds

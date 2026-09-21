@@ -448,6 +448,13 @@ public extension Target {
             return seconds
         case .month:
             return seconds / Target.Period.month.nominalDays * 7
+        case .once:
+            // A one-off has no rate. Its weekly equivalent is its total spread over the weeks its window
+            // spans, which keeps figures that sum `weeklySeconds` roughly honest rather than reading zero;
+            // anything that needs the exact ask for a period must call `ask(in:)`.
+            guard let window = dayWindow else { return 0 }
+            let days = max(1, window.end.timeIntervalSince(window.start) / 86_400)
+            return seconds / days * 7
         }
     }
 
@@ -458,10 +465,16 @@ public extension Target {
         case .day: scaled = weekly / Double(max(1, weekdays.effective.selectedCount))
         case .week: scaled = weekly
         case .month: scaled = weekly / 7 * Target.Period.month.nominalDays
+        case .once:
+            // The frontier asks "how big could this be?" — for a one-off that's its total, and the window
+            // is what it's spread over, so the weekly figure scales back through the same window length.
+            let days = dayWindow.map { max(1, $0.end.timeIntervalSince($0.start) / 86_400) } ?? 7
+            scaled = weekly / 7 * days
         }
         return Target(id: id, subject: subject, seconds: scaled, direction: direction,
                       period: period, createdAt: createdAt, completedAt: completedAt,
-                      sortOrder: sortOrder, weekdays: weekdays, shape: shape)
+                      sortOrder: sortOrder, weekdays: weekdays, shape: shape,
+                      startsOn: startsOn, endsOn: endsOn)
     }
 }
 

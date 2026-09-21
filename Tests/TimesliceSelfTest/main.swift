@@ -3100,6 +3100,224 @@ func testPlannerMonthWeeks() {
     check(approx(lopsided.placed.values.reduce(0, +), 2 * 3600, 60), "and the room is spent exactly")
 }
 
+/// Allocations that start, stop, or happen once. Every goal figure on the planner reduces to `claimedDays`
+/// — weekdays intersected with the window — so this is the function to get right before anything reads it.
+func testAllocationWindows() {
+    print("Allocation windows:")
+    var cal = Calendar(identifier: .gregorian)
+    cal.firstWeekday = 1
+    cal.timeZone = .current
+    func day(_ month: Int, _ d: Int) -> Date {
+        cal.date(from: DateComponents(year: 2026, month: month, day: d))!
+    }
+    func span(_ from: Date, _ to: Date) -> DateInterval { DateInterval(start: from, end: to) }
+    let monFri = Weekdays(rawValue: (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5))
+    // October 2026: the 1st is a Thursday. 22 weekdays in the month.
+    let october = span(day(10, 1), day(11, 1))
+    let september = span(day(9, 1), day(10, 1))
+
+    // MARK: Unbounded — nothing changes
+
+    let office = floor(1, .tag(1), hours: 35, weekdays: monFri)
+    check(office.dayWindow(calendar: cal) == nil, "no dates means no window")
+    check(office.applies(to: september, calendar: cal), "and it applies to every period")
+    check(office.claimedDays(in: october, calendar: cal) == 22,
+          "October 2026 has 22 weekdays")
+    check(approx(office.ask(in: october, calendar: cal), 154 * 3600, 60),
+          "so a 35h/week Mon–Fri allocation asks 154h of it — the figure the month view already shows")
+    check(approx(office.ask(in: span(day(10, 4), day(10, 11)), calendar: cal), 35 * 3600, 60),
+          "and exactly its weekly amount of a whole week")
+
+    // MARK: A bounded repeat
+
+    // Same allocation, live only 1–15 October: eleven weekdays (1, 2, 5–9, 12–15).
+    let bounded = Target(id: 2, subject: .tag(1), seconds: 35 * 3600, direction: .atLeast,
+                         period: .week, weekdays: monFri,
+                         startsOn: day(10, 1), endsOn: day(10, 15))
+    check(bounded.claimedDays(in: october, calendar: cal) == 11,
+          "eleven weekdays fall inside 1–15 October")
+    check(approx(bounded.ask(in: october, calendar: cal), 77 * 3600, 60),
+          "so October asks 77h of it, not 154h")
+    check(!bounded.applies(to: september, calendar: cal),
+          "September is before it existed, so it doesn't apply there at all")
+    check(bounded.ask(in: september, calendar: cal) == 0, "and asks nothing of it")
+    check(!bounded.applies(to: span(day(11, 1), day(12, 1)), calendar: cal),
+          "November is after it ended")
+    // The end date is INCLUSIVE as a person states it.
+    check(bounded.claimedDays(in: span(day(10, 15), day(10, 16)), calendar: cal) == 1,
+          "\"until the 15th\" includes the 15th")
+    check(bounded.claimedDays(in: span(day(10, 16), day(10, 17)), calendar: cal) == 0,
+          "and stops after it")
+
+    // Open-ended at one end.
+    let fromJan = Target(id: 3, subject: .tag(1), seconds: 4 * 3600, direction: .atLeast,
+                         period: .week, startsOn: day(12, 1), endsOn: nil)
+    check(!fromJan.applies(to: october, calendar: cal), "a start date alone still bounds the past")
+    check(fromJan.applies(to: span(day(12, 1), day(12, 8)), calendar: cal),
+          "and applies from that day on, forever")
+
+    // MARK: One-offs
+
+    // 6h on a single day — a Wednesday, so a Mon–Fri mask doesn't interfere.
+    let oneDay = Target(id: 4, subject: .tag(1), seconds: 6 * 3600, direction: .atLeast,
+                        period: .once, weekdays: monFri,
+                        startsOn: day(10, 14), endsOn: day(10, 14))
+    check(oneDay.claimedDays(in: october, calendar: cal) == 1, "a one-day window claims one day")
+    check(approx(oneDay.perClaimedDaySeconds(calendar: cal), 6 * 3600, 1),
+          "and its whole total lands on it")
+    check(approx(oneDay.ask(in: october, calendar: cal), 6 * 3600, 60),
+          "so the month asks for six hours, once")
+    check(approx(oneDay.ask(in: span(day(10, 11), day(10, 18)), calendar: cal), 6 * 3600, 60),
+          "all of it in the week containing that day")
+    check(oneDay.ask(in: span(day(10, 18), day(10, 25)), calendar: cal) == 0,
+          "and nothing in the week after")
+
+    // 20h across 10–20 October with a Mon–Fri mask: 7 usable weekdays (12–16, 19, 20 — and 10, 11 are
+    // the weekend). The number you confirmed: 2.9h each.
+    let job = Target(id: 5, subject: .tag(1), seconds: 20 * 3600, direction: .atLeast,
+                     period: .once, weekdays: monFri,
+                     startsOn: day(10, 10), endsOn: day(10, 20))
+    check(job.claimedDays(in: october, calendar: cal) == 7,
+          "the weekday mask still applies inside a one-off's range")
+    check(approx(job.perClaimedDaySeconds(calendar: cal) / 3600, 20.0 / 7, 0.01),
+          "so each of those days carries 2.9h")
+    check(approx(job.ask(in: october, calendar: cal), 20 * 3600, 60),
+          "and the whole job is asked of the month exactly once")
+    // Split across weeks: the week of 11–17 Oct holds five of the seven claimed days.
+    let midWeek = span(day(10, 11), day(10, 18))
+    check(approx(job.ask(in: midWeek, calendar: cal), 20 * 3600 * 5 / 7, 60),
+          "a week gets its share of the job, by claimed days")
+    let lastWeek = span(day(10, 18), day(10, 25))
+    check(approx(job.ask(in: midWeek, calendar: cal) + job.ask(in: lastWeek, calendar: cal),
+                 20 * 3600, 60),
+          "and the shares of the weeks it spans add up to the whole job")
+
+    // A one-off spanning a month boundary is split by the same rule, with nothing invented.
+    let across = Target(id: 6, subject: .tag(1), seconds: 10 * 3600, direction: .atLeast,
+                        period: .once, startsOn: day(10, 29), endsOn: day(11, 2))
+    check(across.claimedDays(in: span(day(10, 29), day(11, 3)), calendar: cal) == 5,
+          "five days, every one of them claimed")
+    check(approx(across.ask(in: october, calendar: cal), 10 * 3600 * 3 / 5, 60),
+          "October gets three fifths of it")
+    check(approx(across.ask(in: span(day(11, 1), day(12, 1)), calendar: cal), 10 * 3600 * 2 / 5, 60),
+          "November the other two")
+
+    // MARK: Degenerate cases that must not invent hours
+
+    let noWindow = Target(id: 7, subject: .tag(1), seconds: 9 * 3600, direction: .atLeast,
+                          period: .once)
+    check(noWindow.perClaimedDaySeconds(calendar: cal) == 0,
+          "a one-off with no window asks nothing rather than guessing a length")
+    check(noWindow.ask(in: october, calendar: cal) == 0, "so it claims no room either")
+
+    let weekendOnly = Target(id: 8, subject: .tag(1), seconds: 4 * 3600, direction: .atLeast,
+                             period: .once, weekdays: Weekdays(rawValue: (1 << 0) | (1 << 6)),
+                             startsOn: day(10, 12), endsOn: day(10, 16))
+    check(weekendOnly.claimedDays(in: october, calendar: cal) == 0,
+          "a weekend-only job inside a Mon–Fri range claims nothing")
+    check(weekendOnly.ask(in: october, calendar: cal) == 0, "and therefore asks nothing")
+
+    let backwards = Target(id: 9, subject: .tag(1), seconds: 4 * 3600, direction: .atLeast,
+                           period: .once, startsOn: day(10, 20), endsOn: day(10, 10))
+    check(backwards.ask(in: october, calendar: cal) == 0,
+          "an end before its start is an empty window, not a negative one")
+
+    let ceiling = Target(id: 10, subject: .tag(1), seconds: 4 * 3600, direction: .atMost,
+                         period: .week, startsOn: day(10, 1), endsOn: day(10, 31))
+    check(ceiling.ask(in: october, calendar: cal) == 0, "a ceiling never asks for hours")
+    check(ceiling.applies(to: october, calendar: cal),
+          "but it still applies, so it can be shown and checked")
+
+    // MARK: The identity the planner depends on
+
+    // Whatever the shape, the shares of the periods an allocation spans add up to what it asks in total.
+    for target in [office, bounded, oneDay, job, across] {
+        let whole = target.ask(in: span(day(9, 1), day(12, 1)), calendar: cal)
+        let months = target.ask(in: september, calendar: cal)
+            + target.ask(in: october, calendar: cal)
+            + target.ask(in: span(day(11, 1), day(12, 1)), calendar: cal)
+        check(approx(whole, months, 60),
+              "allocation \(target.id): the months it spans add up to the whole ask")
+    }
+}
+
+/// The window survives a round trip, and a peer that has never heard of it cannot delete it.
+func testAllocationWindowStorage() throws {
+    print("Allocation window storage:")
+    let cal = Calendar.current
+    func day(_ month: Int, _ d: Int) -> Date {
+        cal.startOfDay(for: cal.date(from: DateComponents(year: 2026, month: month, day: d))!)
+    }
+
+    do { // round trip
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let g = try store.upsertTaskProject(name: "conference", colorHex: "#fff")
+        try store.setTarget(subject: .project(g), seconds: 20 * 3600, direction: .atLeast,
+                            period: .once, startsOn: day(10, 10), endsOn: day(10, 20))
+        let read = try store.listTargets()[0]
+        check(read.period == .once, "a one-off keeps its period")
+        check(read.startsOn == day(10, 10) && read.endsOn == day(10, 20),
+              "and both ends of its window, at local start-of-day")
+
+        // Editing the amount must not silently drop the window.
+        try store.setTarget(subject: .project(g), seconds: 25 * 3600, direction: .atLeast,
+                            period: .once, startsOn: day(10, 10), endsOn: day(10, 20))
+        let again = try store.listTargets()[0]
+        check(approx(again.seconds, 25 * 3600, 1) && again.endsOn == day(10, 20),
+              "editing the hours leaves the window alone")
+    }
+
+    do { // unbounded stays unbounded
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let g = try store.upsertTaskProject(name: "office", colorHex: "#fff")
+        try store.setTarget(subject: .project(g), seconds: 35 * 3600, direction: .atLeast, period: .week)
+        let read = try store.listTargets()[0]
+        check(read.startsOn == nil && read.endsOn == nil, "no dates given, none stored")
+        check(read.dayWindow(calendar: cal) == nil, "so it has no window at all")
+    }
+
+    do { // THE SYNC TRAP: absent means "no opinion", never "clear it"
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let g = try store.upsertTaskProject(name: "thesis", colorHex: "#fff")
+        try store.setTarget(subject: .project(g), seconds: 8 * 3600, direction: .atLeast,
+                            period: .week, startsOn: day(10, 1), endsOn: day(11, 15))
+        // A peer on an older build edits the amount. It cannot see windows, so it sends none — exactly
+        // the shape of the bug that once reset a Mon–Fri allocation to all seven days.
+        let applied = try store.applyRemoteTarget(
+            uid: try store.targetsForExport()[0].uid, subject: .project(g), seconds: 9 * 3600,
+            direction: .atLeast, period: .week,
+            remoteUpdatedAt: Date().timeIntervalSince1970 + 60)
+        check(applied, "the newer remote edit is taken")
+        let after = try store.listTargets()[0]
+        check(approx(after.seconds, 9 * 3600, 1), "its amount changes")
+        check(after.startsOn == day(10, 1) && after.endsOn == day(11, 15),
+              "and the window it never sent is still here")
+
+        // A peer that DOES send a window may change it.
+        _ = try store.applyRemoteTarget(
+            uid: try store.targetsForExport()[0].uid, subject: .project(g), seconds: 9 * 3600,
+            direction: .atLeast, period: .week,
+            remoteUpdatedAt: Date().timeIntervalSince1970 + 120,
+            startsOn: day(10, 1).timeIntervalSince1970,
+            endsOn: day(12, 1).timeIntervalSince1970)
+        check(try store.listTargets()[0].endsOn == day(12, 1),
+              "a peer that knows about windows can move one")
+    }
+
+    do { // a window arriving for an allocation this device has never seen
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let g = try store.upsertTaskProject(name: "taxes", colorHex: "#fff")
+        _ = try store.applyRemoteTarget(
+            uid: "remote-uid", subject: .project(g), seconds: 10 * 3600,
+            direction: .atLeast, period: .once,
+            remoteUpdatedAt: Date().timeIntervalSince1970,
+            startsOn: day(4, 1).timeIntervalSince1970, endsOn: day(4, 15).timeIntervalSince1970)
+        let read = try store.listTargets()[0]
+        check(read.period == .once && read.startsOn == day(4, 1) && read.endsOn == day(4, 15),
+              "an inserted remote one-off arrives with its window intact")
+    }
+}
+
 func testDormancy() {
     print("Dormancy:")
     let calendar = Calendar.current
@@ -6117,6 +6335,8 @@ do {
     testHistoricalWeek()
     testDayTimelineRows()
     testPlannerMonthWeeks()
+    testAllocationWindows()
+    try testAllocationWindowStorage()
     testDormancy()
     testPerDayPlan()
     testPrimaryOwner()
@@ -6147,6 +6367,8 @@ do {
     testHistoricalWeek()
     testDayTimelineRows()
     testPlannerMonthWeeks()
+    testAllocationWindows()
+    try testAllocationWindowStorage()
     testDormancy()
     testPerDayPlan()
     testPrimaryOwner()

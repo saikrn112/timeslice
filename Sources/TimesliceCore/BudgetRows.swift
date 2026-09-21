@@ -96,6 +96,9 @@ public enum BudgetRows {
                 case .day: return .day
                 case .week: return .week
                 case .month: return .month
+                // A one-off is measured over its own window, not a recurring unit. The month is the
+                // closest existing bucket and the row states its dates anyway.
+                case .once: return .month
                 }
             }()
             // The budget's OWN period — the window the verdict is judged in.

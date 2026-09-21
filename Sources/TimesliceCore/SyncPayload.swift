@@ -140,18 +140,27 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         public var shapeKind: Int?
         public var shapeMin: TimeInterval?
         public var shapeCount: Int?
+        /// When the allocation applies, inclusive, or absent for unbounded.
+        ///
+        /// Absent means "I have no opinion", NOT "clear it" — the same rule as `weekdays` and the shape,
+        /// and for the same reason: a peer on a build that has never heard of windows must not be able to
+        /// delete one by being the most recent writer.
+        public var startsOn: TimeInterval?
+        public var endsOn: TimeInterval?
 
         public init(uid: String, subjectKind: String, subjectUID: String, seconds: TimeInterval,
                     direction: String, period: String, updatedAt: TimeInterval,
                     createdAt: TimeInterval? = nil, completedAt: TimeInterval? = nil,
                     weekdays: Int? = nil, shapeKind: Int? = nil, shapeMin: TimeInterval? = nil,
-                    shapeCount: Int? = nil) {
+                    shapeCount: Int? = nil,
+                    startsOn: TimeInterval? = nil, endsOn: TimeInterval? = nil) {
             self.uid = uid; self.subjectKind = subjectKind; self.subjectUID = subjectUID
             self.seconds = seconds; self.direction = direction; self.period = period
             self.updatedAt = updatedAt
             self.createdAt = createdAt; self.completedAt = completedAt
             self.weekdays = weekdays
             self.shapeKind = shapeKind; self.shapeMin = shapeMin; self.shapeCount = shapeCount
+            self.startsOn = startsOn; self.endsOn = endsOn
         }
     }
 

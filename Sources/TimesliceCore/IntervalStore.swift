@@ -215,6 +215,13 @@ public final class IntervalStore {
         _ = sqlite3_exec(db, "ALTER TABLE targets ADD COLUMN shape_kind INTEGER", nil, nil, nil)
         _ = sqlite3_exec(db, "ALTER TABLE targets ADD COLUMN shape_min REAL", nil, nil, nil)
         _ = sqlite3_exec(db, "ALTER TABLE targets ADD COLUMN shape_count INTEGER", nil, nil, nil)
+        // When an allocation applies: the first and last day, inclusive, or NULL for unbounded.
+        //
+        // NULL is load-bearing and means "no bound", never "cleared" — an older peer that has never heard of
+        // these columns must not be able to delete a window by omitting it. Distinct from `created_at` and
+        // `completed_at`, which record when the row was written and retired rather than when it takes effect.
+        _ = sqlite3_exec(db, "ALTER TABLE targets ADD COLUMN starts_on REAL", nil, nil, nil)
+        _ = sqlite3_exec(db, "ALTER TABLE targets ADD COLUMN ends_on REAL", nil, nil, nil)
 
         // Non-negotiables: hours claimed before any allocation gets a look in.
         //
@@ -1494,7 +1501,7 @@ public final class IntervalStore {
         let sql = "SELECT id, subject_kind, subject_id, seconds, direction, period, "
             + "COALESCE(created_at, 0), completed_at, COALESCE(sort_order, id), "
             + "COALESCE(weekdays, 127), COALESCE(shape_kind, 0), COALESCE(shape_min, 0), "
-            + "COALESCE(shape_count, 0) FROM targets"
+            + "COALESCE(shape_count, 0), starts_on, ends_on FROM targets"
             + (includeCompleted ? "" : " WHERE completed_at IS NULL")
             + " ORDER BY COALESCE(sort_order, id)"
         let stmt = try prepare(sql)
@@ -1514,7 +1521,11 @@ public final class IntervalStore {
                               weekdays: Weekdays(rawValue: Int(sqlite3_column_int(stmt, 9))),
                               shape: TargetShape(kindRaw: Int(sqlite3_column_int(stmt, 10)),
                                                  minSeconds: sqlite3_column_double(stmt, 11),
-                                                 count: Int(sqlite3_column_int(stmt, 12)))))
+                                                 count: Int(sqlite3_column_int(stmt, 12))),
+                              startsOn: sqlite3_column_type(stmt, 13) == SQLITE_NULL
+                                  ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 13)),
+                              endsOn: sqlite3_column_type(stmt, 14) == SQLITE_NULL
+                                  ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 14))))
         }
         return out
     }
@@ -1574,16 +1585,18 @@ public final class IntervalStore {
     public func setTarget(subject: TargetSubject, seconds: TimeInterval,
                           direction: Target.Direction, period: Target.Period,
                           weekdays: Weekdays = .all,
-                          shape: TargetShape = .flexible) throws -> Int64 {
+                          shape: TargetShape = .flexible,
+                          startsOn: Date? = nil, endsOn: Date? = nil) throws -> Int64 {
         // The conflict target names the partial index's predicate too, so this upserts against the
         // LIVE allocation and a retired one for the same subject is left alone.
-        let sql = "INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at, created_at, weekdays, shape_kind, shape_min, shape_count, sort_order) "
-            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM targets)) "
+        let sql = "INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at, created_at, weekdays, shape_kind, shape_min, shape_count, starts_on, ends_on, sort_order) "
+            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM targets)) "
             + "ON CONFLICT(subject_kind, subject_id) WHERE completed_at IS NULL DO UPDATE SET "
             + "seconds = excluded.seconds, direction = excluded.direction, "
             + "period = excluded.period, weekdays = excluded.weekdays, "
             + "shape_kind = excluded.shape_kind, shape_min = excluded.shape_min, "
-            + "shape_count = excluded.shape_count, updated_at = excluded.updated_at"
+            + "shape_count = excluded.shape_count, starts_on = excluded.starts_on, "
+            + "ends_on = excluded.ends_on, updated_at = excluded.updated_at"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, subject.kind)
@@ -1598,6 +1611,9 @@ public final class IntervalStore {
         sqlite3_bind_int(stmt, 10, Int32(shape.kindRaw))
         sqlite3_bind_double(stmt, 11, shape.minSeconds)
         sqlite3_bind_int(stmt, 12, Int32(shape.count))
+        // Stored at local start-of-day, so a window means the same days whatever hour it was set at.
+        if let startsOn { sqlite3_bind_double(stmt, 13, Calendar.current.startOfDay(for: startsOn).timeIntervalSince1970) }
+        if let endsOn { sqlite3_bind_double(stmt, 14, Calendar.current.startOfDay(for: endsOn).timeIntervalSince1970) }
         try step(stmt)
         return sqlite3_last_insert_rowid(db)
     }
@@ -1714,7 +1730,9 @@ public final class IntervalStore {
                                   completedAt: TimeInterval? = nil,
                                   weekdays: Int? = nil,
                                   shapeKind: Int? = nil, shapeMin: TimeInterval? = nil,
-                                  shapeCount: Int? = nil) throws -> Bool {
+                                  shapeCount: Int? = nil,
+                                  startsOn: TimeInterval? = nil,
+                                  endsOn: TimeInterval? = nil) throws -> Bool {
         // By UID first — that's the row's identity. Matching on the subject alone broke as soon as
         // the done state existed: a REOPENED allocation has no live row for its subject here, so the
         // subject lookup missed and the insert collided with the uid we already held.
@@ -1752,7 +1770,7 @@ public final class IntervalStore {
             // Shape columns use COALESCE for the same reason `weekdays` does: a peer that doesn't
             // send them has no opinion, and writing the default on its behalf would let a device that
             // can't display shapes destroy one just by editing the amount.
-            let stmt = try prepare("UPDATE targets SET seconds = ?, direction = ?, period = ?, uid = ?, updated_at = ?, completed_at = ?, weekdays = COALESCE(?, weekdays, 127), shape_kind = COALESCE(?, shape_kind, 0), shape_min = COALESCE(?, shape_min, 0), shape_count = COALESCE(?, shape_count, 0) WHERE id = ?")
+            let stmt = try prepare("UPDATE targets SET seconds = ?, direction = ?, period = ?, uid = ?, updated_at = ?, completed_at = ?, weekdays = COALESCE(?, weekdays, 127), shape_kind = COALESCE(?, shape_kind, 0), shape_min = COALESCE(?, shape_min, 0), shape_count = COALESCE(?, shape_count, 0), starts_on = COALESCE(?, starts_on), ends_on = COALESCE(?, ends_on) WHERE id = ?")
             defer { sqlite3_finalize(stmt) }
             sqlite3_bind_double(stmt, 1, seconds)
             bindText(stmt, 2, direction.rawValue)
@@ -1769,11 +1787,17 @@ public final class IntervalStore {
             else { sqlite3_bind_null(stmt, 9) }
             if let shapeCount { sqlite3_bind_int(stmt, 10, Int32(shapeCount)) }
             else { sqlite3_bind_null(stmt, 10) }
-            sqlite3_bind_int64(stmt, 11, mineID)
+            // `COALESCE(?, starts_on)` with no default: absent leaves whatever is here, and there is no
+            // "every day"-style fallback to write on a silent peer's behalf — unbounded IS null.
+            if let startsOn { sqlite3_bind_double(stmt, 11, startsOn) }
+            else { sqlite3_bind_null(stmt, 11) }
+            if let endsOn { sqlite3_bind_double(stmt, 12, endsOn) }
+            else { sqlite3_bind_null(stmt, 12) }
+            sqlite3_bind_int64(stmt, 13, mineID)
             try step(stmt)
             return true
         }
-        let stmt = try prepare("INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at, created_at, completed_at, weekdays, shape_kind, shape_min, shape_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        let stmt = try prepare("INSERT INTO targets (subject_kind, subject_id, seconds, direction, period, uid, updated_at, created_at, completed_at, weekdays, shape_kind, shape_min, shape_count, starts_on, ends_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, subject.kind)
         sqlite3_bind_int64(stmt, 2, subject.id)
@@ -1791,6 +1815,10 @@ public final class IntervalStore {
         sqlite3_bind_int(stmt, 11, Int32(shapeKind ?? 0))
         sqlite3_bind_double(stmt, 12, shapeMin ?? 0)
         sqlite3_bind_int(stmt, 13, Int32(shapeCount ?? 0))
+        if let startsOn { sqlite3_bind_double(stmt, 14, startsOn) }
+        else { sqlite3_bind_null(stmt, 14) }
+        if let endsOn { sqlite3_bind_double(stmt, 15, endsOn) }
+        else { sqlite3_bind_null(stmt, 15) }
         try step(stmt)
         return true
     }
@@ -1821,13 +1849,15 @@ public final class IntervalStore {
                                                period: String, updatedAt: TimeInterval,
                                                createdAt: TimeInterval, completedAt: TimeInterval?,
                                                weekdays: Int, shapeKind: Int, shapeMin: TimeInterval,
-                                               shapeCount: Int)] {
+                                               shapeCount: Int,
+                                               startsOn: TimeInterval?, endsOn: TimeInterval?)] {
         // Completed ones travel too: history is the point of keeping them, so a peer must learn both
         // that an allocation ended and when.
-        let stmt = try prepare("SELECT uid, subject_kind, subject_id, seconds, direction, period, COALESCE(updated_at, 0), COALESCE(created_at, 0), completed_at, COALESCE(weekdays, 127), COALESCE(shape_kind, 0), COALESCE(shape_min, 0), COALESCE(shape_count, 0) FROM targets WHERE uid IS NOT NULL")
+        let stmt = try prepare("SELECT uid, subject_kind, subject_id, seconds, direction, period, COALESCE(updated_at, 0), COALESCE(created_at, 0), completed_at, COALESCE(weekdays, 127), COALESCE(shape_kind, 0), COALESCE(shape_min, 0), COALESCE(shape_count, 0), starts_on, ends_on FROM targets WHERE uid IS NOT NULL")
         defer { sqlite3_finalize(stmt) }
         var out: [(String, String, String, TimeInterval, String, String, TimeInterval,
-                   TimeInterval, TimeInterval?, Int, Int, TimeInterval, Int)] = []
+                   TimeInterval, TimeInterval?, Int, Int, TimeInterval, Int,
+                   TimeInterval?, TimeInterval?)] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let kind = text(stmt, 1)
             guard let table = Self.table(forSubjectKind: kind),
@@ -1838,7 +1868,9 @@ public final class IntervalStore {
                         sqlite3_column_double(stmt, 7),
                         sqlite3_column_type(stmt, 8) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 8),
                         Int(sqlite3_column_int(stmt, 9)), Int(sqlite3_column_int(stmt, 10)),
-                        sqlite3_column_double(stmt, 11), Int(sqlite3_column_int(stmt, 12))))
+                        sqlite3_column_double(stmt, 11), Int(sqlite3_column_int(stmt, 12)),
+                        sqlite3_column_type(stmt, 13) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 13),
+                        sqlite3_column_type(stmt, 14) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 14)))
         }
         return out
     }
