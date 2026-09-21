@@ -86,6 +86,16 @@ struct PlannerView: View {
     ///
     /// Two questions, not a better and a worse answer — see `Replan.Method`. Remembered across launches
     /// because it's a way of reading the week, not a thing you toggle while comparing.
+    /// Week columns or day columns, inside the month. Remembered, like the method.
+    @AppStorage("plannerMonthResolution")
+    private var monthResolutionRaw = PlannerMonth.Resolution.week.rawValue
+    private var monthResolution: PlannerMonth.Resolution {
+        if let forced = ProcessInfo.processInfo.environment["TIMESLICE_MONTH_RESOLUTION"],
+           let parsed = PlannerMonth.Resolution(rawValue: forced) {
+            return parsed
+        }
+        return PlannerMonth.Resolution(rawValue: monthResolutionRaw) ?? .week
+    }
     @AppStorage("plannerMethod") private var methodRaw = Replan.Method.catchUp.rawValue
     private var method: Replan.Method {
         // A capture run can force one, so both readings are reviewable without changing your setting.
@@ -148,9 +158,12 @@ struct PlannerView: View {
                     // "is this month behind" is a question about weeks, and the day cells answer a
                     // different one (which days went well) at a resolution that can't add up to a verdict.
                     if unit == .month, !monthWeekColumns.isEmpty {
-                        section("How full each week is", subtitle: monthWeekSubtitle,
+                        section(monthResolution == .week ? "How full each week is"
+                                                            : "How full each day is",
+                                subtitle: monthWeekSubtitle,
                                 accessory: {
                                     HStack(spacing: 10) {
+                                        resolutionToggle
                                         methodToggle
                                         intendedToggle
                                     }
@@ -161,6 +174,9 @@ struct PlannerView: View {
                                             elapsedHoursToday: nil,
                                             highlight: highlight,
                                             leftoverCaption: monthLeftoverCaption,
+                                            // Days get a floor on width so they stay labelled; weeks never
+                                            // need it, there are only ever five or six of them.
+                                            minColumnWidth: monthResolution == .day ? 74 : nil,
                                             onPick: { pick($0) },
                                             onOpen: { openWeekInMetrics(targetID: $0, spanIndex: $1) })
                         }
@@ -382,7 +398,7 @@ struct PlannerView: View {
             if !showIntended {
                 legendKey(filled: true, "tracked")
             }
-            legendKey(filled: false, showIntended ? "planned" : "this week wants")
+            legendKey(filled: false, showIntended ? "planned" : "this \(unitNoun) wants")
             // No key for the cross-hatched cap: `legendKey` has only filled and dashed swatches, and a
             // dashed one would claim those hours are planned. The cap writes its own label instead.
 
@@ -608,17 +624,47 @@ struct PlannerView: View {
     /// Never true now that browsing forward is gone — kept as one named place to change if it comes back.
     private var isFuture: Bool { false }
 
+    /// How finely to cut the month up. Same rules either way — this is a zoom, not a different reading.
+    private var resolutionToggle: some View {
+        HStack(spacing: 3) {
+            ForEach(PlannerMonth.Resolution.allCases, id: \.rawValue) { candidate in
+                let selected = monthResolution == candidate
+                Button {
+                    monthResolutionRaw = candidate.rawValue
+                    rebuild()
+                } label: {
+                    Text("by \(candidate.rawValue)")
+                        .font(.system(size: 9, weight: selected ? .bold : .regular, design: .rounded))
+                        .foregroundStyle(selected ? Color.white : Color.secondary)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Capsule().fill(selected ? Color.accentColor
+                                                   : Color.secondary.opacity(0.14)))
+                }
+                .buttonStyle(.plain)
+                .help(candidate == .week
+                      ? "One column per calendar week of the month."
+                      : "One column per day of the month, with the same rules — the month's own days only, "
+                        + "so nothing from a neighbouring month appears.")
+            }
+        }
+    }
+
     /// The same two methods, named for the unit they act on: a month reallocates between WEEKS, so calling
     /// the alternative "per day" there would describe a rule the month grid doesn't apply.
     private func methodLabel(_ candidate: Replan.Method) -> String {
         switch candidate {
         case .catchUp: return "catch up"
-        case .perDay: return unit == .week ? "per day" : "per week"
+        case .perDay: return "per \(unitNoun)"
         }
     }
 
+    /// What a column stands for right now: a day in week view, and in month view whichever resolution is on.
+    private var unitNoun: String {
+        unit == .week ? "day" : (monthResolution == .week ? "week" : "day")
+    }
+
     private func methodHelp(_ candidate: Replan.Method) -> String {
-        let noun = unit == .week ? "day" : "week"
+        let noun = unitNoun
         let window = unit == .week ? "week" : "month"
         if candidate == .catchUp {
             return "Unfinished hours move into the \(noun)s you have left, so the \(window) is shown as it "
@@ -1507,20 +1553,22 @@ struct PlannerView: View {
     }
 
     private var monthWeekSubtitle: String {
+        let noun = unitNoun
         if showIntended {
             return "the plan as designed, ignoring what actually happened"
         }
         if method == .perDay {
-            return "every week keeps its own share · what a week missed stays under it"
+            return "every \(noun) keeps its own share · what a \(noun) missed stays under it"
         }
         return offset > 0
             ? "where that month's shortfall would have had to go · nothing leaves the month"
-            : "a week that fell short pushes into the weeks this month has left · nothing leaves the month"
+            : "a \(noun) that fell short pushes into the \(noun)s this month has left · "
+              + "nothing leaves the month"
     }
 
     /// What the pool under a week means, in this combination of month and method.
     private var monthLeftoverCaption: String {
-        if method == .perDay { return "missed that week" }
+        if method == .perDay { return "missed that \(unitNoun)" }
         return offset > 0 ? "never happened" : "no room left in the month"
     }
 
@@ -1549,7 +1597,7 @@ struct PlannerView: View {
         let rollups = PlannerMonth.rollups(
             month: month, intervals: intervals, floors: floors, membership: membership,
             nested: nested, wakingSeconds: settings.wakingSeconds,
-            method: method,
+            resolution: monthResolution, method: method,
             fractionOfTodayLeft: Replan.fractionOfDayLeft(now: now,
                                                           wakingSeconds: settings.wakingSeconds,
                                                           calendar: cal),
@@ -1583,10 +1631,15 @@ struct PlannerView: View {
                 blobs += owedBlobs(rollup)
             }
             let pool = hindsight[rollup.span.index] ?? (showIntended ? [:] : rollup.leftover)
+            // A day column is labelled like the week view's — weekday name plus the date chip — and a week
+            // column by the range of the month's days it holds.
+            let dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+            let isDay = monthResolution == .day
+            let weekdayName = rollup.span.weekdays.first.map { dayNames[$0 - 1] } ?? ""
             columns.append(PlannerWeekGrid.DayInput(
                 weekday: rollup.span.index,
-                label: "\(rollup.span.firstDay)–\(rollup.span.lastDay)",
-                dayOfMonth: nil,
+                label: isDay ? weekdayName : "\(rollup.span.firstDay)–\(rollup.span.lastDay)",
+                dayOfMonth: isDay ? rollup.span.firstDay : nil,
                 isPast: rollup.span.inMonth.end <= startOfToday,
                 isToday: rollup.span.inMonth.start <= startOfToday
                          && startOfToday < rollup.span.inMonth.end,

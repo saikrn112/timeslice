@@ -113,6 +113,9 @@ public struct PlannerWeekGrid: View {
     /// What to call the pool beneath the week. A live week's is hours with nowhere left to put them; a
     /// finished week's is hours that never happened, and the same words don't fit both.
     public var leftoverCaption: String = "no room for these"
+    /// A floor on column width. When the columns won't fit at this width the grid scrolls sideways with the
+    /// axis pinned — thirty days of a month can't share seven columns' worth of space and stay labelled.
+    public var minColumnWidth: CGFloat? = nil
     public var onPick: (Int64) -> Void
     /// Double-click: "show me this, properly". Carries the blob's allocation (negative for unallocated)
     /// and the weekday, which is everything the Metrics page needs to answer for that day.
@@ -120,8 +123,10 @@ public struct PlannerWeekGrid: View {
 
     public init(days: [DayInput], capacityHours: Double, elapsedHoursToday: Double?,
                 highlight: Int64?, leftoverCaption: String = "no room for these",
+                minColumnWidth: CGFloat? = nil,
                 onPick: @escaping (Int64) -> Void = { _ in },
                 onOpen: @escaping (Int64, Int) -> Void = { _, _ in }) {
+        self.minColumnWidth = minColumnWidth
         self.days = days
         self.capacityHours = capacityHours
         self.elapsedHoursToday = elapsedHoursToday
@@ -167,11 +172,24 @@ public struct PlannerWeekGrid: View {
         HStack(alignment: .top, spacing: 0) {
             axis
             GeometryReader { geo in
-                let columnWidth = geo.size.width / CGFloat(max(1, days.count))
-                HStack(spacing: 0) {
-                    ForEach(days) { day in
-                        column(day, compact: columnWidth < 96)
-                            .frame(width: columnWidth)
+                let even = geo.size.width / CGFloat(max(1, days.count))
+                let width = max(even, minColumnWidth ?? 0)
+                // Only scrolls when it has to. Given the room, a month's days fit in one view and can be
+                // compared at a glance; when they can't, sideways scrolling beats thirty unlabelled slivers.
+                // The axis is outside the scroll area, so the hour scale stays put.
+                if width > even {
+                    ScrollView(.horizontal, showsIndicators: true) {
+                        HStack(spacing: 0) {
+                            ForEach(days) { day in
+                                column(day, compact: width < 96).frame(width: width)
+                            }
+                        }
+                    }
+                } else {
+                    HStack(spacing: 0) {
+                        ForEach(days) { day in
+                            column(day, compact: width < 96).frame(width: width)
+                        }
                     }
                 }
             }
