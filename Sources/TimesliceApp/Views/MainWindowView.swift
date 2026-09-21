@@ -147,6 +147,16 @@ struct MainWindowView: View {
         }
         .buttonStyle(.borderless)
         .help("Settings")
+        // A sync that has stopped working is otherwise invisible: every page keeps drawing numbers from
+        // whatever the database holds, and a database that stopped receiving another device's hours looks
+        // exactly like one where you simply didn't work those hours. This Mac spent eleven hours signed
+        // out, kept reporting the month as badly behind, and nothing on screen said why.
+        .overlay(alignment: .topTrailing) {
+            if let sync, let auth {
+                SyncBadge(sync: sync, auth: auth, settings: settings)
+                    .offset(x: 5, y: -4)
+            }
+        }
         .popover(isPresented: $showSettings, arrowEdge: .bottom) {
             SettingsPanel(settings: settings, store: appState.storeForEditing,
                           sync: sync, auth: auth)
