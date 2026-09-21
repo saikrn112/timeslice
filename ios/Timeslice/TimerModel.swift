@@ -107,6 +107,12 @@ final class TimerModel: ObservableObject {
         TaskOrdering.recencyOrdered(display: tasks, lastActivity: lastActivity, current: currentTaskID)
     }
 
+    /// Recency order for a scope: Today drops the quiet tasks, All Time keeps them.
+    func recencyOrdered(hidingQuiet: Bool) -> [Project] {
+        TaskOrdering.recencyOrdered(display: hidingQuiet ? activeToday : tasks,
+                                    lastActivity: lastActivity, current: currentTaskID)
+    }
+
     /// Fuzzy search results using the Mac's exact ranking, including `/project` filing tokens and
     /// matching on a task's project name at half weight.
     func searchResults(_ query: String, limit: Int = 50) -> [TaskMatch] {
@@ -148,12 +154,33 @@ final class TimerModel: ObservableObject {
         var colorHex: String { group?.colorHex ?? "#8E8E93" }
     }
 
-    var sections: [Section] {
+    /// Tasks nothing has been tracked against for `AppSettings.dormantAfterDays`.
+    ///
+    /// Held here rather than computed per row: the list would otherwise run the same query once per task.
+    @Published private(set) var dormantTaskIDs: Set<Int64> = []
+    /// Task id → days since it was last tracked, for the row's caption. -1 when it never was.
+    @Published private(set) var quietDaysByTask: [Int64: Int] = [:]
+
+    /// Today's tasks with the quiet ones removed — what the Today scope lists.
+    ///
+    /// The same rule as the Mac: a task untouched for weeks isn't what today is about, and hiding it is the
+    /// point of marking it at all. It stays in All Time, keeps its moon there, and comes back to Today the
+    /// moment you track it. Deliberately NOT applied to `recencyOrdered` or the switch wheel: starting a
+    /// quiet task is how it stops being quiet, so it has to stay reachable from the surface you'd revive it
+    /// from.
+    var activeToday: [Project] {
+        tasks.filter { !dormantTaskIDs.contains($0.id) }
+    }
+
+    /// - Parameter hidingQuiet: true for the Today scope. A group whose every task has gone quiet drops out
+    ///   of Today entirely, the same way a group with nothing left to do does.
+    func sections(hidingQuiet: Bool) -> [Section] {
+        let visible = hidingQuiet ? activeToday : tasks
         var out: [Section] = groups.compactMap { g in
-            let members = tasks.filter { $0.taskProjectID == g.id }
+            let members = visible.filter { $0.taskProjectID == g.id }
             return members.isEmpty ? nil : Section(group: g, tasks: members)
         }
-        let inbox = tasks.filter { $0.taskProjectID == nil }
+        let inbox = visible.filter { $0.taskProjectID == nil }
         if !inbox.isEmpty { out.append(Section(group: nil, tasks: inbox)) }
         return out
     }
@@ -208,6 +235,15 @@ final class TimerModel: ObservableObject {
             running = try store.openInterval()
             if let running { currentTaskID = running.projectID }
             lastActivity = try store.lastActivityByProject()
+            // Which tasks have gone quiet. Derived, never stored — see `Dormancy` — so it needs no
+            // migration, no background job and no sync rule, and it clears the moment you track one again.
+            // The threshold is a synced setting, so the phone and the Mac agree about what "quiet" means.
+            let created = (try? store.projectCreationDates()) ?? [:]
+            dormantTaskIDs = Dormancy.dormantTaskIDs(lastActivity: lastActivity, created: created,
+                                                     tasks: allTasks,
+                                                     afterDays: Self.quietAfterDays(settings), now: now)
+            quietDaysByTask = Dictionary(uniqueKeysWithValues:
+                allTasks.map { ($0.id, Dormancy.daysSince(lastActivity[$0.id], now: now) ?? -1) })
 
             // Closed intervals only — see `committedTodaySeconds`. Not windowed by day either:
             // `todayTotals` does the clipping, and an interval that began yesterday and ended today
@@ -235,6 +271,23 @@ final class TimerModel: ObservableObject {
         } catch {
             loadError = "\(error)"
         }
+    }
+
+    /// The quiet threshold, with a file override so a capture run can review the state on a database where
+    /// everything has been touched this month.
+    ///
+    /// A file for the same reason `start-tab` is one: on the simulator, launch arguments are swallowed,
+    /// `SIMCTL_CHILD_*` arrives nil, and a `defaults write` lands in the wrong domain. The Mac does this with
+    /// `TIMESLICE_DORMANT_DAYS`; env vars don't reach an app simctl launches.
+    ///
+    ///     printf 14 > "$C/Library/Application Support/Timeslice/dormant-days"
+    static func quietAfterDays(_ settings: AppSettings) -> Int {
+        let url = TimeslicePaths.defaultSupportDirectoryURL().appendingPathComponent("dormant-days")
+        if let text = try? String(contentsOf: url, encoding: .utf8),
+           let forced = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return forced
+        }
+        return settings.dormantAfterDays
     }
 
     private func reloadTags() {

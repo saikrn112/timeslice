@@ -16,7 +16,7 @@ struct TasksView: View {
     @State private var query = ""
     @State private var editing: Project?
     @State private var showArchived = false
-    @State private var scope: TimeScope = .today
+    @State private var scope: TimeScope = TasksView.launchScope
     /// Grouped by project by default, matching the Mac — `ProjectListView` has no toggle at all and
     /// simply groups whenever any project exists. The toggle stays because a phone benefits from a
     /// recency view the Mac gets from its switcher, but the default now agrees.
@@ -52,12 +52,13 @@ struct TasksView: View {
                         }
                         rows(matches)
                     } else if grouped && !model.groups.isEmpty {
-                        ForEach(model.sections) { section in
+                        // Today hides the quiet tasks; All Time is where they live, dimmed and marked.
+                        ForEach(model.sections(hidingQuiet: scope == .today)) { section in
                             groupHeader(section)
                             rows(section.tasks)
                         }
                     } else {
-                        rows(model.recencyOrdered)
+                        rows(model.recencyOrdered(hidingQuiet: scope == .today))
                     }
                     archived
                 }
@@ -283,6 +284,8 @@ struct TasksView: View {
                         seconds: seconds(for: task),
                         liveOrigin: liveOrigin(for: task),
                         isCurrent: model.currentTaskID == task.id,
+                        isQuiet: model.dormantTaskIDs.contains(task.id),
+                        quietDays: model.quietDaysByTask[task.id] ?? -1,
                         onToggle: { model.toggle(taskID: task.id) })
                     .frame(height: Self.taskRowHeight)
                     .padding(.horizontal, Theme.cardPadding)
@@ -379,6 +382,18 @@ struct TasksView: View {
         .scrollContentBackground(.hidden)
         .environment(\.defaultMinListRowHeight, Self.taskRowHeight)
         .frame(height: (Self.taskRowHeight + Self.taskRowGap) * CGFloat(tasks.count))
+    }
+
+    /// A capture run can open straight into All Time, where the quiet tasks live — the scope control is a
+    /// toolbar tap, and simctl cannot tap. Same file mechanism as `start-tab` and `dormant-days`.
+    ///
+    /// The raw values are the labels: `Today` and `All Time`.
+    ///
+    ///     printf 'All Time' >| "$C/Library/Application Support/Timeslice/start-scope"
+    private static var launchScope: TimeScope {
+        let url = TimeslicePaths.defaultSupportDirectoryURL().appendingPathComponent("start-scope")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return .today }
+        return TimeScope(rawValue: text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? .today
     }
 
     /// Today or All Time, matching the Mac's scope toggle.
@@ -538,6 +553,11 @@ struct TaskRow: View {
     /// Non-nil only for the running task: the backdated instant to tick today's total from.
     let liveOrigin: Date?
     let isCurrent: Bool
+    /// Nothing tracked against it for long enough to count as drifted. A third state: neither active nor
+    /// finished, so it is dimmed and marked rather than struck through.
+    var isQuiet: Bool = false
+    /// Days since it was last tracked, or -1 if it never was. Only used for the quiet caption.
+    var quietDays: Int = -1
     /// Start/pause this task. The row is tappable too, but a row that silently toggles a timer gives no
     /// hint it's a control — hence the explicit button as well.
     let onToggle: () -> Void
@@ -545,6 +565,10 @@ struct TaskRow: View {
     private var isRunning: Bool { liveOrigin != nil }
 
     var body: some View {
+        content.opacity(isQuiet && !task.finished ? 0.75 : 1)
+    }
+
+    private var content: some View {
         HStack(spacing: Theme.rowSpacing) {
             Circle()
                 .fill(Color(hex: colorHex).opacity(task.finished ? 0.5 : 1))
@@ -558,8 +582,19 @@ struct TaskRow: View {
             Text(task.name)
                 .font(isCurrent ? Theme.rowTitleStrong : Theme.rowTitle)
                 .strikethrough(task.finished)
-                .foregroundStyle(task.finished ? .secondary : .primary)
+                .foregroundStyle(task.finished || isQuiet ? .secondary : .primary)
                 .lineLimit(1)
+
+            // A moon, not a strikethrough: this task drifted rather than being closed, and the two
+            // deserve different marks. Same symbol the Mac uses.
+            if isQuiet, !task.finished {
+                Image(systemName: "moon.zzz.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityLabel(quietDays >= 0
+                                        ? "Quiet for \(quietDays) days"
+                                        : "Never tracked")
+            }
 
             Spacer(minLength: 6)
 
