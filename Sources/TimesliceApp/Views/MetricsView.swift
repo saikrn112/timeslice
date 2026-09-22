@@ -1847,7 +1847,13 @@ struct MetricsView: View {
             // An allocation that doesn't apply to the range on screen isn't shown at all — the same rule the
             // Planner follows. Otherwise a one-off dated Wednesday sits in Monday's list asking for 6h, and a
             // bounded allocation keeps appearing months after it ended.
-            guard target.applies(to: DateInterval(start: range.start, end: range.end)) else { return nil }
+            // Follow the D/W/M filter: an allocation is listed when the range on screen contains days it
+            // claims — or when you actually worked on it there. `gym` is Tue/Fri, so on a Monday it neither
+            // wants nor got anything and saying "0 of 0" was noise; do gym on a Monday anyway and it appears,
+            // because then there is something to report.
+            let viewed = DateInterval(start: range.start, end: range.end)
+            guard target.applies(to: viewed) else { return nil }
+            let claimsADay = target.claimedDays(in: viewed) > 0
             guard let name = targetName(target.subject, tasks: tasks) else { return nil }
             let unit: RangeUnit = {
                 switch target.period {
@@ -1881,6 +1887,7 @@ struct MetricsView: View {
             let inRange = Aggregations.secondsForSubject(
                 target.subject, intervals: rangeIntervals, tasks: tasks,
                 tagIDsByTask: tagIDsByTask, range: range, now: now)
+            guard claimsADay || inRange > 60 else { return nil }
             return TargetMath.progress(target: target, name: name, actualSeconds: secs,
                                        rangeStart: window.start, rangeEnd: window.end, now: now,
                                        todaySeconds: today, rangeSeconds: inRange,
