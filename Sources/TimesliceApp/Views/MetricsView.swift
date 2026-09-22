@@ -1844,6 +1844,10 @@ struct MetricsView: View {
         let tasks = (try? appState.storeForEditing.listProjects(includeArchived: true)) ?? []
         let now = Date()
         return targets.compactMap { target in
+            // An allocation that doesn't apply to the range on screen isn't shown at all — the same rule the
+            // Planner follows. Otherwise a one-off dated Wednesday sits in Monday's list asking for 6h, and a
+            // bounded allocation keeps appearing months after it ended.
+            guard target.applies(to: DateInterval(start: range.start, end: range.end)) else { return nil }
             guard let name = targetName(target.subject, tasks: tasks) else { return nil }
             let unit: RangeUnit = {
                 switch target.period {
