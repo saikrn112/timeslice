@@ -29,7 +29,13 @@ do {
     let store = try IntervalStore(databaseURL: URL(fileURLWithPath: dbPath))
     try store.migrateIfNeeded()
 
-    let targets = try store.listTargets()
+    // Projected onto the week being examined, exactly as PlannerView does — otherwise a one-off shows up
+    // spread across every day and the tool contradicts the app it exists to check.
+    let stored = try store.listTargets()
+    let projectionWindow = Calendar.current.dateInterval(of: .weekOfYear, for: Date())
+    let targets = projectionWindow.map { window in
+        stored.compactMap { $0.projected(onto: window) }
+    } ?? stored
     let reservations = try store.listReservations()
     let tasks = try store.listProjects(includeArchived: true)
     let groups = try store.listTaskProjects()

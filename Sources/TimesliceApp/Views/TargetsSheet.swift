@@ -432,7 +432,10 @@ struct TargetsSheet: View {
 
                 // Which days it's meant to happen on. Only offered for a week or a month — a daily
                 // allocation is already about one day, and picking days for it would be nonsense.
-                if existing.period != .day {
+                // Hidden when they can't do anything: chosen dates override the mask outright, and a one-off
+                // on a single day has its weekday decided by that date. Seven lit bubbles on a one-off
+                // implied it happened every day.
+                if existing.period != .day, Self.weekdaysApply(to: existing) {
                     weekdayBubbles(for: existing)
                 }
 
@@ -514,6 +517,14 @@ struct TargetsSheet: View {
 
     /// What's non-default about this allocation, in as few words as possible. Nil when nothing is.
     private static func customSummary(_ target: Target) -> String? {
+        // Chosen days say themselves — "once" plus a bare count told you nothing about which days.
+        if !target.dates.isEmpty {
+            if target.dates.count == 1 { return "once · \(dayText(target.dates[0]))" }
+            if target.dates.count <= 3 {
+                return "once · " + target.dates.map { dayText($0) }.joined(separator: ", ")
+            }
+            return "once · \(target.dates.count) days from \(dayText(target.dates[0]))"
+        }
         var parts: [String] = []
         if target.period == .once { parts.append("once") }
         if target.interval > 1 { parts.append("every \(target.interval)") }
@@ -527,97 +538,250 @@ struct TargetsSheet: View {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
-    /// The full options, in plain rows: does it repeat, when does it start, when does it stop.
+    /// The full panel: does this repeat, or does it happen on days you pick.
+    ///
+    /// Modelled on a calendar app's custom-recurrence sheet, with the difference that matters — **a planner
+    /// needs specific days**, not only a rule. "These four afternoons" is a real intention and no recurrence
+    /// expresses it, so chosen dates are a first-class mode rather than a special case of a range.
     @ViewBuilder
     private func customPanel(_ target: Target, subject: TargetSubject) -> some View {
         let today = Calendar.current.startOfDay(for: Date())
-        let start = target.startsOn ?? today
-        let end = target.endsOn ?? start
+        let chosen = !target.dates.isEmpty
 
-        VStack(alignment: .leading, spacing: 14) {
-            Text("When this applies").font(.system(size: 13, weight: .semibold))
+        VStack(alignment: .leading, spacing: 0) {
+            Text("When this happens").font(.system(size: 15, weight: .semibold))
+                .padding(.bottom, 14)
 
-            row("Repeats") {
-                Picker("", selection: Binding(
-                    get: { target.period == .once },
-                    set: { once in
-                        // A one-off needs dates or it asks for nothing, so choosing it seeds today.
-                        save(subject: subject, seconds: target.seconds, direction: target.direction,
-                             period: once ? .once : .week, weekdays: target.weekdays,
-                             startsOn: once ? (target.startsOn ?? today) : target.startsOn,
-                             endsOn: once ? (target.endsOn ?? today) : target.endsOn,
-                             interval: once ? 1 : target.interval)
-                    })) {
-                    Text("Every").tag(false)
-                    Text("Just once").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 150)
+            Picker("", selection: Binding(
+                get: { chosen },
+                set: { wantsDates in
+                    if wantsDates {
+                        // Carry the window over rather than resetting: switching a one-off dated to Wednesday
+                        // into "chosen days" silently moved it to today, because this seeded `[today]` and
+                        // dropped the dates it already had.
+                        writeFull(target, subject: subject, period: .once,
+                                  startsOn: nil, endsOn: nil, interval: 1,
+                                  dates: Self.daysFromWindow(target) ?? [today])
+                    } else {
+                        writeFull(target, subject: subject, period: .week,
+                                  startsOn: target.startsOn, endsOn: target.endsOn,
+                                  interval: target.interval, dates: [])
+                    }
+                })) {
+                Text("Repeats").tag(false)
+                Text("On chosen days").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.bottom, 16)
+
+            if chosen {
+                chosenDatesSection(target, subject: subject)
+            } else {
+                repeatsSection(target, subject: subject, today: today)
+            }
+
+            Divider().padding(.vertical, 14)
+            HStack {
+                Text(Self.customSummary(target) ?? "Applies to every period, forever")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                Spacer()
+                Button("Done") { customFor = nil }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+    }
+
+    /// Pick the days out of a calendar. `MultiDatePicker` is the system control for exactly this, so the
+    /// selection behaves the way it does everywhere else on the Mac.
+    @ViewBuilder
+    private func chosenDatesSection(_ target: Target, subject: TargetSubject) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // `MultiDatePicker` is iOS-only, so this is a month grid of toggles. Deliberately plain: the
+            // job is picking a handful of days, not navigating years.
+            MonthMultiPicker(selected: Set(target.dates), anchor: target.dates.first ?? Date()) { day in
+                var next = Set(target.dates)
+                if next.contains(day) { next.remove(day) } else { next.insert(day) }
+                // Never leave it empty: an allocation with no days asks for nothing, and an empty calendar
+                // looks identical to one you haven't finished filling in.
+                guard !next.isEmpty else { return }
+                writeFull(target, subject: subject, period: .once,
+                          startsOn: nil, endsOn: nil, interval: 1, dates: Array(next))
+            }
+
+            Text(target.dates.count == 1
+                 ? "\(hoursLabel(target.seconds)) on that day."
+                 : "\(hoursLabel(target.seconds)) split across \(target.dates.count) days — "
+                   + "\(hoursLabel(target.seconds / Double(max(1, target.dates.count)))) each.")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+            Text("Click a day to add or remove it. The weekday buttons on the row don't apply here.")
+                .font(.system(size: 10)).foregroundStyle(.tertiary)
+        }
+    }
+
+    /// Repeat every N, on which days, ending never / on a date / after N times.
+    @ViewBuilder
+    private func repeatsSection(_ target: Target, subject: TargetSubject, today: Date) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Text("Repeat every").font(.system(size: 12))
+                TextField("", value: Binding(
+                    get: { target.interval },
+                    set: { count in
+                        let anchor = count > 1 ? (target.startsOn ?? today) : target.startsOn
+                        writeFull(target, subject: subject, period: target.period,
+                                  startsOn: anchor, endsOn: target.endsOn,
+                                  interval: max(1, min(52, count)), dates: [])
+                    }), format: .number)
+                .frame(width: 44)
+                .multilineTextAlignment(.center)
+                Stepper("", value: Binding(
+                    get: { target.interval },
+                    set: { count in
+                        let anchor = count > 1 ? (target.startsOn ?? today) : target.startsOn
+                        writeFull(target, subject: subject, period: target.period,
+                                  startsOn: anchor, endsOn: target.endsOn, interval: count, dates: [])
+                    }), in: 1...52)
                 .labelsHidden()
+                Picker("", selection: Binding(
+                    get: { target.period == .once ? .week : target.period },
+                    set: { period in
+                        writeFull(target, subject: subject, period: period,
+                                  startsOn: target.startsOn, endsOn: target.endsOn,
+                                  interval: target.interval, dates: [])
+                    })) {
+                    Text("day").tag(Target.Period.day)
+                    Text("week").tag(Target.Period.week)
+                    Text("month").tag(Target.Period.month)
+                }
+                .labelsHidden()
+                .frame(width: 92)
+            }
 
-                if target.period != .once {
+            if target.period != .day {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Repeat on").font(.system(size: 12))
+                    weekdayBubbles(for: target)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Starts").font(.system(size: 12))
+                endsRadio("Whenever it was set up", on: target.startsOn == nil) {
+                    writeFull(target, subject: subject, period: target.period, startsOn: nil,
+                              endsOn: target.endsOn, interval: target.interval, dates: [])
+                }
+                HStack(spacing: 8) {
+                    endsRadio("On", on: target.startsOn != nil) {
+                        writeFull(target, subject: subject, period: target.period, startsOn: today,
+                                  endsOn: target.endsOn, interval: target.interval, dates: [])
+                    }
+                    dayButton(target.startsOn ?? today, target: target, subject: subject, isStart: true)
+                        .disabled(target.startsOn == nil)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Ends").font(.system(size: 12))
+                endsRadio("Never", on: target.endsOn == nil) {
+                    writeFull(target, subject: subject, period: target.period,
+                              startsOn: target.startsOn, endsOn: nil,
+                              interval: target.interval, dates: [])
+                }
+                HStack(spacing: 8) {
+                    endsRadio("On", on: target.endsOn != nil) {
+                        let month = Calendar.current.date(byAdding: .month, value: 1,
+                                                          to: target.startsOn ?? today)
+                        writeFull(target, subject: subject, period: target.period,
+                                  startsOn: target.startsOn, endsOn: month,
+                                  interval: target.interval, dates: [])
+                    }
+                    dayButton(target.endsOn ?? today, target: target, subject: subject, isStart: false)
+                        .disabled(target.endsOn == nil)
+                }
+                // "After N" is a way of typing an end date, not a third kind of bound — it converts straight
+                // to one, so nothing downstream has to know about counts.
+                HStack(spacing: 8) {
+                    Text("After").font(.system(size: 11)).padding(.leading, 20)
                     Stepper(value: Binding(
-                        get: { target.interval },
+                        get: { periodsUntil(target) },
                         set: { count in
-                            // Above 1 the cycle needs an anchor to count from, so it takes today if the
-                            // allocation has no start date yet.
-                            let anchor = count > 1 ? (target.startsOn ?? today) : target.startsOn
-                            save(subject: subject, seconds: target.seconds,
-                                 direction: target.direction, period: target.period,
-                                 weekdays: target.weekdays, startsOn: anchor,
-                                 endsOn: target.endsOn, interval: count)
-                        }), in: 1...12) {
-                        Text("\(target.interval) \(target.period.rawValue)\(target.interval == 1 ? "" : "s")")
+                            writeFull(target, subject: subject, period: target.period,
+                                      startsOn: target.startsOn,
+                                      endsOn: endAfter(count, from: target.startsOn ?? today,
+                                                       period: target.period),
+                                      interval: target.interval, dates: [])
+                        }), in: 1...52) {
+                        Text("\(periodsUntil(target)) \(target.period.rawValue)\(periodsUntil(target) == 1 ? "" : "s")")
                             .font(.system(size: 11)).monospacedDigit()
                     }
-                    .fixedSize()
+                    .disabled(target.endsOn == nil)
                 }
             }
-
-            if target.period == .once {
-                row("On") {
-                    dayButton(start, target: target, subject: subject, isStart: true)
-                    Text("to").font(.system(size: 10)).foregroundStyle(.secondary)
-                    dayButton(end, target: target, subject: subject, isStart: false)
-                }
-                Text("Its hours are the whole job, spread over the days above.")
-                    .font(.system(size: 10)).foregroundStyle(.tertiary)
-            } else {
-                row("Starts") {
-                    Toggle("", isOn: Binding(
-                        get: { target.startsOn != nil },
-                        set: { on in
-                            write(target, subject: subject, startsOn: on ? today : nil,
-                                  endsOn: target.endsOn)
-                        })).labelsHidden().toggleStyle(.switch).controlSize(.mini)
-                    if target.startsOn != nil {
-                        dayButton(start, target: target, subject: subject, isStart: true)
-                    } else {
-                        Text("any time before now counts too")
-                            .font(.system(size: 10)).foregroundStyle(.tertiary)
-                    }
-                }
-                row("Ends") {
-                    Toggle("", isOn: Binding(
-                        get: { target.endsOn != nil },
-                        set: { on in
-                            let month = Calendar.current.date(byAdding: .month, value: 1, to: start)
-                            write(target, subject: subject, startsOn: target.startsOn,
-                                  endsOn: on ? month : nil)
-                        })).labelsHidden().toggleStyle(.switch).controlSize(.mini)
-                    if target.endsOn != nil {
-                        dayButton(end, target: target, subject: subject, isStart: false)
-                    } else {
-                        Text("runs until you archive it")
-                            .font(.system(size: 10)).foregroundStyle(.tertiary)
-                    }
-                }
-            }
-
-            HStack { Spacer(); Button("Done") { customFor = nil }.keyboardShortcut(.defaultAction) }
         }
-        .padding(16)
-        .frame(width: 330)
+    }
+
+    private func endsRadio(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: on ? "largecircle.fill.circle" : "circle")
+                    .font(.system(size: 12))
+                    .foregroundStyle(on ? Color.accentColor : Color.secondary)
+                Text(title).font(.system(size: 11)).foregroundStyle(.primary)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The days an existing window covers, so switching to "chosen days" keeps what was already set.
+    ///
+    /// Honours the weekday mask inside a range — a Mon–Fri job spanning a weekend converts to its weekdays,
+    /// not to every date in the span. Nil when there is no window to convert.
+    private static func daysFromWindow(_ target: Target) -> [Date]? {
+        guard let window = target.dayWindow(calendar: .current) else { return nil }
+        let cal = Calendar.current
+        let claimed = target.weekdays.effective
+        var out: [Date] = []
+        var cursor = cal.startOfDay(for: window.start)
+        while cursor < window.end {
+            if claimed.contains(weekday: cal.component(.weekday, from: cursor)) { out.append(cursor) }
+            guard let next = cal.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+        return out.isEmpty ? nil : out
+    }
+
+    private static func components(_ date: Date) -> DateComponents {
+        Calendar.current.dateComponents([.year, .month, .day], from: date)
+    }
+
+    /// How many of its own periods the window spans, for the "After N" stepper.
+    private func periodsUntil(_ target: Target) -> Int {
+        guard let end = target.endsOn else { return 1 }
+        let start = target.startsOn ?? Calendar.current.startOfDay(for: Date())
+        let unit: Calendar.Component = target.period == .month ? .month
+            : (target.period == .day ? .day : .weekOfYear)
+        let n = Calendar.current.dateComponents([unit], from: start, to: end).value(for: unit) ?? 0
+        return max(1, n + 1)
+    }
+
+    private func endAfter(_ count: Int, from start: Date, period: Target.Period) -> Date {
+        let cal = Calendar.current
+        let unit: Calendar.Component = period == .month ? .month : (period == .day ? .day : .weekOfYear)
+        // Inclusive: "after 6 weeks" ends on the last day of the sixth, not the first of the seventh.
+        let raw = cal.date(byAdding: unit, value: count, to: start) ?? start
+        return cal.date(byAdding: .day, value: -1, to: raw) ?? raw
+    }
+
+    private func writeFull(_ target: Target, subject: TargetSubject, period: Target.Period,
+                           startsOn: Date?, endsOn: Date?, interval: Int, dates: [Date]) {
+        try? store.setTarget(subject: subject, seconds: target.seconds,
+                             direction: target.direction, period: period,
+                             weekdays: target.weekdays, shape: target.shape,
+                             startsOn: startsOn, endsOn: endsOn, interval: interval, dates: dates)
+        reload()
     }
 
     private func row<Content: View>(_ title: String,
@@ -662,6 +826,19 @@ struct TargetsSheet: View {
             }
             .padding(12)
         }
+    }
+
+    /// Whether the weekday bubbles mean anything for this allocation.
+    ///
+    /// They don't once specific days are chosen, and they don't for a one-off confined to a single day — in
+    /// both cases the dates decide, and Core ignores the mask.
+    static func weekdaysApply(to target: Target) -> Bool {
+        if !target.dates.isEmpty { return false }
+        if target.period == .once, let start = target.startsOn, let end = target.endsOn,
+           Calendar.current.isDate(start, inSameDayAs: end) {
+            return false
+        }
+        return true
     }
 
     private static func dayText(_ date: Date) -> String {
@@ -764,5 +941,94 @@ struct ScrollCorners: Shape {
             path.addLine(to: CGPoint(x: x, y: y + arm * dy))
         }
         return path
+    }
+}
+
+/// A month of day buttons you can toggle on and off — macOS has no multi-select date picker.
+///
+/// Scoped to one month with arrows either side, because the thing being picked is "a few days around now",
+/// not an arbitrary date years away. Selected days are filled; today is ringed.
+private struct MonthMultiPicker: View {
+    let selected: Set<Date>
+    let anchor: Date
+    let onToggle: (Date) -> Void
+
+    @State private var month: Date = Date()
+    private let cal = Calendar.current
+
+    private static let titleFormatter: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MMMM yyyy"; return f
+    }()
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Button { step(-1) } label: { Image(systemName: "chevron.left") }
+                    .buttonStyle(.borderless)
+                Spacer()
+                Text(Self.titleFormatter.string(from: month))
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Button { step(1) } label: { Image(systemName: "chevron.right") }
+                    .buttonStyle(.borderless)
+            }
+            HStack(spacing: 2) {
+                ForEach(Array(Weekdays.initials.enumerated()), id: \.offset) { _, initial in
+                    Text(initial).font(.system(size: 9)).foregroundStyle(.tertiary)
+                        .frame(width: 32)
+                }
+            }
+            ForEach(weeks, id: \.first) { week in
+                HStack(spacing: 2) {
+                    ForEach(Array(week.enumerated()), id: \.offset) { _, day in
+                        if let day {
+                            dayCell(day)
+                        } else {
+                            Color.clear.frame(width: 32, height: 26)
+                        }
+                    }
+                }
+            }
+        }
+        .onAppear { month = cal.startOfDay(for: anchor) }
+    }
+
+    private func dayCell(_ day: Date) -> some View {
+        let isOn = selected.contains(day)
+        let isToday = cal.isDateInToday(day)
+        return Button { onToggle(day) } label: {
+            Text("\(cal.component(.day, from: day))")
+                .font(.system(size: 11, weight: isOn ? .semibold : .regular))
+                .frame(width: 32, height: 26)
+                .background(RoundedRectangle(cornerRadius: 5)
+                    .fill(isOn ? Color.accentColor.opacity(0.85) : Color.secondary.opacity(0.10)))
+                .overlay {
+                    if isToday {
+                        RoundedRectangle(cornerRadius: 5)
+                            .strokeBorder(Color.accentColor.opacity(0.7), lineWidth: 1)
+                    }
+                }
+                .foregroundStyle(isOn ? Color.white : Color.primary)
+                .contentShape(RoundedRectangle(cornerRadius: 5))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Rows of seven, padded with nils so the 1st lands under its weekday.
+    private var weeks: [[Date?]] {
+        guard let range = cal.range(of: .day, in: .month, for: month),
+              let first = cal.date(from: cal.dateComponents([.year, .month], from: month))
+        else { return [] }
+        let lead = (cal.component(.weekday, from: first) - cal.firstWeekday + 7) % 7
+        var cells: [Date?] = Array(repeating: nil, count: lead)
+        for offset in 0..<range.count {
+            cells.append(cal.date(byAdding: .day, value: offset, to: first))
+        }
+        while cells.count % 7 != 0 { cells.append(nil) }
+        return stride(from: 0, to: cells.count, by: 7).map { Array(cells[$0..<$0 + 7]) }
+    }
+
+    private func step(_ months: Int) {
+        if let next = cal.date(byAdding: .month, value: months, to: month) { month = next }
     }
 }

@@ -1122,9 +1122,17 @@ struct PlannerView: View {
         if budget.stillToDo > budget.freeLeft + 60 {
             return "Over by \(hours(budget.stillToDo - budget.freeLeft))"
         }
-        // A day over capacity outranks the weekly total: saying "the week fits" above a grid with a
-        // 2.2h red cap on Friday is the page arguing with itself.
-        if !plan.overloadedDays.isEmpty {
+        // A day whose NOMINAL shares exceed its hours is only a verdict when nothing can move.
+        //
+        // This rule was written when the grid could draw a day over capacity, and the comment said so: "the
+        // week fits" above a red cap on Friday was the page arguing with itself. Catch-up removed the cap —
+        // it rations every day to the room it has and pushes the rest to later days or the pool — so the
+        // condition now describes something the algorithm has already solved. Reporting it made a week that
+        // fits, and visibly fits in every column, announce itself as broken: "Wed is 4.4h over" above "to do
+        // 59.6h · free 61.6h".
+        //
+        // Per day is different: nothing moves there, so a day over its share genuinely stays over.
+        if method == .perDay, !plan.overloadedDays.isEmpty {
             let worst = plan.overloadedDays
                 .compactMap { day in plan.days.first { $0.weekday == day } }
                 .max { -$0.slackSeconds < -$1.slackSeconds }
@@ -1133,6 +1141,16 @@ struct PlannerView: View {
                      + (plan.overloadedDays.count > 1
                         ? ", and \(plan.overloadedDays.count - 1) other day(s)" : "")
             }
+        }
+        // Under catch up the verdict is about the hours that REMAIN, which is what the figures beside it show
+        // and what the grid draws. `plan.verdict` judges the design against a whole week's capacity, so it
+        // said "oversubscribed" — and, once the per-day branch above stopped firing, printed "Over by 0h" —
+        // about a week whose own numbers read "to do 59.6h · free 61.6h".
+        if method == .catchUp {
+            if budget.stillToDo <= 60 { return "Nothing left to do" }
+            let spare = budget.freeLeft - budget.stillToDo
+            if spare <= 0 { return "Fits, only just" }
+            return spare > 3600 ? "Fits, \(hours(spare)) unclaimed" : "Fits, only just"
         }
         switch plan.verdict {
         case .fits:
@@ -1143,7 +1161,9 @@ struct PlannerView: View {
             return "\(dayList(plan.overloadedDays)) over capacity"
         case .oversubscribed:
             let free = max(0, plan.capacitySeconds - plan.reservedSeconds)
-            return "Over by \(hours(plan.requiredLowerSeconds - free))"
+            let over = plan.requiredLowerSeconds - free
+            // "Over by 0h" is not a verdict. Below a meaningful margin it is simply tight.
+            return over > 1800 ? "Over by \(hours(over))" : "Fits, only just"
         case .uncertain: return "Fits only if allocations share work"
         }
     }
@@ -1834,7 +1854,9 @@ struct PlannerView: View {
             return plan.requiredUpperSeconds <= free ? .green : .orange
         }
         let budget = periodBudget()
-        if let plan, !plan.overloadedDays.isEmpty, unit == .week, offset == 0 {
+        // Red only when a day's overload is real — see `verdictLine`. Under catch up the excess moves, so
+        // colouring the dot red contradicted a grid where every column fitted.
+        if let plan, method == .perDay, !plan.overloadedDays.isEmpty, unit == .week, offset == 0 {
             return Self.overColor
         }
         if budget.stillToDo <= 60 { return .green }

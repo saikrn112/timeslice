@@ -214,8 +214,9 @@ public struct Target: Identifiable, Hashable, Sendable {
         /// A month is 30 days here: targets are intentions, not accounting, and a calendar-exact
         /// month would make the same target read differently in February than in March.
         ///
-        /// `once` has no nominal length — its length is its window — so it answers 0 and callers that
-        /// divide by it must exclude it first.
+        /// `once` has no nominal length — its length is its window — so it answers 0. **Divide by
+        /// `Target.normalisingDays` instead of this**, which substitutes the window: dividing by the raw 0
+        /// here went through a `max(_, 0.0001)` guard and multiplied a 4h one-off into 40000h.
         public var nominalDays: Double {
             switch self {
             case .day: return 1
@@ -264,17 +265,42 @@ public struct Target: Identifiable, Hashable, Sendable {
     /// calendar periods from the anchor's own period, not in days, so a fortnightly allocation lands on the
     /// same weekday pattern regardless of where the anchor sits inside its week.
     public let interval: Int
+    /// Specific days this allocation may be worked on, instead of a recurrence.
+    ///
+    /// This is a planner, not a calendar: the useful thing is often "these four days", not "every Tuesday".
+    /// When it's non-empty it REPLACES the weekday mask, the window and the interval — the claimed days are
+    /// exactly these — and `seconds` is the whole job spread across them, the same meaning `once` has. Stored
+    /// sorted at local start-of-day.
+    public let dates: [Date]
 
     public var isLive: Bool { completedAt == nil }
+
+    /// The span this allocation's `seconds` is stated over, in days — what to normalise by when scaling it
+    /// onto a range.
+    ///
+    /// A day, a week or a nominal month for the recurring kinds. For a one-off it is its own window, because
+    /// its hours are the whole job rather than a rate: a 4h job across four days is 1h a day, and a 4h job on
+    /// one day is 4h that day. Never zero, so no caller needs a divide-by-zero guard — the previous one
+    /// turned a 4h one-off into 40000h.
+    public var normalisingDays: Double {
+        guard period == .once else { return period.nominalDays }
+        if !dates.isEmpty { return Double(dates.count) }
+        guard let start = startsOn, let end = endsOn else { return 1 }
+        let days = (Calendar.current.startOfDay(for: end)
+                    .timeIntervalSince(Calendar.current.startOfDay(for: start)) / 86_400) + 1
+        return max(1, days.rounded())
+    }
 
     public init(id: Int64, subject: TargetSubject, seconds: TimeInterval,
                 direction: Direction, period: Period,
                 createdAt: Date = Date(), completedAt: Date? = nil, sortOrder: Int = 0,
                 weekdays: Weekdays = .all, shape: TargetShape = .flexible,
-                startsOn: Date? = nil, endsOn: Date? = nil, interval: Int = 1) {
+                startsOn: Date? = nil, endsOn: Date? = nil, interval: Int = 1,
+                dates: [Date] = []) {
         self.startsOn = startsOn
         self.endsOn = endsOn
         self.interval = max(1, interval)
+        self.dates = dates.sorted()
         self.id = id
         self.subject = subject
         self.seconds = seconds
@@ -456,7 +482,7 @@ public enum TargetMath {
     /// stops changing, and the honest alternative is versioning every edit.
     public static func allocated(_ target: Target, from start: Date, to end: Date) -> TimeInterval {
         let days = max(0, end.timeIntervalSince(start)) / 86_400
-        return target.seconds * days / max(target.period.nominalDays, 0.0001)
+        return target.seconds * days / target.normalisingDays
     }
 
     /// Where to measure a budget's period from, given the range being viewed.
@@ -496,8 +522,12 @@ public enum TargetMath {
         calendar: Calendar = .current
     ) -> TargetProgress {
         let rangeDays = max(0, rangeEnd.timeIntervalSince(rangeStart)) / 86_400
-        let scale = target.period.nominalDays > 0 ? rangeDays / target.period.nominalDays : 0
-        let expected = target.seconds * scale
+        // A rate scales with the range; a one-off does NOT. Its hours are the whole job, so a 4h job seen
+        // over a month is still 4h — scaling it gave 120h and reported 3h30m of it as 3% done.
+        let expected: TimeInterval = target.period == .once
+            ? target.ask(in: DateInterval(start: rangeStart, end: rangeEnd), calendar: calendar)
+            : target.seconds * (rangeDays / target.normalisingDays)
+        let scale = target.seconds > 0 ? expected / target.seconds : 0
 
         // Clamped so a range entirely in the past counts as fully elapsed and one entirely in the
         // future counts as not started, instead of extrapolating past either end.
@@ -540,8 +570,7 @@ public enum TargetMath {
             let perWorkingDay = periodWorkingDays > 0 ? target.seconds / periodWorkingDays : 0
             viewedExpected = perWorkingDay * viewedWorkingDays
         } else {
-            viewedExpected = target.seconds * viewedRangeDays
-                / max(target.period.nominalDays, 0.0001)
+            viewedExpected = target.seconds * viewedRangeDays / target.normalisingDays
         }
 
         return TargetProgress(target: target, name: name, actualSeconds: actualSeconds,

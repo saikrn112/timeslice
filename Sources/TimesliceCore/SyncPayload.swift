@@ -149,6 +149,9 @@ public struct SyncPayload: Codable, Equatable, Sendable {
         public var endsOn: TimeInterval?
         /// Every how many periods. Absent means "no opinion", and 1 is the value every build had implicitly.
         public var interval: Int?
+        /// Chosen days as comma-separated epoch seconds. Absent means "no opinion", as with every field added
+        /// after v1.
+        public var chosenDates: String?
 
         public init(uid: String, subjectKind: String, subjectUID: String, seconds: TimeInterval,
                     direction: String, period: String, updatedAt: TimeInterval,
@@ -156,14 +159,14 @@ public struct SyncPayload: Codable, Equatable, Sendable {
                     weekdays: Int? = nil, shapeKind: Int? = nil, shapeMin: TimeInterval? = nil,
                     shapeCount: Int? = nil,
                     startsOn: TimeInterval? = nil, endsOn: TimeInterval? = nil,
-                    interval: Int? = nil) {
+                    interval: Int? = nil, chosenDates: String? = nil) {
             self.uid = uid; self.subjectKind = subjectKind; self.subjectUID = subjectUID
             self.seconds = seconds; self.direction = direction; self.period = period
             self.updatedAt = updatedAt
             self.createdAt = createdAt; self.completedAt = completedAt
             self.weekdays = weekdays
             self.shapeKind = shapeKind; self.shapeMin = shapeMin; self.shapeCount = shapeCount
-            self.startsOn = startsOn; self.endsOn = endsOn; self.interval = interval
+            self.startsOn = startsOn; self.endsOn = endsOn; self.interval = interval; self.chosenDates = chosenDates
         }
     }
 

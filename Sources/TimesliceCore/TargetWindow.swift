@@ -35,6 +35,9 @@ public extension Target {
     /// the grid — which is the whole point of a window: a past month stops having this month's intentions
     /// applied to it retroactively.
     func applies(to range: DateInterval, calendar: Calendar = .current) -> Bool {
+        if !dates.isEmpty {
+            return dates.contains { $0 >= range.start && $0 < range.end }
+        }
         guard let window = dayWindow(calendar: calendar) else { return true }
         return window.intersects(range) && window.end > range.start && range.end > window.start
     }
@@ -65,6 +68,11 @@ public extension Target {
     /// The denominator of every goal. Counted by walking days rather than arithmetic on lengths, because a
     /// weekday mask can't be divided and DST makes a "day" 23 or 25 hours twice a year.
     func claimedDays(in range: DateInterval, calendar: Calendar = .current) -> Int {
+        // A chosen set of days is the whole answer: no mask, no window, no cycle. Anything else would mean
+        // picking a Saturday and then being told the allocation doesn't work Saturdays.
+        if !dates.isEmpty {
+            return dates.filter { $0 >= range.start && $0 < range.end }.count
+        }
         let window = dayWindow(calendar: calendar)
         let claimed = weekdays.effective
         var days = 0
@@ -87,6 +95,8 @@ public extension Target {
     /// over the claimed days of its whole window, so a 20h job across eleven days of which seven are weekdays
     /// asks 2.9h of each weekday.
     func perClaimedDaySeconds(calendar: Calendar = .current) -> TimeInterval {
+        // Chosen days share the whole job between them, which is what `once` means with a window.
+        if !dates.isEmpty { return seconds / Double(dates.count) }
         let perWeek = Double(max(1, weekdays.effective.selectedCount))
         switch period {
         case .day:
@@ -118,8 +128,20 @@ public extension Target {
     func projected(onto window: DateInterval, calendar: Calendar = .current) -> Target? {
         guard applies(to: window, calendar: calendar) else { return nil }
         let asked = direction == .atLeast ? ask(in: window, calendar: calendar) : seconds
-        // Eligible days: inside the window, claimed by the mask, and in a running cycle.
+        // Eligible days: inside the window, claimed by the mask, and in a running cycle. With chosen dates
+        // it's simply the weekdays those dates fall on, inside this window.
         var mask = Weekdays(rawValue: 0)
+        if !dates.isEmpty {
+            for date in dates where date >= window.start && date < window.end {
+                let weekday = calendar.component(.weekday, from: date)
+                if !mask.contains(weekday: weekday) { mask = mask.toggling(weekday: weekday) }
+            }
+            guard mask.rawValue != 0, asked > 0 || direction == .atMost else { return nil }
+            return Target(id: id, subject: subject, seconds: asked, direction: direction,
+                          period: .week, createdAt: createdAt, completedAt: completedAt,
+                          sortOrder: sortOrder, weekdays: mask, shape: shape,
+                          startsOn: startsOn, endsOn: endsOn, interval: 1)
+        }
         var cursor = calendar.startOfDay(for: window.start)
         let claimed = weekdays.effective
         let dayWin = dayWindow(calendar: calendar)
@@ -139,7 +161,7 @@ public extension Target {
                       period: .week, createdAt: createdAt, completedAt: completedAt,
                       sortOrder: sortOrder,
                       weekdays: mask.rawValue == 0 ? weekdays : mask, shape: shape,
-                      startsOn: startsOn, endsOn: endsOn, interval: 1)
+                      startsOn: startsOn, endsOn: endsOn, interval: 1, dates: dates)
     }
 
     /// What this allocation asks of `range`: its per-claimed-day rate times the claimed days it has there.
