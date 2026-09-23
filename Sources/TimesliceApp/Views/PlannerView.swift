@@ -866,7 +866,9 @@ struct PlannerView: View {
                         detail: ["  \(dayNamesShort[weekday - 1]) wanted "
                                  + "\(hours((dailyPlan.byDay[weekday]?[id]?.intended ?? 0) + seconds))"
                                  + " and didn't get this part",
-                                 "  nothing was moved to another day — that's the catch up method"]))
+                                 // This branch IS per day. It said "that's the catch up method", naming
+                                 // the one method that would have moved the hours.
+                                 "  nothing moved — that's per day"]))
                 }
             }
             return out.mapValues { $0.sorted { $0.hours > $1.hours } }
@@ -898,14 +900,14 @@ struct PlannerView: View {
         for (id, seconds) in dailyPlan.unplaced where seconds > 60 {
             let claimed = dailyPlan.claimedDays[id] ?? []
             guard let day = claimed.last else { continue }
-            var detail = ["  \(dayNames[day - 1]) was the last day it could use, and it's full",
-                          "  nothing outranks anything: the days are shared in half-hour turns, and only "
-                          + "an allocation with fewer days left goes first"]
+            // One line for what happened, one for what would change it. This had grown to four, including a
+            // description of the sharing rule — which belongs in `Replan`'s comments, not on a 17m block.
+            var detail = ["  \(dayNames[day - 1]) was its last day, and it's full"]
             if let spareText {
-                detail.append("  free hours remain on \(spareText) — days this doesn't claim")
-                detail.append("  more weekdays would reach them; more hours a day would not")
+                detail.append("  free hours are on \(spareText), which it doesn't claim — "
+                              + "more weekdays would reach them")
             } else {
-                detail.append("  every remaining day is full — more hours a day would help")
+                detail.append("  more hours a day would help")
             }
             out[day, default: []].append(PlannerWeekGrid.Blob(
                 targetID: id, name: name(forTarget: id), hours: seconds / 3600,
