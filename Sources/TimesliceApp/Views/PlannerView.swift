@@ -853,7 +853,6 @@ struct PlannerView: View {
     /// made rather than in a pool of its own.
     private func leftoversByDay() -> [Int: [PlannerWeekGrid.Blob]] {
         guard unit == .week, !showIntended else { return [:] }
-        let dayNamesShort = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
         if method == .perDay {
             // One entry per day that fell short, under that day — the whole point of the method. On a
             // finished week every claimed day is a candidate, because none of them are still to come.
@@ -863,12 +862,9 @@ struct PlannerView: View {
                     out[weekday, default: []].append(PlannerWeekGrid.Blob(
                         targetID: id, name: name(forTarget: id), hours: seconds / 3600,
                         colorHex: colorHex(forTarget: id), kind: .owed,
-                        detail: ["  \(dayNamesShort[weekday - 1]) wanted "
-                                 + "\(hours((dailyPlan.byDay[weekday]?[id]?.intended ?? 0) + seconds))"
-                                 + " and didn't get this part",
-                                 // This branch IS per day. It said "that's the catch up method", naming
-                                 // the one method that would have moved the hours.
-                                 "  nothing moved — that's per day"]))
+                        detail: [Self.row("wanted",
+                                          hours((dailyPlan.byDay[weekday]?[id]?.intended ?? 0) + seconds)),
+                                 Self.row("missed", hours(seconds))]))
                 }
             }
             return out.mapValues { $0.sorted { $0.hours > $1.hours } }
@@ -883,10 +879,10 @@ struct PlannerView: View {
                 out[miss.lastDay, default: []].append(PlannerWeekGrid.Blob(
                     targetID: miss.id, name: name(forTarget: miss.id), hours: miss.missed / 3600,
                     colorHex: colorHex(forTarget: miss.id), kind: .owed,
-                    detail: ["  \(hours(periodActuals[miss.id] ?? 0)) of "
-                             + "\(hours(targets.first { $0.id == miss.id }.map { goalSeconds(for: $0) } ?? 0))"
-                             + " done",
-                             "  \(dayNames[miss.lastDay - 1]) was its last day that week"]))
+                    detail: [Self.row("done", hours(periodActuals[miss.id] ?? 0) + " of "
+                                      + hours(targets.first { $0.id == miss.id }
+                                              .map { goalSeconds(for: $0) } ?? 0)),
+                             Self.row("last day", dayNames[miss.lastDay - 1])]))
             }
             return out.mapValues { $0.sorted { $0.hours > $1.hours } }
         }
@@ -902,13 +898,8 @@ struct PlannerView: View {
             guard let day = claimed.last else { continue }
             // One line for what happened, one for what would change it. This had grown to four, including a
             // description of the sharing rule — which belongs in `Replan`'s comments, not on a 17m block.
-            var detail = ["  \(dayNames[day - 1]) was its last day, and it's full"]
-            if let spareText {
-                detail.append("  free hours are on \(spareText), which it doesn't claim — "
-                              + "more weekdays would reach them")
-            } else {
-                detail.append("  more hours a day would help")
-            }
+            var detail = [Self.row("last day", "\(dayNames[day - 1]) · full")]
+            if let spareText { detail.append(Self.row("free elsewhere", spareText)) }
             out[day, default: []].append(PlannerWeekGrid.Blob(
                 targetID: id, name: name(forTarget: id), hours: seconds / 3600,
                 colorHex: colorHex(forTarget: id), kind: .owed, detail: detail))
@@ -921,8 +912,7 @@ struct PlannerView: View {
             out[day, default: []].append(PlannerWeekGrid.Blob(
                 targetID: id, name: name(forTarget: id), hours: seconds / 3600,
                 colorHex: colorHex(forTarget: id), kind: .owed,
-                detail: ["  \(dayNames[day - 1]) was its last day this week, and it has passed",
-                         "  more weekdays would help; more hours a day would not"]))
+                detail: [Self.row("last day", "\(dayNames[day - 1]) · passed")]))
         }
         return out.mapValues { $0.sorted { $0.hours > $1.hours } }
     }
@@ -1495,10 +1485,10 @@ struct PlannerView: View {
                     // detail: what the day is being asked for is one number. The tooltip has the breakdown.
                     var detail: [String] = []
                     if share.carried > 60, share.intended > 60 {
-                        detail = ["  \(hours(share.intended)) this day's own share",
-                                  "  \(hours(share.carried)) moved here from another day"]
+                        detail = [Self.row("own share", hours(share.intended)),
+                                  Self.row("moved here", hours(share.carried))]
                     } else if share.carried > 60 {
-                        detail = ["  all of it moved here from another day"]
+                        detail = [Self.row("moved here", hours(share.carried))]
                     }
                     blobs.append(PlannerWeekGrid.Blob(
                         targetID: id, name: name(forTarget: id), hours: share.total / 3600,
@@ -1704,8 +1694,7 @@ struct PlannerView: View {
             let creditedHere: TimeInterval = rollup.credited[id] ?? seconds
             var detail: [String] = []
             if creditedHere - seconds > 60 {
-                detail.append("+\(hours(creditedHere - seconds)) more counts toward this, drawn under a "
-                              + "narrower allocation")
+                detail.append(Self.row("also counts", "+" + hours(creditedHere - seconds)))
             }
             out.append(PlannerWeekGrid.Blob(
                 targetID: id, name: name(forTarget: id), hours: seconds / 3600,
@@ -1741,12 +1730,10 @@ struct PlannerView: View {
         where share.total > 60 {
             var detail: [String] = []
             if share.carried > 60, share.intended > 60 {
-                detail = ["  \(hours(share.intended)) this week's own share",
-                          "  \(hours(share.carried)) moved here from an earlier week"]
+                detail = [Self.row("own share", hours(share.intended)),
+                          Self.row("moved here", hours(share.carried))]
             } else if share.carried > 60 {
-                detail = ["  all of it moved here from an earlier week"]
-            } else if method == .perDay {
-                detail = ["  this week's own share — per week moves nothing between weeks"]
+                detail = [Self.row("moved here", hours(share.carried))]
             }
             out.append(PlannerWeekGrid.Blob(
                 targetID: id, name: name(forTarget: id), hours: share.total / 3600,
@@ -1756,11 +1743,9 @@ struct PlannerView: View {
     }
 
     private func leftoverBlobs(_ pool: [Int64: TimeInterval]) -> [PlannerWeekGrid.Blob] {
-        let why: [String] = method == .perDay
-            ? ["  wanted in this week and never done",
-               "  nothing was moved to another week — that's the per week method"]
-            : ["  wanted in this week and never done",
-               "  no week left in the month could take it either"]
+        // The pool's caption above the row already says which of the two this is, so the block states the
+        // amount and nothing else.
+        let why: [String] = []
         return pool.sorted { $0.value > $1.value }
             .filter { $0.value > 60 }
             .map { pair in
@@ -1784,8 +1769,8 @@ struct PlannerView: View {
             name: "\(rollup.span.outsideDays)d other month",
             hours: rollup.outsideCapacity / 3600,
             colorHex: "#8E8E93", kind: .otherMonth,
-            detail: ["  this calendar week reaches outside the month",
-                     "  " + tracked])
+            detail: [Self.row("not counted", "another month"),
+                     Self.row("tracked then", tracked)])
     }
 
     private func name(for target: Target, tasks: [Project]? = nil) -> String {
@@ -1866,6 +1851,11 @@ struct PlannerView: View {
         let spare = budget.freeLeft - budget.stillToDo
         return spare < budget.freeLeft * 0.12 ? .orange : .green
     }
+
+    /// One tooltip line as `label  value` — the shape the breakdown tooltips already use. The others were
+    /// prose, and prose in a tooltip turns into advice: "more hours a day would help" is a suggestion, while
+    /// the day it ran out of is the fact behind it.
+    static func row(_ label: String, _ value: String) -> String { "  \(label)  \(value)" }
 
     private func hours(_ seconds: TimeInterval) -> String {
         let h = seconds / 3600
