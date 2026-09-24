@@ -2697,6 +2697,33 @@ func testPlannerWeekFacts() {
           "and the hour falls to the parent rather than vanishing")
     check(nested[2]?.primary[200] == nil, "the nested one owns nothing")
 
+    // A session that crosses MIDNIGHT belongs to both days, in the proportions it was actually spent.
+    // It used to land wholly on the day it started: six hours of board games from Wednesday 18:35 to
+    // Thursday 00:35 showed as 6h on Wednesday and nothing on Thursday.
+    let overnight = [Interval(id: 20, projectID: 1, start: at(16, 18), end: at(17, 1))]
+    let split = PlannerWeek.facts(intervals: overnight, window: thisWeek, floors: floors,
+                                  membership: membership, taskNames: names, calendar: calendar)
+    // 16 Sep 2026 is a Wednesday, which is weekday 4 in Calendar's Sunday-first numbering.
+    check(approx((split[4]?.total ?? 0) / 3600, 6, 0.01),
+          "Wednesday keeps the six hours before midnight")
+    check(approx((split[5]?.total ?? 0) / 3600, 1, 0.01),
+          "and Thursday gets the hour after it")
+    check(approx(((split[4]?.credited[100] ?? 0) + (split[5]?.credited[100] ?? 0)) / 3600, 7, 0.01),
+          "the allocation is credited the whole session, once")
+    check(approx((split[4]?.primary[200] ?? 0) / 3600, 6, 0.01),
+          "and each day owns only its own part")
+
+    // Three days in one go, to be sure the walk doesn't stop after the first boundary.
+    let marathon = [Interval(id: 21, projectID: 3, start: at(14, 22), end: at(17, 2))]
+    let days = PlannerWeek.facts(intervals: marathon, window: thisWeek, floors: floors,
+                                 membership: membership, taskNames: names, calendar: calendar)
+    check(approx((days[2]?.unallocated ?? 0) / 3600, 2, 0.01), "Monday's two hours before midnight")
+    check(approx((days[3]?.unallocated ?? 0) / 3600, 24, 0.01), "a whole day in the middle")
+    check(approx((days[4]?.unallocated ?? 0) / 3600, 24, 0.01), "and another")
+    check(approx((days[5]?.unallocated ?? 0) / 3600, 2, 0.01), "then the tail on Wednesday")
+    check(approx((2...5).reduce(0.0) { $0 + (days[$1]?.total ?? 0) } / 3600, 52, 0.01),
+          "and the parts add up to the session, with nothing invented or lost")
+
     // An interval straddling the window edge is clipped, not counted whole or dropped.
     let straddling = [Interval(id: 9, projectID: 1, start: at(12, 22), end: at(13, 2))]
     let clipped = PlannerWeek.facts(intervals: straddling, window: thisWeek, floors: floors,

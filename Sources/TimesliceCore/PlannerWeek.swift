@@ -56,28 +56,41 @@ public enum PlannerWeek {
             let start = max(interval.start, window.start)
             let end = min(interval.end ?? now, window.end)
             guard end > start else { continue }
-            let seconds = end.timeIntervalSince(start)
-            let weekday = calendar.component(.weekday, from: start)
             let name = taskNames[interval.projectID] ?? "?"
 
-            var day = out[weekday] ?? DayFacts()
-            day.total += seconds
+            // SPLIT AT MIDNIGHT. This used to attribute an interval's whole length to the weekday it
+            // STARTED on, so a board-game session from Wednesday 18:35 to Thursday 00:35 put all six hours
+            // on Wednesday — inflating the day it began and leaving the next one looking emptier than it was.
+            // Clipping to the window handled the week's edges but never the days inside it.
+            var cursor = start
+            while cursor < end {
+                let nextMidnight = calendar.date(byAdding: .day, value: 1,
+                                                 to: calendar.startOfDay(for: cursor)) ?? end
+                let sliceEnd = min(end, nextMidnight)
+                let seconds = sliceEnd.timeIntervalSince(cursor)
+                defer { cursor = sliceEnd }
+                guard seconds > 0 else { break }
+                let weekday = calendar.component(.weekday, from: cursor)
 
-            var covered = false
-            for (id, ids) in coverage where ids.contains(interval.projectID) {
-                day.credited[id, default: 0] += seconds
-                covered = true
+                var day = out[weekday] ?? DayFacts()
+                day.total += seconds
+
+                var covered = false
+                for (id, ids) in coverage where ids.contains(interval.projectID) {
+                    day.credited[id, default: 0] += seconds
+                    covered = true
+                }
+                if let owner = membership.primaryOwner(of: interval.projectID, among: ownable) {
+                    day.primary[owner, default: 0] += seconds
+                    day.breakdown[owner, default: [:]][name, default: 0] += seconds
+                }
+                if !covered {
+                    day.unallocated += seconds
+                    day.breakdown[-2, default: [:]][name, default: 0] += seconds
+                    day.uncoveredTaskIDs.insert(interval.projectID)
+                }
+                out[weekday] = day
             }
-            if let owner = membership.primaryOwner(of: interval.projectID, among: ownable) {
-                day.primary[owner, default: 0] += seconds
-                day.breakdown[owner, default: [:]][name, default: 0] += seconds
-            }
-            if !covered {
-                day.unallocated += seconds
-                day.breakdown[-2, default: [:]][name, default: 0] += seconds
-                day.uncoveredTaskIDs.insert(interval.projectID)
-            }
-            out[weekday] = day
         }
         return out
     }
