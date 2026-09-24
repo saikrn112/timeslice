@@ -103,14 +103,48 @@ final class TimerModel: ObservableObject {
     // MARK: - Derived orderings (all from Core)
 
     /// Tasks most-recently-worked first. `TaskOrdering` is shared with the Mac's switcher.
+    /// What another device is doing RIGHT NOW: task → when it started there.
+    ///
+    /// The markers that carry this are already fetched every sync — `TakeoverPolicy` reads them to decide
+    /// whether to stop our own timer — and were then thrown away. That is why 20 minutes of `meetings` on the
+    /// laptop left no trace in this phone's list: an interval only reaches the phone once it has CLOSED and
+    /// synced, so a task in progress elsewhere was invisible exactly when you most wanted to switch to it.
+    @Published private(set) var peerActivity: [Int64: Date] = [:]
+    /// Task → the label of the device on it, for the row's subtitle.
+    @Published private(set) var peerRunningLabel: [Int64: String] = [:]
+
+    /// Recency, counting what peers are doing now as the most recent activity there is.
     var recencyOrdered: [Project] {
-        TaskOrdering.recencyOrdered(display: tasks, lastActivity: lastActivity, current: currentTaskID)
+        TaskOrdering.recencyOrdered(display: tasks, lastActivity: mergedActivity, current: currentTaskID)
+    }
+
+    /// Local history with peers' in-progress work folded in, newest winning.
+    private var mergedActivity: [Int64: Date] {
+        lastActivity.merging(peerActivity) { mine, theirs in max(mine, theirs) }
+    }
+
+    /// Record what the peers' running markers say. Called from the sync cycle, which already has them.
+    func applyPeerRunning(_ markers: [RunningMarker], labels: [String: String]) {
+        guard let store else { return }
+        var activity: [Int64: Date] = [:]
+        var running: [Int64: String] = [:]
+        for marker in markers where marker.deviceID != deviceID {
+            guard let taskID = try? store.localID(table: "projects", uid: marker.taskUID) else { continue }
+            let since = Date(timeIntervalSince1970: marker.since)
+            activity[taskID] = max(activity[taskID] ?? since, since)
+            // Only a RUNNING marker earns the subtitle; a paused one is presence, not a claim on the task.
+            if marker.claimsTimer {
+                running[taskID] = labels[marker.deviceID] ?? TimeslicePaths.shortDeviceName(marker.deviceID)
+            }
+        }
+        peerActivity = activity
+        peerRunningLabel = running
     }
 
     /// Recency order for a scope: Today drops the quiet tasks, All Time keeps them.
     func recencyOrdered(hidingQuiet: Bool) -> [Project] {
         TaskOrdering.recencyOrdered(display: hidingQuiet ? activeToday : tasks,
-                                    lastActivity: lastActivity, current: currentTaskID)
+                                    lastActivity: mergedActivity, current: currentTaskID)
     }
 
     /// Fuzzy search results using the Mac's exact ranking, including `/project` filing tokens and
@@ -419,6 +453,15 @@ final class TimerModel: ObservableObject {
 
     /// Ask the UI to present the switcher wheel. Called from `OpenSwitcherIntent`.
     func requestSwitcher() { showingSwitcher = true }
+
+    /// Land on the task list, and close anything covering it — the Action Button's job now.
+    func requestTaskList() {
+        showingSwitcher = false
+        requestedTab = "tasks"
+    }
+
+    /// A tab the app should switch to, consumed by the root view.
+    @Published var requestedTab: String?
 
     /// Re-arm the nudges from current state. Public because the notification's "Still on it" action
     /// re-arms without changing the timer — a long session should keep checking in rather than going

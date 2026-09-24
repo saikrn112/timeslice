@@ -639,6 +639,7 @@ struct MetricsScreen: View {
         case .day: return "d"
         case .week: return "wk"
         case .month: return "mo"
+        case .once: return "once"
         }
     }
 

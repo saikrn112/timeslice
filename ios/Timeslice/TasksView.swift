@@ -20,7 +20,6 @@ struct TasksView: View {
     /// Grouped by project by default, matching the Mac — `ProjectListView` has no toggle at all and
     /// simply groups whenever any project exists. The toggle stays because a phone benefits from a
     /// recency view the Mac gets from its switcher, but the default now agrees.
-    @State private var grouped = true
     @FocusState private var searchFocused: Bool
     /// Section id currently under a drag, so only that header highlights.
     @State private var dropTarget: Int64?
@@ -40,7 +39,10 @@ struct TasksView: View {
                     // now exists somewhere better: the expanded Dynamic Island's switcher, the switcher
                     // sheet, and the Action Button. It was costing vertical space above the list to
                     // duplicate them badly.
-                    if !(model.tasks.isEmpty && model.archivedTasks.isEmpty) {
+                    // Hidden while searching: the running task's clock and its play/pause are about what you
+                    // are doing NOW, and a search is about finding something else. It pushed the first result
+                    // down the screen for no gain.
+                    if !(model.tasks.isEmpty && model.archivedTasks.isEmpty), query.isEmpty {
                         NowCard()
                             .padding(.bottom, 12)
                     }
@@ -51,13 +53,10 @@ struct TasksView: View {
                             card { createRow }
                         }
                         rows(matches)
-                    } else if grouped && !model.groups.isEmpty {
-                        // Today hides the quiet tasks; All Time is where they live, dimmed and marked.
-                        ForEach(model.sections(hidingQuiet: scope == .today)) { section in
-                            groupHeader(section)
-                            rows(section.tasks)
-                        }
                     } else {
+                        // Always most-recent-first. Project grouping is gone: finding the task you were just
+                        // on is the thing this list is for, and grouping buries it under whichever project it
+                        // happens to belong to. Today hides quiet tasks; All Time keeps them.
                         rows(model.recencyOrdered(hidingQuiet: scope == .today))
                     }
                     archived
@@ -211,23 +210,9 @@ struct TasksView: View {
                 Picker("Scope", selection: $scope) {
                     ForEach(TimeScope.allCases) { s in Text(s.rawValue).tag(s) }
                 }
-                // Only meaningful once a project exists — grouping nothing is the same list either way,
-                // which is why the Mac's list stays flat until then.
-                if !model.groups.isEmpty {
-                    Picker("Group by", selection: $grouped) {
-                        Label("Projects", systemImage: "folder").tag(true)
-                        Label("Recent", systemImage: "clock").tag(false)
-                    }
-                }
+
             } label: {
-                HStack(spacing: 4) {
-                    Text(scope.rawValue)
-                    if !model.groups.isEmpty {
-                        Text("·").foregroundStyle(.tertiary)
-                        Image(systemName: grouped ? "folder" : "clock")
-                    }
-                }
-                .font(.system(size: 13, weight: .medium))
+                Text(scope.rawValue).font(.system(size: 13, weight: .medium))
             }
         }
     }
@@ -286,6 +271,8 @@ struct TasksView: View {
                         isCurrent: model.currentTaskID == task.id,
                         isQuiet: model.dormantTaskIDs.contains(task.id),
                         quietDays: model.quietDaysByTask[task.id] ?? -1,
+                        project: model.groups.first { $0.id == task.taskProjectID }?.name,
+                        elsewhere: model.peerRunningLabel[task.id],
                         onToggle: { model.toggle(taskID: task.id) })
                     .frame(height: Self.taskRowHeight)
                     .padding(.horizontal, Theme.cardPadding)
@@ -558,11 +545,23 @@ struct TaskRow: View {
     var isQuiet: Bool = false
     /// Days since it was last tracked, or -1 if it never was. Only used for the quiet caption.
     var quietDays: Int = -1
+    /// The project it belongs to, shown under the name. Two tasks called "meetings" in different projects
+    /// are indistinguishable without it, which is what made searching for one of them guesswork.
+    var project: String? = nil
+    /// A device that is on this task right now, e.g. "work". Nil for anything not running elsewhere.
+    var elsewhere: String? = nil
     /// Start/pause this task. The row is tappable too, but a row that silently toggles a timer gives no
     /// hint it's a control — hence the explicit button as well.
     let onToggle: () -> Void
 
     private var isRunning: Bool { liveOrigin != nil }
+
+    /// The project, or what another device is doing with this task — the latter wins, because "running on
+    /// work" is the more urgent fact when you are deciding what to switch to.
+    private var subtitle: String? {
+        if let elsewhere { return "running on \(elsewhere)" }
+        return project
+    }
 
     var body: some View {
         content.opacity(isQuiet && !task.finished ? 0.75 : 1)
@@ -579,11 +578,19 @@ struct TaskRow: View {
                     }
                 }
 
-            Text(task.name)
-                .font(isCurrent ? Theme.rowTitleStrong : Theme.rowTitle)
-                .strikethrough(task.finished)
-                .foregroundStyle(task.finished || isQuiet ? .secondary : .primary)
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(task.name)
+                    .font(isCurrent ? Theme.rowTitleStrong : Theme.rowTitle)
+                    .strikethrough(task.finished)
+                    .foregroundStyle(task.finished || isQuiet ? .secondary : .primary)
+                    .lineLimit(1)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(elsewhere == nil ? .secondary : Color.accentColor)
+                        .lineLimit(1)
+                }
+            }
 
             // A moon, not a strikethrough: this task drifted rather than being closed, and the two
             // deserve different marks. Same symbol the Mac uses.

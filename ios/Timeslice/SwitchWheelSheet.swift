@@ -89,21 +89,25 @@ struct SwitchWheelSheet: View {
     }
 }
 
-/// Action Button binding for people who switch more often than they pause: opens the app straight
-/// onto the wheel instead of toggling.
+/// Action Button binding for people who switch more often than they pause: opens the app on the task
+/// list, most-recent first, with search a tap away.
 ///
-/// Offered alongside `ToggleTimerIntent` rather than replacing it — §4.1 treats the plain toggle as
-/// the 80% case. Which one the Action Button runs is the user's choice in Settings.
+/// It used to open the wheel. The wheel is a fixed list with no search, so the moment the task you wanted
+/// wasn't in it — because it was running on the laptop, or simply wasn't recent here — the only move was to
+/// cancel and start again. The task list does everything the wheel did and can be typed into, which is how
+/// the same problem is already solved on the Mac.
+///
+/// The struct keeps its name: it is what an existing Action Button assignment resolves to, and renaming it
+/// would silently unbind the button.
 struct OpenSwitcherIntent: AppIntent {
     static var title: LocalizedStringResource = "Switch Timeslice Task"
-    static var description = IntentDescription("Open Timeslice on the task switcher wheel.")
-    /// Necessarily true: a wheel cannot be presented from the background, and Live Activities can't
-    /// host one at all.
+    static var description = IntentDescription("Open Timeslice on your tasks, most recent first.")
+    /// Necessarily true: the list can't be shown from the background.
     static var openAppWhenRun: Bool { true }
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        TimerModel.shared.requestSwitcher()
+        TimerModel.shared.requestTaskList()
         return .result()
     }
 }

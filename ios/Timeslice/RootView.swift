@@ -84,6 +84,12 @@ struct RootView: View {
         // Both presented from the root so the Action Button's switcher binding works whichever tab
         // was last open, and so Settings is reachable from either.
         .sheet(isPresented: $model.showingSwitcher) { SwitchWheelSheet() }
+        // The Action Button asks for the task list rather than presenting a switcher of its own.
+        .onChange(of: model.requestedTab) { _, requested in
+            guard let requested, let asked = Tab(rawValue: requested) else { return }
+            tab = asked
+            model.requestedTab = nil
+        }
         .sheet(isPresented: $model.showingSettings) { SettingsScreen(showsDone: true) }
         .sheet(isPresented: $model.showingDiagnostics) {
             // Nothing should be able to present it in a release build, whatever asks.

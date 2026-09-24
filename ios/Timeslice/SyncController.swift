@@ -299,6 +299,11 @@ final class SyncController {
             if let modified = entry.modified { observedAt[marker.deviceID] = modified }
         }
 
+        // Keep what the peers are doing, not just whether they outrank us. The list needs it to rank a task
+        // someone else is mid-way through, and the row needs it to say so.
+        let labels = (try? await MainActor.run { try Self.requireStore().deviceLabels() }) ?? [:]
+        await MainActor.run { TimerModel.shared.applyPeerRunning(markers, labels: labels) }
+
         let localSince = try await MainActor.run { try Self.requireStore().openInterval()?.start }
         guard let decision = TakeoverPolicy.decide(localRunningSince: localSince,
                                                    markers: markers,
