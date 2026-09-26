@@ -65,6 +65,16 @@ struct MetricsView: View {
         if let subject = filter.subject {
             pinnedFocuses = [Self.focus(for: subject)]
         }
+        // Screenshot hooks: `screencapture` cannot click, so the range pills and the selection — which
+        // the overlay and its average need — are settable from the environment.
+        if let unit = ProcessInfo.processInfo.environment["TIMESLICE_UNIT"],
+           let wanted = RangeUnit.allCases.first(where: { "\($0)" == unit }) {
+            range = DateRange.resolve(unit: wanted, anchor: range.start, earliest: earliest)
+        }
+        if let wanted = ProcessInfo.processInfo.environment["TIMESLICE_SELECT"], !wanted.isEmpty,
+           let row = targetProgress.first(where: { $0.name.localizedCaseInsensitiveContains(wanted) }) {
+            pinnedFocuses = [Self.focus(for: row.target.subject)]
+        }
     }
 
     /// Publish the current selection so the Planner opens on the same thing.
@@ -1251,6 +1261,18 @@ struct MetricsView: View {
                           uniquingKeysWith: { a, b in a + b })
     }
 
+    /// The selection's own daily average, over the SAME divisor as `meanBucketHours` — every bucket in
+    /// the range, not only the ones the selection appears in. Otherwise the two dashed lines wouldn't
+    /// be comparable: an allocation touched on two days of seven would draw a line 3.5× too high.
+    private var meanSelectedBucketHours: Double? {
+        guard !buckets.isEmpty else { return nil }
+        let byBucket = selectedBucketSeconds
+        guard !byBucket.isEmpty else { return nil }
+        let total = buckets.reduce(0.0) { $0 + (byBucket[$1.start] ?? 0) }
+        guard total > 0 else { return nil }
+        return total / Double(buckets.count) / 3600
+    }
+
     /// Whether the bars are showing the pinned selection instead of focused time.
     private var hasSelectionOverlay: Bool {
         !(focusedTaskIDs ?? []).isEmpty && !pinnedFocuses.isEmpty
@@ -1332,6 +1354,19 @@ struct MetricsView: View {
                             .annotation(position: .top, alignment: .leading, spacing: 1) {
                                 Text("avg \(hours(mean * 3600))")
                                     .font(.system(size: 9)).foregroundStyle(.secondary)
+                            }
+                    }
+                    // And the selection's own average, in the overlay's colour so it reads as
+                    // belonging to the red bars rather than as a second total. Annotated on the right
+                    // so it can't collide with the total's label when the two lines are close.
+                    if let selMean = meanSelectedBucketHours {
+                        RuleMark(y: .value("Selected average", selMean))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                            .foregroundStyle(Self.selectionOverlay)
+                            .annotation(position: .top, alignment: .trailing, spacing: 1) {
+                                Text("selected avg \(hours(selMean * 3600))")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Self.selectionOverlay)
                             }
                     }
                 }
