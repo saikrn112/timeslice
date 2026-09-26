@@ -472,12 +472,20 @@ struct PlannerView: View {
 
     private func goalRowData(_ plan: Planner) -> [GoalRow] {
         let floors = targets.filter { $0.direction == .atLeast }
-        let elapsed = elapsedFractionOfPeriod()
+        let window = periodWindow()
+        let now = Date()
+        // How much of the WAKING day has gone, not of the 24 hours: pace against hours you could have used.
+        let todayGone = 1 - Replan.fractionOfDayLeft(now: now, wakingSeconds: settings.wakingSeconds,
+                                                     calendar: Calendar.current)
         return floors.map { target -> GoalRow in
             // The allocation's weekly rate, pro-rated onto the window. Four weeks in month view, so a
             // 35h/week office reads as 140h and a missed week is visible as month-level lag.
             let scaled = goalSeconds(for: target)
             let done = periodActuals[target.id] ?? 0
+            // Each allocation's own days, not the calendar's. See `Target.elapsedFraction`.
+            let elapsed = offset > 0 ? 1 : (window.map {
+                target.elapsedFraction(in: $0, now: now, fractionOfTodayElapsed: todayGone)
+            } ?? 1)
             let shouldBe = scaled * elapsed
             let behind = max(0, shouldBe - done)
             return GoalRow(

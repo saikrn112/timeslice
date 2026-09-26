@@ -529,12 +529,12 @@ public enum TargetMath {
             : target.seconds * (rangeDays / target.normalisingDays)
         let scale = target.seconds > 0 ? expected / target.seconds : 0
 
-        // Clamped so a range entirely in the past counts as fully elapsed and one entirely in the
-        // future counts as not started, instead of extrapolating past either end.
-        let total = rangeEnd.timeIntervalSince(rangeStart)
-        let elapsed = total > 0
-            ? min(max(now.timeIntervalSince(rangeStart) / total, 0), 1)
-            : 1
+        // The allocation's OWN days, not the calendar's — see `Target.elapsedFraction`. A Mon–Fri
+        // allocation on Friday evening has spent all five of its days, and judging it "85% through the
+        // week" told it to be at 29.6h of 35h when it should have been at 35h. Clamped at both ends, so a
+        // range wholly past is fully elapsed and one wholly ahead has not started.
+        let elapsed = target.elapsedFraction(in: DateInterval(start: rangeStart, end: rangeEnd),
+                                             now: now, calendar: calendar)
 
         let verdict: TargetProgress.Verdict
         switch target.direction {

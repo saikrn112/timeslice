@@ -164,6 +164,40 @@ public extension Target {
                       startsOn: startsOn, endsOn: endsOn, interval: 1, dates: dates)
     }
 
+    /// How much of this allocation's OWN time in `range` has gone — not how much of the calendar has.
+    ///
+    /// The pace figure used one wall-clock fraction for every allocation, so a Mon–Fri office allocation on
+    /// Friday evening was judged "85% through the week" and told it should be at 29.6h of 35h. By then all
+    /// five of its days are spent: it should be at 35h. The mirror error is a weekend allocation being called
+    /// behind on a Tuesday, when none of its days have arrived yet.
+    ///
+    /// Counted in claimed days, with today included as the fraction of the waking day gone — the same shape
+    /// the planner uses to decide what today can still be asked for.
+    func elapsedFraction(in range: DateInterval, now: Date = Date(),
+                         fractionOfTodayElapsed: Double? = nil,
+                         calendar: Calendar = .current) -> Double {
+        let total = claimedDays(in: range, calendar: calendar)
+        guard total > 0 else { return 1 }
+        guard now < range.end else { return 1 }
+        guard now >= range.start else { return 0 }
+
+        let startOfToday = calendar.startOfDay(for: now)
+        let past = claimedDays(in: DateInterval(start: range.start, end: startOfToday),
+                               calendar: calendar)
+        // Today counts only if this allocation claims it — otherwise a Tuesday adds nothing to a
+        // weekend allocation's elapsed share.
+        var elapsed = Double(past)
+        if claimedDays(in: DateInterval(start: startOfToday,
+                                        end: calendar.date(byAdding: .day, value: 1,
+                                                           to: startOfToday) ?? range.end),
+                       calendar: calendar) > 0 {
+            let gone = fractionOfTodayElapsed
+                ?? min(1, max(0, now.timeIntervalSince(startOfToday) / 86_400))
+            elapsed += min(1, max(0, gone))
+        }
+        return min(1, max(0, elapsed / Double(total)))
+    }
+
     /// What this allocation asks of `range`: its per-claimed-day rate times the claimed days it has there.
     ///
     /// Replaces every ad-hoc `weeklySeconds × someNumberOfWeeks` in the planner. A week wholly inside a

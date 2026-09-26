@@ -3255,6 +3255,52 @@ func testAllocationWindows() {
     check(ceiling.applies(to: october, calendar: cal),
           "but it still applies, so it can be shown and checked")
 
+    // MARK: Pace against an allocation's own days
+
+    // Friday evening of a Mon–Fri week. All five of office's days are spent, so it should be at its whole
+    // 35h — not at 85% of it because 85% of the CALENDAR week has passed.
+    let week = span(day(10, 4), day(10, 11))          // Sun 4 Oct – Sat 10 Oct 2026
+    let fridayEvening = cal.date(from: DateComponents(year: 2026, month: 10, day: 9, hour: 21))!
+    check(approx(office.elapsedFraction(in: week, now: fridayEvening,
+                                        fractionOfTodayElapsed: 1, calendar: cal), 1, 0.001),
+          "a Mon–Fri allocation is fully elapsed once Friday is over")
+    let fridayNoon = cal.date(from: DateComponents(year: 2026, month: 10, day: 9, hour: 12))!
+    check(approx(office.elapsedFraction(in: week, now: fridayNoon,
+                                        fractionOfTodayElapsed: 0.5, calendar: cal), 4.5 / 5, 0.001),
+          "and four and a half days through by the middle of Friday")
+
+    // The mirror error: a weekend allocation is not behind on a Tuesday, because none of its days exist yet.
+    let weekendPace = Target(id: 30, subject: .tag(4), seconds: 2 * 3600, direction: .atLeast,
+                             period: .week,
+                             weekdays: Weekdays(rawValue: (1 << 0) | (1 << 6)))
+    let tuesday = cal.date(from: DateComponents(year: 2026, month: 10, day: 6, hour: 15))!
+    // The week starts on Sunday, so by Tuesday a weekend allocation has already had one of its two days.
+    check(approx(weekendPace.elapsedFraction(in: week, now: tuesday, calendar: cal), 0.5, 0.001),
+          "a weekend allocation is half elapsed by Tuesday — its Sunday has gone")
+    // Saturday-only is the case with nothing elapsed yet, and it must not read as behind.
+    let saturdayOnly = Target(id: 32, subject: .tag(4), seconds: 2 * 3600, direction: .atLeast,
+                              period: .week, weekdays: Weekdays(rawValue: 1 << 6))
+    check(saturdayOnly.elapsedFraction(in: week, now: tuesday, calendar: cal) == 0,
+          "a Saturday allocation has spent nothing by Tuesday")
+    let sundayNoon = cal.date(from: DateComponents(year: 2026, month: 10, day: 4, hour: 12))!
+    check(approx(weekendPace.elapsedFraction(in: week, now: sundayNoon,
+                                             fractionOfTodayElapsed: 0.5, calendar: cal), 0.25, 0.001),
+          "half of the first of its two days is a quarter of its week")
+
+    // Bounds: before the window nothing has gone, after it everything has.
+    check(office.elapsedFraction(in: week, now: day(10, 1), calendar: cal) == 0,
+          "a week that hasn't started is 0% elapsed")
+    check(office.elapsedFraction(in: week, now: day(10, 20), calendar: cal) == 1,
+          "and one that has finished is fully elapsed")
+
+    // A one-off is elapsed by its own days too, so a job dated Wednesday isn't "behind" on Monday.
+    let wednesdayJob = Target(id: 31, subject: .tag(1), seconds: 6 * 3600, direction: .atLeast,
+                              period: .once, startsOn: day(10, 7), endsOn: day(10, 7))
+    check(wednesdayJob.elapsedFraction(in: week, now: day(10, 5), calendar: cal) == 0,
+          "a Wednesday one-off has spent nothing by Monday")
+    check(approx(wednesdayJob.elapsedFraction(in: week, now: day(10, 9), calendar: cal), 1, 0.001),
+          "and everything by Friday")
+
     // MARK: Every-N
 
     // 8h every OTHER week, Mon–Fri, anchored to Thursday 1 October. Weeks containing 1, 15 and 29 Oct run;
@@ -4768,38 +4814,59 @@ func testTargetMath() {
         let midweek = date(2026, 8, 27, 0, 0)          // 3 of 7 days elapsed
         let t = weekly(30, .atLeast)
         let met = TargetMath.progress(target: t, name: "office", actualSeconds: 31 * 3600,
-                                     rangeStart: weekStart, rangeEnd: weekEnd, now: midweek)
+                                     rangeStart: weekStart, rangeEnd: weekEnd, now: midweek, calendar: cal)
         check(met.verdict == .met, "a floor already reached is met")
         let onPace = TargetMath.progress(target: t, name: "office", actualSeconds: 14 * 3600,
-                                        rangeStart: weekStart, rangeEnd: weekEnd, now: midweek)
+                                        rangeStart: weekStart, rangeEnd: weekEnd, now: midweek, calendar: cal)
         check(onPace.verdict == .onPace,
               "14h of 30h on day 3 of 7 is on pace, not a failure")
         let behind = TargetMath.progress(target: t, name: "office", actualSeconds: 2 * 3600,
-                                        rangeStart: weekStart, rangeEnd: weekEnd, now: midweek)
+                                        rangeStart: weekStart, rangeEnd: weekEnd, now: midweek, calendar: cal)
         check(behind.verdict == .behind, "2h by day 3 is behind")
+    }
+
+    do { // pace measures the allocation's OWN days, not the calendar's
+        let monFri = Weekdays(rawValue: 0b0111110)   // Monday…Friday, bit 0 is Sunday
+        let weekdayOnly = Target(id: 1, subject: .tag(1), seconds: 30 * 3600, direction: .atLeast,
+                                 period: .week, weekdays: monFri)
+        // Friday 8pm: all five of its days are spent, so 28h of 30h is behind, not "85% through".
+        let fridayNight = date(2026, 8, 28, 20, 0)
+        let p = TargetMath.progress(target: weekdayOnly, name: "office", actualSeconds: 28 * 3600,
+                                    rangeStart: weekStart, rangeEnd: weekEnd, now: fridayNight,
+                                    calendar: cal)
+        check(approx(p.elapsedFraction, 0.97, 0.05),
+              "a Mon-Fri week is ~97% elapsed on Friday night, not 71%")
+        check(p.verdict == .behind, "28h of a Mon-Fri 30h with Friday almost gone is behind")
+        // The weekend days it does not claim add nothing.
+        let saturday = date(2026, 8, 29, 12, 0)
+        let sat = TargetMath.progress(target: weekdayOnly, name: "office", actualSeconds: 28 * 3600,
+                                      rangeStart: weekStart, rangeEnd: weekEnd, now: saturday,
+                                      calendar: cal)
+        check(approx(sat.elapsedFraction, 1.0, 0.001),
+              "a Mon-Fri week is fully elapsed once Saturday starts")
     }
 
     do { // a ceiling is judged against the WHOLE allowance, not the elapsed part
         let monday = date(2026, 8, 25, 0, 0)
         let t = weekly(5, .atMost)
         let used = TargetMath.progress(target: t, name: "side", actualSeconds: 4.5 * 3600,
-                                      rangeStart: weekStart, rangeEnd: weekEnd, now: monday)
+                                      rangeStart: weekStart, rangeEnd: weekEnd, now: monday, calendar: cal)
         check(used.verdict == .met,
               "spending most of the week's allowance early is not over budget")
         let over = TargetMath.progress(target: t, name: "side", actualSeconds: 6 * 3600,
-                                      rangeStart: weekStart, rangeEnd: weekEnd, now: monday)
+                                      rangeStart: weekStart, rangeEnd: weekEnd, now: monday, calendar: cal)
         check(over.verdict == .over, "exceeding it is over, whenever it happened")
     }
 
     do { // percentages, including above 100 for a breached ceiling
         let t = weekly(30, .atLeast)
         let p = TargetMath.progress(target: t, name: "office", actualSeconds: 15 * 3600,
-                                    rangeStart: weekStart, rangeEnd: weekEnd, now: weekEnd)
+                                    rangeStart: weekStart, rangeEnd: weekEnd, now: weekEnd, calendar: cal)
         check(approx(p.percent, 50, 0.01), "15h of 30h is 50%")
         check(approx(p.deltaSeconds / 3600, -15), "and 15h short")
         let c = weekly(5, .atMost)
         let q = TargetMath.progress(target: c, name: "side", actualSeconds: 6 * 3600,
-                                    rangeStart: weekStart, rangeEnd: weekEnd, now: weekEnd)
+                                    rangeStart: weekStart, rangeEnd: weekEnd, now: weekEnd, calendar: cal)
         check(approx(q.percent, 120, 0.01), "a breached ceiling reads over 100%")
     }
 
@@ -4808,7 +4875,7 @@ func testTargetMath() {
         let monthEnd = date(2026, 8, 31, 0, 0)          // 30 days
         let p = TargetMath.progress(target: weekly(10, .atLeast), name: "office",
                                     actualSeconds: 0, rangeStart: monthStart, rangeEnd: monthEnd,
-                                    now: monthEnd)
+                                    now: monthEnd, calendar: cal)
         check(approx(p.expectedSeconds / 3600, 10 * 30 / 7, 0.1),
               "a weekly target scales onto a month rather than vanishing")
     }
@@ -4816,7 +4883,7 @@ func testTargetMath() {
     do { // a fully-elapsed range can't be "on pace" — it's met or it isn't
         let p = TargetMath.progress(target: weekly(30, .atLeast), name: "office",
                                     actualSeconds: 29 * 3600, rangeStart: weekStart,
-                                    rangeEnd: weekEnd, now: date(2026, 9, 5, 0, 0))
+                                    rangeEnd: weekEnd, now: date(2026, 9, 5, 0, 0), calendar: cal)
         check(p.elapsedFraction == 1, "a past range is fully elapsed")
         check(p.verdict == .behind, "missing a finished floor is behind, not on pace")
     }
@@ -4824,7 +4891,7 @@ func testTargetMath() {
     do { // a future range hasn't started, so nothing is behind yet
         let p = TargetMath.progress(target: weekly(30, .atLeast), name: "office",
                                     actualSeconds: 0, rangeStart: weekStart, rangeEnd: weekEnd,
-                                    now: date(2026, 8, 1, 0, 0))
+                                    now: date(2026, 8, 1, 0, 0), calendar: cal)
         check(p.elapsedFraction == 0, "a future range has not elapsed")
         check(p.verdict == .onPace, "and so isn't behind")
     }
@@ -4834,7 +4901,7 @@ func testTargetMath() {
         let friday = date(2026, 8, 28, 12, 0)
         let p = TargetMath.progress(target: weekly(40, .atLeast), name: "office",
                                     actualSeconds: 18 * 3600, rangeStart: weekStart,
-                                    rangeEnd: weekEnd, now: friday, todaySeconds: 2 * 3600)
+                                    rangeEnd: weekEnd, now: friday, todaySeconds: 2 * 3600, calendar: cal)
         check(p.daysElapsed == 5, "a part-elapsed day still counts as a day you had")
         check(approx(p.averagePerDaySeconds / 3600, 18.0 / 7, 0.02),
               "18h in the week averages 18/7 h/day, whatever day it is")
@@ -4847,14 +4914,14 @@ func testTargetMath() {
     do { // nothing required once the target is already met
         let p = TargetMath.progress(target: weekly(10, .atLeast), name: "office",
                                     actualSeconds: 12 * 3600, rangeStart: weekStart,
-                                    rangeEnd: weekEnd, now: date(2026, 8, 26, 12, 0))
+                                    rangeEnd: weekEnd, now: date(2026, 8, 26, 12, 0), calendar: cal)
         check(p.requiredPerDaySeconds == nil, "a met floor needs no further pace")
     }
 
     do { // nor once the period is over — there are no days left to make it up in
         let p = TargetMath.progress(target: weekly(40, .atLeast), name: "office",
                                     actualSeconds: 1 * 3600, rangeStart: weekStart,
-                                    rangeEnd: weekEnd, now: date(2026, 9, 10, 0, 0))
+                                    rangeEnd: weekEnd, now: date(2026, 9, 10, 0, 0), calendar: cal)
         check(p.requiredPerDaySeconds == nil, "a finished period has no remaining pace")
     }
 
@@ -4863,7 +4930,7 @@ func testTargetMath() {
         let p = TargetMath.progress(target: weekly(7, .atLeast), name: "recon paper",
                                     actualSeconds: 1.78 * 3600, rangeStart: weekStart,
                                     rangeEnd: weekEnd, now: weekEnd,
-                                    rangeSeconds: 0, viewedRangeDays: day)
+                                    rangeSeconds: 0, viewedRangeDays: day, calendar: cal)
         check(approx(p.rangeExpectedSeconds / 3600, 1, 0.01),
               "a 7h weekly budget pro-rates to 1h over a single day")
         check(p.rangePercent == 0, "nothing tracked that day is 0% of it")
@@ -4874,7 +4941,7 @@ func testTargetMath() {
         let p = TargetMath.progress(target: weekly(40, .atLeast), name: "office",
                                     actualSeconds: 0, rangeStart: weekStart, rangeEnd: weekEnd,
                                     now: weekEnd, rangeSeconds: 98.8 * 3600,
-                                    viewedRangeDays: 30)
+                                    viewedRangeDays: 30, calendar: cal)
         check(approx(p.rangeExpectedSeconds / 3600, 40 * 30 / 7, 0.1),
               "40h/week over 30 days expects ~171h")
         check(approx(p.rangePercent, 57.6, 0.5), "and reports progress against that")
@@ -4884,7 +4951,7 @@ func testTargetMath() {
         let p = TargetMath.progress(target: weekly(40, .atLeast), name: "office",
                                     actualSeconds: 20 * 3600, rangeStart: weekStart,
                                     rangeEnd: weekEnd, now: weekEnd,
-                                    rangeSeconds: 10 * 3600, viewedRangeDays: 5)
+                                    rangeSeconds: 10 * 3600, viewedRangeDays: 5, calendar: cal)
         check(approx(p.averagePerDaySeconds / 3600, 20.0 / 7, 0.02),
               "20h in a week averages 20/7 h/day — divided by all 7 days, not the 5 elapsed")
     }
@@ -4892,7 +4959,7 @@ func testTargetMath() {
     do { // a zero-length viewed range can't divide by zero
         let p = TargetMath.progress(target: weekly(40, .atLeast), name: "x", actualSeconds: 0,
                                     rangeStart: weekStart, rangeEnd: weekEnd,
-                                    rangeSeconds: 0, viewedRangeDays: 0)
+                                    rangeSeconds: 0, viewedRangeDays: 0, calendar: cal)
         check(p.rangeExpectedSeconds == 0 && p.rangePercent == 0, "inert, not NaN")
     }
 
@@ -4927,14 +4994,14 @@ func testTargetMath() {
                                     actualSeconds: 5 * 3600,
                                     rangeStart: date(2026, 8, 10, 0, 0),
                                     rangeEnd: date(2026, 8, 17, 0, 0),
-                                    now: date(2026, 8, 28, 12, 0))
+                                    now: date(2026, 8, 28, 12, 0), calendar: cal)
         check(p.elapsedFraction == 1, "a finished week is fully elapsed")
         check(p.verdict == .behind, "and a floor it missed is behind, not still on pace")
     }
 
     do { // a zero-length range can't divide by zero
         let p = TargetMath.progress(target: weekly(30, .atLeast), name: "office",
-                                    actualSeconds: 0, rangeStart: weekStart, rangeEnd: weekStart)
+                                    actualSeconds: 0, rangeStart: weekStart, rangeEnd: weekStart, calendar: cal)
         check(p.expectedSeconds == 0 && p.percent == 0, "a zero range is inert, not NaN")
     }
 }
