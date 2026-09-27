@@ -36,6 +36,14 @@ struct SettingsPanel: View {
             )
 
             stepperRow(
+                title: "Ignore pauses ≤",
+                value: settings.microPauseLabel,
+                caption: "a pause this short doesn't break a block — or your break counter",
+                onDec: { settings.microPauseSeconds = settings.steppedMicroPause(by: -1) },
+                onInc: { settings.microPauseSeconds = settings.steppedMicroPause(by: 1) }
+            )
+
+            stepperRow(
                 title: "Quiet after",
                 value: settings.dormantAfterDays == 0 ? "Off" : "\(settings.dormantAfterDays)d",
                 caption: "tasks untouched this long are marked quiet, not done",

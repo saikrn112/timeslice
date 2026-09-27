@@ -290,7 +290,12 @@ struct MetricsView: View {
         return HStack(spacing: 12) {
             goalTile
             tile("Focus", value: percent(s?.focusRatio ?? 0),
-                 caption: "≥\(settings.deepBlockMinutes)m blocks", tint: .purple)
+                 // The tolerance is named here because it changes the number on the card, and a
+                 // threshold you can't see is one you can't reason about. Kept to ONE line: a second
+                 // line makes this tile taller than its neighbours and the whole row goes ragged.
+                 caption: settings.microPauseSeconds > 0
+                    ? "≥\(settings.deepBlockMinutes)m · \(settings.microPauseLabel) slack"
+                    : "≥\(settings.deepBlockMinutes)m blocks", tint: .purple)
             if isDay {
                 tile("Switches", value: "\(s?.switches ?? 0)", caption: "this day", tint: .orange)
                 tile("Longest", value: Format.compact(s?.longestSessionSeconds ?? 0),
@@ -1256,7 +1261,7 @@ struct MetricsView: View {
         let mine = rangeIntervals.filter { ids.contains($0.projectID) }
         guard !mine.isEmpty else { return [:] }
         let bucketed = Aggregations.buckets(intervals: mine, range: range,
-                                           deepThreshold: settings.deepBlockSeconds)
+                                           focus: settings.focusRule)
         return Dictionary(bucketed.map { ($0.start, $0.totalSeconds) },
                           uniquingKeysWith: { a, b in a + b })
     }
@@ -2325,10 +2330,10 @@ struct MetricsView: View {
 
         summary = Aggregations.summary(
             intervals: all, range: range,
-            deepThreshold: settings.deepBlockSeconds,
+            focus: settings.focusRule,
         )
         buckets = Aggregations.buckets(
-            intervals: all, range: range, deepThreshold: settings.deepBlockSeconds
+            intervals: all, range: range, focus: settings.focusRule
         )
         rankedTotals = Aggregations.totals(projects: allProjects, intervals: all, range: range)
             .filter { $0.seconds > 0 }

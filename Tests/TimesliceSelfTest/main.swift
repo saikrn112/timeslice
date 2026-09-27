@@ -164,7 +164,7 @@ func testAggregations() {
             // 8 days ago — outside a 3-day window.
             Interval(id: 3, projectID: 1, start: date(2026, 3, 2, 9, 0), end: date(2026, 3, 2, 10, 0)),
         ]
-        let stats = Aggregations.dayStats(intervals: ivs, days: 3, deepThreshold: 25 * 60, now: now, calendar: cal)
+        let stats = Aggregations.dayStats(intervals: ivs, days: 3, focus: .strict(deepSeconds: 25 * 60), now: now, calendar: cal)
         check(stats.count == 3, "dayStats returns one entry per day in the window")
         let today = stats.first { cal.isDate($0.day, inSameDayAs: now) }
         check(approx(today?.totalSeconds ?? -1, 35 * 60), "today total = 35m")
@@ -878,7 +878,7 @@ func testOverlapSafety() {
     ]
 
     do { // summary: wall-clock is 9→12 = 3h, NOT 2h + 2h = 4h
-        let s = Aggregations.summary(intervals: ivs, range: r, deepThreshold: 25 * 60,
+        let s = Aggregations.summary(intervals: ivs, range: r, focus: .strict(deepSeconds: 25 * 60),
                                      now: date(2026, 3, 10, 23, 0), calendar: cal)
         check(approx(s.totalSeconds, 3 * 3600), "summary unions overlap: 3h, not 4h")
         check(approx(s.bestDaySeconds, 3 * 3600), "best day also unioned")
@@ -887,7 +887,7 @@ func testOverlapSafety() {
     }
 
     do { // the union must not inflate a day past what was actually worked
-        let s = Aggregations.summary(intervals: ivs, range: r, deepThreshold: 25 * 60,
+        let s = Aggregations.summary(intervals: ivs, range: r, focus: .strict(deepSeconds: 25 * 60),
                                      now: date(2026, 3, 10, 23, 0), calendar: cal)
         check(approx(s.totalSeconds, 3 * 3600),
               "two overlapping 2h blocks are 3h of wall clock, not 4h")
@@ -895,7 +895,7 @@ func testOverlapSafety() {
     }
 
     do { // buckets: the bar height is wall-clock too
-        let b = Aggregations.buckets(intervals: ivs, range: r, deepThreshold: 25 * 60,
+        let b = Aggregations.buckets(intervals: ivs, range: r, focus: .strict(deepSeconds: 25 * 60),
                                      now: date(2026, 3, 10, 23, 0), calendar: cal)
         let onDay = b.first { cal.isDate($0.start, inSameDayAs: day) }
         check(onDay != nil, "found the day's bucket")
@@ -918,7 +918,7 @@ func testOverlapSafety() {
             Interval(id: 1, projectID: 1, start: date(2026, 3, 10, 9, 0), end: date(2026, 3, 10, 12, 0)),
             Interval(id: 2, projectID: 2, start: date(2026, 3, 10, 10, 0), end: date(2026, 3, 10, 11, 0)),
         ]
-        let s = Aggregations.summary(intervals: nested, range: r, deepThreshold: 25 * 60,
+        let s = Aggregations.summary(intervals: nested, range: r, focus: .strict(deepSeconds: 25 * 60),
                                      now: date(2026, 3, 10, 23, 0), calendar: cal)
         check(approx(s.totalSeconds, 3 * 3600), "enclosed span doesn't inflate the day")
     }
@@ -3773,7 +3773,7 @@ func testDeepBlockBoundary() {
         let range = DateRange(unit: .day, start: cal.startOfDay(for: day),
                              end: cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: day))!)
         let summary = Aggregations.summary(intervals: try! store.intervals(), range: range,
-                                           deepThreshold: 1800)
+                                           focus: .strict(deepSeconds: 1800))
         check(approx(summary.deepSeconds, 1799.999716 + 2400, 0.01),
               "both blocks count towards focused time, not just the one that cleared 1800 exactly")
         check(approx(summary.focusRatio, 1, 0.001),
@@ -4155,7 +4155,7 @@ func testSharedSettings() {
               "so nothing accumulates rows that nothing reads")
         check(IntervalStore.syncedSettingKeys.sorted()
                 == ["autoPauseMinutes", "deepBlockMinutes", "highlightDimPercent",
-                    "idleNudgeMinutes", "promptsEnabled", "wakingHours"],
+                    "idleNudgeMinutes", "microPauseSeconds", "promptsEnabled", "wakingHours"],
               "everything that changes what's recorded or what a number MEANS is shared")
         for local in ["syncFolderPath", "syncMode", "googleClientID", "deviceLabel"] {
             check(!IntervalStore.syncedSettingKeys.contains(local),
@@ -4860,6 +4860,72 @@ func testWorkRuns() {
         check(approx(WorkRuns.workedSeconds(ivs, gap: 60, perTask: true, since: midInterval, now: now),
                      5 * m, 0.001),
               "a floor inside an interval counts only that interval's tail")
+    }
+}
+
+func testBlendedAggregations() {
+    print("Blended focus:")
+
+    let day = date(2026, 8, 3, 0, 0)
+    let range = DateRange(unit: .day, start: day,
+                          end: cal.date(byAdding: .day, value: 1, to: day)!)
+    func iv(_ id: Int64, _ task: Int64, from: Double, to: Double) -> Interval {
+        Interval(id: id, projectID: task,
+                 start: day.addingTimeInterval(9 * 3600 + from),
+                 end: day.addingTimeInterval(9 * 3600 + to))
+    }
+    let m = 60.0
+    // 15m, one second off, 15m. Half an hour of work at the desk.
+    let split = [iv(1, 1, from: 0, to: 15 * m), iv(2, 1, from: 15 * m + 1, to: 30 * m + 1)]
+    let strict = FocusRule.strict(deepSeconds: 25 * m)
+    let blended = FocusRule(deepSeconds: 25 * m, blendSeconds: 60)
+
+    do { // summary
+        let a = Aggregations.summary(intervals: split, range: range, focus: strict, calendar: cal)
+        let b = Aggregations.summary(intervals: split, range: range, focus: blended, calendar: cal)
+        check(approx(a.totalSeconds, b.totalSeconds, 0.001),
+              "blending changes no tracked time at all — that is the whole constraint")
+        check(approx(a.totalSeconds, 30 * m, 0.001), "and the 1s gap is not tracked either")
+        check(a.deepSeconds == 0, "unblended, neither 15m half reaches a 25m block")
+        check(approx(b.deepSeconds, 30 * m, 0.001), "blended, the whole half hour is focused")
+        check(approx(a.longestSessionSeconds, 15 * m, 0.001),
+              "unblended, the longest session is one half")
+        check(approx(b.longestSessionSeconds, 30 * m, 0.001),
+              "blended, it is the session you actually experienced")
+    }
+
+    do { // the other four aggregations have to agree with summary, or the page contradicts itself
+        let stats = Aggregations.dayStats(intervals: split, days: 1, focus: blended,
+                                          now: day.addingTimeInterval(23 * 3600), calendar: cal)
+        check(approx(stats[0].deepSeconds, 30 * m, 0.001), "dayStats blends")
+        let buckets = Aggregations.buckets(intervals: split, range: range, focus: blended,
+                                           calendar: cal)
+        check(approx(buckets.reduce(0) { $0 + $1.deepSeconds }, 30 * m, 0.001), "buckets blend")
+        let windows = Aggregations.windowTotals(intervals: split, windows: [range], focus: blended,
+                                                calendar: cal)
+        check(approx(windows[0].deep, 30 * m, 0.001), "windowTotals blends")
+        let month = Aggregations.monthStats(intervals: split, month: day, focus: blended,
+                                            calendar: cal)
+        check(approx(month.first { approx($0.deepSeconds, 30 * m, 0.001) }?.deepSeconds ?? 0,
+                     30 * m, 0.001), "monthStats blends")
+    }
+
+    do { // a gap filled by OTHER work is bridged exactly like an idle one
+        // 30 seconds answering a message, tracked as its own task, does not destroy a half-hour block:
+        // the tolerance is about how long an interruption lasted, not what you did during it.
+        let brief = [iv(1, 1, from: 0, to: 15 * m), iv(2, 2, from: 15 * m, to: 15 * m + 30),
+                     iv(3, 1, from: 15 * m + 30, to: 30 * m + 30)]
+        let s = Aggregations.summary(intervals: brief, range: range, focus: blended, calendar: cal)
+        check(approx(s.deepSeconds, 30 * m, 0.001),
+              "a 30s excursion to another task is bridged, so task 1 keeps its 30m block")
+        check(approx(s.totalSeconds, 30 * m + 30, 0.001), "and all three intervals are still tracked")
+
+        // Over the tolerance it is a real interruption, whatever filled it.
+        let long = [iv(1, 1, from: 0, to: 15 * m), iv(2, 2, from: 15 * m, to: 20 * m),
+                    iv(3, 1, from: 20 * m, to: 35 * m)]
+        check(Aggregations.summary(intervals: long, range: range, focus: blended,
+                                   calendar: cal).deepSeconds == 0,
+              "5 minutes on another task is over the tolerance, so neither half is a block")
     }
 }
 
@@ -6296,12 +6362,12 @@ func testWindowTotals() throws {
     windows.reverse()
 
     let fast = Aggregations.windowTotals(intervals: intervals, windows: windows,
-                                         deepThreshold: deep, now: now)
+                                         focus: .strict(deepSeconds: deep), now: now)
     check(fast.count == windows.count, "one result per window, in order")
 
     for (i, window) in windows.enumerated() {
         let slow = Aggregations.summary(intervals: intervals, range: window,
-                                        deepThreshold: deep, now: now)
+                                        focus: .strict(deepSeconds: deep), now: now)
         check(approx(fast[i].total, slow.totalSeconds, 0.5),
               "window \(i) total matches summary (\(fast[i].total) vs \(slow.totalSeconds))")
         check(approx(fast[i].deep, slow.deepSeconds, 0.5),
@@ -6325,12 +6391,12 @@ func testWindowTotals() throws {
     // range spanning all of them.
     let whole = DateRange(unit: .day, start: windows[0].start, end: windows[windows.count - 1].end)
     let spanning = Aggregations.summary(intervals: intervals, range: whole,
-                                        deepThreshold: deep, now: now)
+                                        focus: .strict(deepSeconds: deep), now: now)
     check(approx(fast.reduce(0) { $0 + $1.total }, spanning.totalSeconds, 1),
           "the windows sum to the whole span's total — nothing dropped at a boundary")
 
     check(Aggregations.windowTotals(intervals: intervals, windows: [],
-                                    deepThreshold: deep, now: now).isEmpty,
+                                    focus: .strict(deepSeconds: deep), now: now).isEmpty,
           "no windows yields no results")
 }
 
@@ -6595,6 +6661,7 @@ do {
     try testTagSync()
     testTagTotals()
     testWorkRuns()
+    testBlendedAggregations()
     testTargetMath()
     testDailyPlan()
     testPlannerWeekFacts()

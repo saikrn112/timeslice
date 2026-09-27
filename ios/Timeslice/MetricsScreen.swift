@@ -1133,12 +1133,13 @@ struct MetricsScreen: View {
         let now = Date()
         earliest = try? store.earliestIntervalStart()
         let all = (try? store.intervals()) ?? []
-        // The threshold now comes from the SHARED settings, so Focus % agrees with the Mac.
-        let deep = model.settings.deepBlockSeconds
+        // The thresholds come from the SHARED settings, so Focus % agrees with the Mac — both the
+        // block length and the micro-pause tolerance that decides which pauses break a block.
+        let focus = model.settings.focusRule
 
         var d = MetricsData()
-        d.summary = Aggregations.summary(intervals: all, range: range, deepThreshold: deep, now: now)
-        d.buckets = Aggregations.buckets(intervals: all, range: range, deepThreshold: deep, now: now)
+        d.summary = Aggregations.summary(intervals: all, range: range, focus: focus, now: now)
+        d.buckets = Aggregations.buckets(intervals: all, range: range, focus: focus, now: now)
         // Anchored to the RANGE's day, not `now`, so the ‹ › stepper actually moves the timeline.
         // Overlap-only lanes: `assignLanes` gives each of three devices its own row even when their
         // blocks never overlap in time, which reads as concurrency that didn't happen and spends three
@@ -1261,7 +1262,7 @@ struct MetricsScreen: View {
         // in `Aggregations.windowTotals` — see there for why the per-card version was untenable.
         let ordered = Array(windows.reversed())
         let totals = Aggregations.windowTotals(intervals: inSpan, windows: ordered,
-                                               deepThreshold: deep, now: now)
+                                               focus: focus, now: now)
         var cards = zip(ordered, totals).map { window, t in
             PeriodCard(range: window, totalSeconds: t.total, deepSeconds: t.deep)
         }

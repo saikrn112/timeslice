@@ -276,7 +276,7 @@ public enum Aggregations {
     /// Bucket totals are the UNION of their spans: overlapping intervals would otherwise draw a
     /// bar taller than the time that actually elapsed, sailing past the goal line.
     public static func buckets(
-        intervals: [Interval], range: DateRange, deepThreshold: TimeInterval,
+        intervals: [Interval], range: DateRange, focus: FocusRule,
         now: Date = Date(), calendar: Calendar = .current
     ) -> [Bucket] {
         let component: Calendar.Component = range.unit.bucket == .hour ? .day : range.unit.bucket
@@ -292,10 +292,13 @@ public enum Aggregations {
         var spans: [Date: [(start: Date, end: Date)]] = [:]
         var deepSpans: [Date: [(start: Date, end: Date)]] = [:]
 
+        // Focus is a property of the RUN an interval belongs to, not of the interval alone: a
+        // one-second pause splits the row but not the work. Computed once for the whole set so
+        // the five functions doing this can't disagree about the same day.
+        let deepIDs = WorkRuns.deepIntervalIDs(intervals, focus: focus, now: now)
         for interval in intervals {
             let end = interval.end ?? now
-            let isDeep = isDeepBlock(duration: end.timeIntervalSince(interval.start),
-                                     threshold: deepThreshold)
+            let isDeep = deepIDs.contains(interval.id)
             // Split by day, then fold each day's slice into its bucket — keeps DST/midnight correct.
             forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
                 guard dayStart >= range.start && dayStart < range.end else { return }
@@ -341,7 +344,7 @@ public enum Aggregations {
     /// `windows` must be sorted ascending and non-overlapping — which is what stepping a `DateRange`
     /// produces. Returns one entry per window, in the same order, so callers can zip.
     public static func windowTotals(
-        intervals: [Interval], windows: [DateRange], deepThreshold: TimeInterval,
+        intervals: [Interval], windows: [DateRange], focus: FocusRule,
         now: Date = Date(), calendar: Calendar = .current
     ) -> [(total: TimeInterval, deep: TimeInterval)] {
         guard !windows.isEmpty else { return [] }
@@ -351,11 +354,11 @@ public enum Aggregations {
         let overallStart = starts[0]
         let overallEnd = windows[windows.count - 1].end
 
+        let deepIDs = WorkRuns.deepIntervalIDs(intervals, focus: focus, now: now)
         for interval in intervals {
             let end = interval.end ?? now
             guard end > overallStart, interval.start < overallEnd else { continue }
-            let isDeep = isDeepBlock(duration: end.timeIntervalSince(interval.start),
-                                     threshold: deepThreshold)
+            let isDeep = deepIDs.contains(interval.id)
             forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
                 guard segEnd > segStart, dayStart >= overallStart, dayStart < overallEnd else { return }
                 // Rightmost window whose start is <= this day. Binary search rather than a linear scan:
@@ -379,7 +382,7 @@ public enum Aggregations {
     }
 
     public static func summary(
-        intervals: [Interval], range: DateRange, deepThreshold: TimeInterval,
+        intervals: [Interval], range: DateRange, focus: FocusRule,
         now: Date = Date(), calendar: Calendar = .current
     ) -> RangeSummary {
         // Collect each day's spans first, then union them per day.
@@ -387,20 +390,27 @@ public enum Aggregations {
         var deepSpansByDay: [Date: [(start: Date, end: Date)]] = [:]
         var longest: TimeInterval = 0
 
+        let deepIDs = WorkRuns.deepIntervalIDs(intervals, focus: focus, now: now)
         for interval in intervals {
             let end = interval.end ?? now
-            let full = end.timeIntervalSince(interval.start)
-            let isDeep = isDeepBlock(duration: full, threshold: deepThreshold)
-            var withinRange: TimeInterval = 0
+            let isDeep = deepIDs.contains(interval.id)
             forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
                 guard dayStart >= range.start && dayStart < range.end else { return }
                 guard segEnd > segStart else { return }
                 spansByDay[dayStart, default: []].append((segStart, segEnd))
                 if isDeep { deepSpansByDay[dayStart, default: []].append((segStart, segEnd)) }
-                withinRange += segEnd.timeIntervalSince(segStart)
             }
-            guard withinRange > 0 else { continue }
-            longest = max(longest, min(full, withinRange))
+        }
+
+        // "Longest session" means the longest session you EXPERIENCED, so it's the longest run rather
+        // than the longest row: a two-hour stretch broken by one glance at a message used to report as
+        // whichever half was bigger. Clipped to the range, and clipped to the run's own work so the
+        // bridged pauses can't inflate it.
+        for run in WorkRuns.runs(intervals, gap: focus.blendSeconds, perTask: true, now: now) {
+            let inRange = clip(Interval(id: 0, projectID: 0, start: run.start, end: run.end),
+                               windowStart: range.start, windowEnd: range.end, now: now)
+            guard inRange > 0 else { continue }
+            longest = max(longest, min(run.workSeconds, inRange))
         }
 
         let perDay = spansByDay.mapValues { SpanUnion.coveredSeconds($0) }
@@ -455,7 +465,7 @@ public enum Aggregations {
     public static func dayStats(
         intervals: [Interval],
         days: Int,
-        deepThreshold: TimeInterval,
+        focus: FocusRule,
         now: Date = Date(),
         calendar: Calendar = .current
     ) -> [DayStat] {
@@ -470,10 +480,10 @@ public enum Aggregations {
         }
         let windowStart = calendar.date(byAdding: .day, value: -(max(1, days) - 1), to: today) ?? today
 
+        let deepIDs = WorkRuns.deepIntervalIDs(intervals, focus: focus, now: now)
         for interval in intervals {
             let end = interval.end ?? now
-            let isDeep = isDeepBlock(duration: end.timeIntervalSince(interval.start),
-                                     threshold: deepThreshold)
+            let isDeep = deepIDs.contains(interval.id)
             forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
                 guard dayStart >= windowStart else { return }
                 let seconds = segEnd.timeIntervalSince(segStart)
@@ -657,7 +667,7 @@ public enum Aggregations {
     public static func monthStats(
         intervals: [Interval],
         month: Date,
-        deepThreshold: TimeInterval,
+        focus: FocusRule,
         now: Date = Date(),
         calendar: Calendar = .current
     ) -> [DayStat] {
@@ -674,10 +684,10 @@ public enum Aggregations {
         }
         guard let monthEnd = calendar.date(byAdding: .month, value: 1, to: monthStart) else { return [] }
 
+        let deepIDs = WorkRuns.deepIntervalIDs(intervals, focus: focus, now: now)
         for interval in intervals {
             let end = interval.end ?? now
-            let isDeep = isDeepBlock(duration: end.timeIntervalSince(interval.start),
-                                     threshold: deepThreshold)
+            let isDeep = deepIDs.contains(interval.id)
             forEachLocalDaySegment(start: interval.start, end: end, calendar: calendar) { dayStart, segStart, segEnd in
                 guard dayStart >= monthStart && dayStart < monthEnd else { return }
                 let seconds = segEnd.timeIntervalSince(segStart)

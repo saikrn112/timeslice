@@ -68,6 +68,12 @@ public enum WorkRuns {
     ///  • `false` — the break counter. Switching from A to B with no pause is continuous work and has
     ///    to keep accruing, or 5m on A + 10m on B + 10m on A + 5m on C counts as nothing.
     ///
+    /// A gap is bridged whatever filled it. Thirty seconds answering a message, tracked as its own
+    /// task, does not destroy task A's half-hour block: the tolerance measures how long an interruption
+    /// lasted, not what you did during it. So a per-task run can span another task's interval, and two
+    /// runs can overlap in time — which is safe because focus is unioned per day before it becomes a
+    /// percentage.
+    ///
     /// An open interval (`end == nil`) is measured to `now`, the same convention the rest of
     /// `Aggregations` uses.
     public static func runs(_ intervals: [Interval], gap: TimeInterval, perTask: Bool,

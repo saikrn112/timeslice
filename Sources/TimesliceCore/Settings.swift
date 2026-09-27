@@ -46,6 +46,49 @@ public final class AppSettings: ObservableObject {
         }
     }
 
+    /// A pause this short doesn't break a stretch of work.
+    ///
+    /// Pausing for a second correctly ends an interval — that row is a recorded fact. But nothing a
+    /// person would call a break happened, and treating the gap as a wall credited 15m + a one-second
+    /// pause + 15m with no focused time at all. 602 of the same-task gaps in this database are under a
+    /// minute; bridging them moved 56 days of focus from 52.3% to 61.2% without changing a tracked hour.
+    ///
+    /// SYNCED, for the same reason as `deepBlockMinutes` written above: it changes what "focused"
+    /// means, so two devices holding different values stop being comparable about the same day.
+    @Published public var microPauseSeconds: Int {
+        didSet {
+            defaults.set(microPauseSeconds, forKey: Keys.microPauseSeconds)
+            publishSynced(Keys.microPauseSeconds, String(microPauseSeconds))
+        }
+    }
+
+    /// The values the micro-pause stepper walks. Not a linear step: the interesting range is the
+    /// bottom — 602 of this database's same-task gaps are under a minute — so seconds need as much
+    /// resolution as minutes, and a 5-second step would take sixty presses to reach the 5-minute
+    /// ceiling. Shared so the phone offers the same choices.
+    public static let microPauseLadder = [0, 5, 10, 15, 30, 60, 120, 180, 300]
+
+    /// Label for the current tolerance: "Off", "30s", "2m".
+    public var microPauseLabel: String {
+        switch microPauseSeconds {
+        case 0: return "Off"
+        case ..<60: return "\(microPauseSeconds)s"
+        default: return "\(microPauseSeconds / 60)m"
+        }
+    }
+
+    public func steppedMicroPause(by delta: Int) -> Int {
+        let ladder = Self.microPauseLadder
+        let i = ladder.firstIndex(of: microPauseSeconds) ?? ladder.firstIndex { $0 >= microPauseSeconds } ?? 0
+        return ladder[min(ladder.count - 1, max(0, i + delta))]
+    }
+
+    /// The tolerances the aggregations need, as one value. They always travel together, and a call site
+    /// that passed the threshold but forgot the tolerance would silently compute the old answer.
+    public var focusRule: FocusRule {
+        FocusRule(deepSeconds: deepBlockSeconds, blendSeconds: TimeInterval(microPauseSeconds))
+    }
+
     /// Daily target hours (goal line on the daily-hours chart).
     /// Prompt "still working?" after a session has run this long (0 = off).
     ///
@@ -174,6 +217,13 @@ public final class AppSettings: ObservableObject {
     public init() {
         dormantAfterDays = defaults.object(forKey: Keys.dormantAfterDays) as? Int ?? 30
         deepBlockMinutes = defaults.object(forKey: Keys.deepBlockMinutes) as? Int ?? 25
+        // A capture run can render the page at another tolerance without touching your settings, the
+        // same affordance `TIMESLICE_WAKING_HOURS` gives the Planner.
+        if let raw = ProcessInfo.processInfo.environment["TIMESLICE_MICRO_PAUSE"], let v = Int(raw), v >= 0 {
+            microPauseSeconds = v
+        } else {
+            microPauseSeconds = defaults.object(forKey: Keys.microPauseSeconds) as? Int ?? 60
+        }
         autoPauseMinutes = defaults.object(forKey: Keys.autoPauseMinutes) as? Int ?? 60
         idleNudgeMinutes = defaults.object(forKey: Keys.idleNudgeMinutes) as? Int ?? 15
         promptsEnabled = defaults.object(forKey: Keys.promptsEnabled) as? Bool ?? true
@@ -228,6 +278,7 @@ public final class AppSettings: ObservableObject {
          (Keys.idleNudgeMinutes, String(idleNudgeMinutes)),
          (Keys.promptsEnabled, promptsEnabled ? "1" : "0"),
          (Keys.deepBlockMinutes, String(deepBlockMinutes)),
+         (Keys.microPauseSeconds, String(microPauseSeconds)),
          (Keys.dormantAfterDays, String(dormantAfterDays)),
          (Keys.wakingHours, String(wakingHours)),
          (Keys.highlightDimPercent, String(highlightDimPercent))]
@@ -259,6 +310,12 @@ public final class AppSettings: ObservableObject {
            let n = Int(row.value), n != deepBlockMinutes {
             deepBlockMinutes = n
         }
+        // The capture override wins, or `MICROPAUSE=0 scripts/shot.sh` would render your real setting.
+        if ProcessInfo.processInfo.environment["TIMESLICE_MICRO_PAUSE"] == nil,
+           let row = (try? store.settingValue(Keys.microPauseSeconds)) ?? nil,
+           let n = Int(row.value), n != microPauseSeconds {
+            microPauseSeconds = n
+        }
         // The capture override wins over the stored value: adopting from the database put the real 14h
         // straight back, so `WAKING=5 scripts/shot.sh` silently rendered the ordinary page.
         if let row = (try? store.settingValue(Keys.dormantAfterDays)) ?? nil,
@@ -278,6 +335,7 @@ public final class AppSettings: ObservableObject {
 
     private enum Keys {
         static let deepBlockMinutes = "deepBlockMinutes"
+        static let microPauseSeconds = "microPauseSeconds"
         static let dormantAfterDays = "dormantAfterDays"
         static let autoPauseMinutes = "autoPauseMinutes"
         static let idleNudgeMinutes = "idleNudgeMinutes"

@@ -53,6 +53,7 @@ env "${EXTRA[@]+"${EXTRA[@]}"}" \
   TIMESLICE_OPEN_CUSTOM="${CUSTOM:-}" \
   TIMESLICE_SELECT="${SELECT:-}" \
   TIMESLICE_UNIT="${UNIT:-}" \
+  TIMESLICE_MICRO_PAUSE="${MICROPAUSE:-}" \
   TIMESLICE_OPEN_WINDOW=1 TIMESLICE_DB_PATH="$SHOT_DB" TIMESLICE_SANDBOX_ROLE=shot \
   ./.build/debug/TimesliceApp >/tmp/shot-app.log 2>&1 &
 APP_PID=$!

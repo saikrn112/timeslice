@@ -2294,6 +2294,8 @@ public final class IntervalStore {
         // recorded day — the metric stops being comparable across devices, which is worse than it
         // being set to a value you'd not have picked.
         "deepBlockMinutes",
+        // Same argument, one level down: it decides which pauses count as breaking a block at all.
+        "microPauseSeconds",
         // The denominator of "Tracked": 4h of a 16h day and 4h of a 12h day are different claims.
         "wakingHours",
         // Cosmetic, and included anyway. It's a rendering preference rather than a fact about the
