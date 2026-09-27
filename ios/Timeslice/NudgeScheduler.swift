@@ -10,9 +10,13 @@ import UserNotifications
 /// timer, not us. Which nudge to arm, and when, still comes from `NudgePolicy` in Core, so the two
 /// platforms make the same decision and only the delivery differs.
 ///
-/// Two nudges, in opposite directions:
+/// Two nudges, in opposite directions, plus the break reminder:
 ///  • **still working?** — a session has run past the threshold; you probably forgot to pause.
 ///  • **still paused?** — a task has sat paused; real work is going unrecorded.
+///  • **break** — work has accumulated across tasks without a rest. The phone deliberately has no
+///    "still working?" nudge (see `rearm`), so this is its only poke about the LENGTH of a stretch —
+///    and the one that matters on a phone, where nothing is being over-recorded, you are just not
+///    stopping.
 ///
 /// Notification *actions* are attached so answering needs no app launch: "Still on it" dismisses,
 /// "Pause" stops the timer from the banner.
@@ -33,13 +37,17 @@ final class NudgeScheduler: NSObject {
     private enum ID {
         static let session = "timeslice.nudge.session"
         static let paused = "timeslice.nudge.paused"
+        static let brk = "timeslice.nudge.break"
         static let category = "timeslice.nudge"
+        static let breakCategory = "timeslice.nudge.breakcat"
     }
 
     private enum Action {
         static let stillOnIt = "timeslice.action.stillOnIt"
         static let pause = "timeslice.action.pause"
         static let resume = "timeslice.action.resume"
+        static let takeBreak = "timeslice.action.takeBreak"
+        static let keepGoing = "timeslice.action.keepGoing"
     }
 
     private let center = UNUserNotificationCenter.current()
@@ -62,7 +70,16 @@ final class NudgeScheduler: NSObject {
                 UNNotificationAction(identifier: Action.resume, title: "Resume", options: []),
             ],
             intentIdentifiers: [])
-        center.setNotificationCategories([category])
+        // Its own category: the break banner offers "Take a break" and "Keep going", and reusing the
+        // other one would put Resume on a notification about a timer that is running.
+        let breakCategory = UNNotificationCategory(
+            identifier: ID.breakCategory,
+            actions: [
+                UNNotificationAction(identifier: Action.takeBreak, title: "Take a break", options: []),
+                UNNotificationAction(identifier: Action.keepGoing, title: "Keep going", options: []),
+            ],
+            intentIdentifiers: [])
+        center.setNotificationCategories([category, breakCategory])
     }
 
     private var hasRequestedAuthorization = false
@@ -85,8 +102,9 @@ final class NudgeScheduler: NSObject {
 
     /// Re-arm from the current timer state. Safe to call after every mutation — it cancels first, so
     /// a switch can't leave a nudge armed against the task you left.
-    func rearm(runningSince: Date?, pausedSince: Date?, taskName: String?) {
-        center.removePendingNotificationRequests(withIdentifiers: [ID.session, ID.paused])
+    func rearm(runningSince: Date?, pausedSince: Date?, taskName: String?,
+               workedSinceBreak: TimeInterval = 0) {
+        center.removePendingNotificationRequests(withIdentifiers: [ID.session, ID.paused, ID.brk])
 
         let isRunning = runningSince != nil
         // `awaitingAnswer` is always false here: on the Mac it stops the paused nudge stacking on an
@@ -110,6 +128,23 @@ final class NudgeScheduler: NSObject {
         // `NudgePolicy` is shared and still arms both.
         _ = runningSince
 
+        // Scheduled off work ALREADY done, so the banner lands when the accumulated stretch reaches the
+        // threshold rather than a full interval later. A phone suspends, so the system has to hold the
+        // timer — which means the delay is computed once here and not re-derived as you work; switching
+        // tasks calls `rearm` again, which is what keeps it honest.
+        let breakConfig = TimerModel.shared.settings.breakConfig
+        if breakConfig.enabled, isRunning {
+            requestAuthorizationIfNeeded()
+            let rest = breakConfig.restMinutes
+            schedule(id: ID.brk,
+                     // The THRESHOLD, not the count so far: this banner is written now and delivered
+                     // when the count reaches it, so "15m without a break" would arrive 30 minutes in.
+                     title: "\(breakConfig.everyMinutes)m without a break",
+                     body: "Pause for \(rest)m, or keep going?",
+                     after: BreakPolicy.delay(breakConfig, workedSeconds: workedSinceBreak),
+                     category: ID.breakCategory)
+        }
+
         if NudgePolicy.armsPausedNudge(config, isPaused: isPaused, awaitingAnswer: false),
            let since = pausedSince {
             requestAuthorizationIfNeeded()
@@ -121,14 +156,15 @@ final class NudgeScheduler: NSObject {
     }
 
     func cancelAll() {
-        center.removePendingNotificationRequests(withIdentifiers: [ID.session, ID.paused])
+        center.removePendingNotificationRequests(withIdentifiers: [ID.session, ID.paused, ID.brk])
     }
 
-    private func schedule(id: String, title: String, body: String, after delay: TimeInterval) {
+    private func schedule(id: String, title: String, body: String, after delay: TimeInterval,
+                          category: String = ID.category) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.categoryIdentifier = ID.category
+        content.categoryIdentifier = category
         content.sound = .default
         // `delay` is clamped to >= 1 by NudgePolicy, which matters: a trigger of 0 throws.
         let request = UNNotificationRequest(
@@ -178,6 +214,11 @@ extension NudgeScheduler: UNUserNotificationCenterDelegate {
             if let id = model.running?.projectID { model.toggle(taskID: id) }
         case Action.resume:
             if let id = model.currentTaskID, !model.isRunning { model.toggle(taskID: id) }
+        case Action.takeBreak:
+            if let id = model.running?.projectID { model.toggle(taskID: id) }
+        case Action.keepGoing:
+            // Re-arms from the work done since, so declining buys the snooze rather than silence.
+            model.rearmNudges()
         case Action.stillOnIt:
             // Answering "yes" re-arms the same nudge, so a long session keeps checking in rather
             // than going quiet after one dismissal.

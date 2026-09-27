@@ -302,6 +302,33 @@ migrations correct in a way hand-written SQL would not.
 - **Read Apple's docs early.** The reference pages are JS-rendered; fetch
   `https://developer.apple.com/tutorials/data/documentation/<path>.json` instead.
 
+## Counters: focus, "still working?", the break reminder
+
+All three read the same interval rows through `WorkRuns` (Core), which groups intervals into **runs**
+— chains with no gap longer than a tolerance. Read
+`~/workspace/persona/Notes/Projects/timeslice/artifacts/fuzzy_focus.md` before changing any of them;
+it carries the scenario table and the reason each clock is floored at the moment you last answered
+(without that floor, answering "Keep going" re-prompts forever, because the checkpoint's own pause is
+bridged and the run start reverts).
+
+Two traps that cost real time here:
+
+- **`NSPanel` hides itself whenever the app is inactive** (`hidesOnDeactivate` defaults to true). A
+  prompt that deliberately never activates the app — the break reminder — is therefore never visible.
+  It presents correctly and logs correctly and cannot be seen.
+- **`screencapture -l <windowID>` cannot see a floating panel.** Use `SCREEN=1 scripts/shot.sh` for
+  anything that isn't inside the main window, and `TIMESLICE_SEED_DEMO=1` so `PromptPanel` stops
+  excluding itself from capture.
+
+## Two build traps
+
+- **`swift build` never compiles `ios/`.** It is an Xcode shell around the same package, so a Core
+  signature change can compile clean and break the phone. Run the xcodebuild line in `ios/README.md`
+  after touching anything in `TimesliceCore`.
+- **`find DerivedData -name Timeslice.app | head -1` can pick another checkout's build.** With the
+  `feat/ios` worktree present there are two, and the stale one screenshots the previous UI. Always
+  build to an explicit `-derivedDataPath` and install from that path.
+
 ## Drive sync
 
 Two documents, both in the notes vault (that's where this project's docs live, not `docs/`):

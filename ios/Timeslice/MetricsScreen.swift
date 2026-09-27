@@ -1205,7 +1205,7 @@ struct MetricsScreen: View {
             d.strip = data.strip
         } else {
             d.strip = Perf.shared.measure(Perf.Path.stripBuild) {
-                buildStrip(intervals: all, deep: deep, now: now)
+                buildStrip(intervals: all, focus: focus, now: now)
             }
             stripUnit = range.unit
         }
@@ -1229,7 +1229,7 @@ struct MetricsScreen: View {
     /// existed. A fixed depth means you can scroll freely.
     private static let stripDepth = 60
 
-    private func buildStrip(intervals: [Interval], deep: TimeInterval, now: Date) -> [PeriodCard] {
+    private func buildStrip(intervals: [Interval], focus: FocusRule, now: Date) -> [PeriodCard] {
         guard range.unit != .all else { return [] }
         let present = DateRange.resolve(unit: range.unit, anchor: now, earliest: earliest)
 

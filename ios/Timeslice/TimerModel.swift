@@ -486,8 +486,20 @@ final class TimerModel: ObservableObject {
     func rearmNudges() {
         NudgeScheduler.shared.rearm(runningSince: running?.start,
                                     pausedSince: pausedSince,
-                                    taskName: currentTaskID.flatMap { task(id: $0)?.name })
+                                    taskName: currentTaskID.flatMap { task(id: $0)?.name },
+                                    workedSinceBreak: workedSinceBreak())
         NudgeScheduler.shared.logPending()
+    }
+
+    /// Work accumulated since the last rest, across all tasks and all devices.
+    ///
+    /// The same Core call the Mac makes, so the two agree about the same synced rows instead of each
+    /// keeping its own tally. Bridges gaps up to the rest length, not the micro-pause tolerance.
+    func workedSinceBreak() -> TimeInterval {
+        guard let store else { return 0 }
+        let config = settings.breakConfig
+        let recent = (try? store.intervals(from: Date().addingTimeInterval(-86_400))) ?? []
+        return WorkRuns.workedSeconds(recent, gap: config.restSeconds, perTask: false, since: nil)
     }
 
     // MARK: - Task CRUD (§3.8)
