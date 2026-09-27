@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import TimesliceCore
+import TimesliceUI
 
 /// Keeps the running timer honest against two "you're not actually working" cases:
 ///
@@ -25,6 +26,16 @@ final class AutoPauseController: ObservableObject {
     /// checkpoint fire after 10s (and shrink the grace window to match). Ignored when unset.
     private static let debugSeconds: TimeInterval? = {
         guard let raw = ProcessInfo.processInfo.environment["TIMESLICE_AUTOPAUSE_SECONDS"],
+              let v = Double(raw), v > 0 else { return nil }
+        return v
+    }()
+
+    /// Debug override: `TIMESLICE_BREAK_SECONDS=20` makes the break reminder due after 20 seconds of
+    /// work instead of half an hour, and `TIMESLICE_FORCE_BREAK=1` presents it once at launch — the
+    /// panel is the part that can't be unit-tested, and waiting thirty minutes to look at it is not a
+    /// dev loop.
+    private static let debugBreakSeconds: TimeInterval? = {
+        guard let raw = ProcessInfo.processInfo.environment["TIMESLICE_BREAK_SECONDS"],
               let v = Double(raw), v > 0 else { return nil }
         return v
     }()
@@ -181,6 +192,31 @@ final class AutoPauseController: ObservableObject {
 
     // MARK: - Long-session checkpoint
 
+    /// Where the current stretch of work began, bridging pauses shorter than the tolerance.
+    ///
+    /// `engine.runningSince` is the current INTERVAL's start, which a one-second pause resets — so
+    /// "still working?" restarted its hour every time you paused to read something. The run is what you
+    /// actually experienced.
+    ///
+    /// Floored at `checkpointAnsweredAt`, and that floor is load-bearing: the checkpoint pauses the
+    /// timer itself, so once that pause is bridged the run start reverts to the original start and the
+    /// clock is over threshold again on the very next tick. Without the floor, answering "Keep going"
+    /// re-prompts immediately, forever.
+    private func workClockStart() -> Date? {
+        guard let since = engine.runningSince else { return nil }
+        let gap = TimeInterval(settings.microPauseSeconds)
+        guard gap > 0 else { return since }
+        // A day's worth of rows is plenty to find the current run and keeps this off the critical path;
+        // a run longer than that has bigger problems than its prompt timing.
+        let recent = (try? appState.storeForEditing
+            .intervals(from: since.addingTimeInterval(-86_400))) ?? []
+        guard let run = WorkRuns.current(recent, gap: gap, perTask: true) else { return since }
+        return min(since, max(run.start, checkpointAnsweredAt ?? .distantPast))
+    }
+
+    /// When a "still working?" prompt was last answered. See `workClockStart`.
+    private var checkpointAnsweredAt: Date?
+
     private func rearmCheckpoint() {
         // Ignore the state change caused by the checkpoint pausing the timer itself — otherwise
         // it would immediately cancel the prompt we just showed.
@@ -194,7 +230,7 @@ final class AutoPauseController: ObservableObject {
         dismissPrompt()
 
         guard NudgePolicy.armsSessionNudge(settings.nudgeConfig, isRunning: engine.isRunning),
-              let since = engine.runningSince else { return }
+              let since = workClockStart() else { return }
         let delay = Self.debugSeconds
             ?? NudgePolicy.delay(since: since, threshold: settings.autoPauseSeconds)
         checkpointTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
@@ -208,10 +244,24 @@ final class AutoPauseController: ObservableObject {
         // Don't interrupt a prompt that's already waiting for an answer.
         guard !awaitingResponse, !promptShowing else { return }
 
+        // Debug hook, checked FIRST on purpose: whatever is in the database, a capture run needs the
+        // break panel and not whichever nudge happens to be overdue as well.
+        if ProcessInfo.processInfo.environment["TIMESLICE_FORCE_BREAK"] == "1", breakPanel == nil,
+           breakAnsweredAt == nil, breakSnoozedAt == nil {
+            promptBreak()
+            return
+        }
+
         if NudgePolicy.armsSessionNudge(settings.nudgeConfig, isRunning: engine.isRunning),
-           let since = engine.runningSince,
+           let since = workClockStart(),
            Date().timeIntervalSince(since) >= settings.autoPauseSeconds {
             checkpointReached()
+            return
+        }
+        if BreakPolicy.fires(breakConfig, workedSeconds: workedSinceBreak(),
+                             isRunning: engine.isRunning, awaitingOtherPrompt: awaitingResponse,
+                             promptShowing: promptShowing, offUntil: breakOffUntil) {
+            promptBreak()
             return
         }
         // The whole question, answered in Core so it's covered by tests: switched on, due, and not
@@ -244,6 +294,97 @@ final class AutoPauseController: ObservableObject {
     /// Set while the checkpoint itself pauses the timer, so the resulting state change doesn't
     /// bounce back into rearmCheckpoint and cancel the prompt.
     private var suppressRearm = false
+
+    // MARK: - Break reminder
+
+    /// Work accumulated since the last rest, across ALL tasks.
+    ///
+    /// Derived from the interval rows rather than counted in memory, which is what makes it survive a
+    /// restart, pick up the ten minutes the phone recorded once that syncs, and stay right when
+    /// intervals are corrected after the fact. The tolerance is the REST length, not the micro-pause
+    /// one: two minutes fetching water shouldn't wipe out half an hour of accrued work, and a genuine
+    /// ten-minute break should.
+    /// The break thresholds, with the debug override folded in.
+    private var breakConfig: BreakPolicy.Config {
+        let base = settings.breakConfig
+        guard let seconds = Self.debugBreakSeconds else { return base }
+        return .init(promptsEnabled: base.promptsEnabled,
+                     everyMinutes: max(1, Int(seconds / 60)), restMinutes: base.restMinutes)
+    }
+
+    /// Work accumulated since the last rest, for the popover to show BEFORE it interrupts you.
+    /// Reads the same function the prompt does, so the number and the nudge can't disagree.
+    var secondsSinceBreak: TimeInterval { workedSinceBreak() }
+
+    private func workedSinceBreak() -> TimeInterval {
+        let config = breakConfig
+        let recent = (try? appState.storeForEditing
+            .intervals(from: Date().addingTimeInterval(-86_400))) ?? []
+        // The later of the two floors: an answered prompt and a declined one both mean "don't count
+        // what came before".
+        let floor = [breakAnsweredAt, breakSnoozedAt].compactMap { $0 }.max()
+        return WorkRuns.workedSeconds(recent, gap: config.restSeconds, perTask: false,
+                                      since: floor)
+    }
+
+    /// Set when a break prompt is answered either way, and when one is declined. See `workedSinceBreak`.
+    private var breakAnsweredAt: Date?
+    private var breakSnoozedAt: Date?
+    /// "Not today" — silenced until this instant. Not the same as switching the feature off, which is a
+    /// setting you then have to remember to undo.
+    private var breakOffUntil: Date?
+    private var breakPanel: PromptPanel?
+    private var breakExpiryTimer: Timer?
+
+    private func promptBreak() {
+        let worked = workedSinceBreak()
+        let rest = settings.breakRestMinutes
+        breakPanel?.close()
+        // Quiet: no activation, no key window, top-right like a notification, and the timer keeps
+        // running. Unlike the checkpoint there is nothing to protect here — you ARE working — so
+        // interrupting the work to ask about resting it would defeat the question.
+        let panel = PromptPanel(
+            title: "\(Format.compact(worked)) without a break",
+            message: "Pause for \(rest)m, or keep going?",
+            primary: "Take a break",
+            secondary: "Keep going",
+            tertiary: "Not today",
+            quiet: true
+        ) { [weak self] choice in
+            guard let self else { return }
+            self.breakPanel = nil
+            self.breakExpiryTimer?.invalidate(); self.breakExpiryTimer = nil
+            switch choice {
+            case .primary:
+                self.breakAnsweredAt = Date()
+                self.engine.pause()
+                // The pause is yours, not the checkpoint's, so the "still paused?" nudge is the right
+                // thing to come back with — it will ask after `idleNudgeMinutes`, which is what you
+                // want at the end of a break.
+            case .secondary:
+                self.breakSnoozedAt = Date()
+            case .tertiary:
+                // Tomorrow, not "+24h": silencing it at 3pm shouldn't mean silence until 3pm tomorrow.
+                let cal = Calendar.current
+                self.breakOffUntil = cal.date(byAdding: .day, value: 1,
+                                              to: cal.startOfDay(for: Date()))
+                self.breakSnoozedAt = Date()
+            }
+        }
+        breakPanel = panel
+        panel.present()
+
+        // Unanswered is a decline, not a question left hanging. The checkpoint nags because ignoring it
+        // silently discards real time; this one has nothing at stake, so it gets out of the way.
+        breakExpiryTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.breakPanel != nil else { return }
+                self.breakPanel?.close()
+                self.breakPanel = nil
+                self.breakSnoozedAt = Date()
+            }
+        }
+    }
 
     // MARK: - Idle nudge (paused too long)
 
@@ -360,6 +501,9 @@ final class AutoPauseController: ObservableObject {
             self.awaitingResponse = false
             self.pendingPromptProjectID = nil
             self.nagTimer?.invalidate(); self.nagTimer = nil
+            // Recorded whichever way you answered: the question has been asked about this stretch of
+            // work, and the bridged pause must not let it be asked again a second later.
+            self.checkpointAnsweredAt = Date()
             if keepGoing, self.appState.selectableProjects.contains(where: { $0.id == projectID }) {
                 self.engine.switchTo(projectID: projectID)   // resume timing → re-arms checkpoint
             }

@@ -72,6 +72,24 @@ struct SettingsPanel: View {
             .disabled(!settings.promptsEnabled)
 
             stepperRow(
+                title: "Break after",
+                value: settings.breakEveryMinutes == 0 ? "Off" : "\(settings.breakEveryMinutes)m",
+                caption: "suggest a break after this much work, counted across all tasks",
+                onDec: { settings.breakEveryMinutes = max(0, settings.breakEveryMinutes - 15) },
+                onInc: { settings.breakEveryMinutes = min(240, settings.breakEveryMinutes + 15) }
+            )
+            .disabled(!settings.promptsEnabled)
+
+            stepperRow(
+                title: "A break is",
+                value: "\(settings.breakRestMinutes)m",
+                caption: "time away this long resets the counter; shorter doesn't",
+                onDec: { settings.breakRestMinutes = max(1, settings.breakRestMinutes - 5) },
+                onInc: { settings.breakRestMinutes = min(60, settings.breakRestMinutes + 5) }
+            )
+            .disabled(!settings.promptsEnabled || settings.breakEveryMinutes == 0)
+
+            stepperRow(
                 title: "Still paused?",
                 value: settings.idleNudgeMinutes == 0 ? "Off" : "\(settings.idleNudgeMinutes)m",
                 caption: "ask after a task sits paused this long, in case you forgot to resume",

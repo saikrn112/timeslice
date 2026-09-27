@@ -7,6 +7,11 @@ import TimesliceCore
 struct QuickPanelView: View {
     @ObservedObject var appState: AppState
     @ObservedObject var engine: TimerEngine
+    @ObservedObject var autoPause: AutoPauseController
+
+    /// Read on appear, not per render: it queries the store, and the popover is transient so a value
+    /// read when it opens is never stale by more than the time it's on screen.
+    @State private var sinceBreak: TimeInterval = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -21,7 +26,10 @@ struct QuickPanelView: View {
             footer
         }
         .frame(width: 320)
-        .onAppear { appState.reload() }
+        .onAppear {
+            appState.reload()
+            sinceBreak = autoPause.secondsSinceBreak
+        }
         // Key handling (↑/↓/space/esc) is done by StatusBarController's local NSEvent monitor
         // while the popover is shown — more reliable than SwiftUI .onKeyPress in a popover.
     }
@@ -76,7 +84,13 @@ struct QuickPanelView: View {
 
     private var footer: some View {
         HStack {
-            Text("↑↓ select · space start/stop").font(.caption).foregroundStyle(.tertiary)
+            // The break counter takes the hint's slot once it's worth saying, rather than adding a
+            // line: an appearing row changes the popover's height, which is the thing notes 66 and 78
+            // are about. Under twenty minutes there is nothing to report and the hint is more useful.
+            Text(sinceBreak >= 20 * 60
+                 ? "\(Format.compact(sinceBreak)) since a break"
+                 : "↑↓ select · space start/stop")
+                .font(.caption).foregroundStyle(.tertiary)
             Spacer()
             Button("Open") { NotificationCenter.default.post(name: .openMainWindow, object: nil) }
                 .buttonStyle(.link)

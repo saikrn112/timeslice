@@ -54,6 +54,8 @@ env "${EXTRA[@]+"${EXTRA[@]}"}" \
   TIMESLICE_SELECT="${SELECT:-}" \
   TIMESLICE_UNIT="${UNIT:-}" \
   TIMESLICE_MICRO_PAUSE="${MICROPAUSE:-}" \
+  TIMESLICE_BREAK_SECONDS="${BREAK:-}" \
+  TIMESLICE_FORCE_BREAK="${FORCE_BREAK:-}" \
   TIMESLICE_OPEN_WINDOW=1 TIMESLICE_DB_PATH="$SHOT_DB" TIMESLICE_SANDBOX_ROLE=shot \
   ./.build/debug/TimesliceApp >/tmp/shot-app.log 2>&1 &
 APP_PID=$!
@@ -81,5 +83,13 @@ if [ -n "${HOVER:-}" ]; then
   sleep 2.2                    # macOS tooltip delay is about 1.5s
 fi
 rm -f "$OUT"
-screencapture -x -o -l "$ID" "$OUT"
+# SCREEN=1 captures the whole display instead of the window. Needed for anything that isn't IN the main
+# window — the break reminder is a floating panel, so `-l <windowID>` returns a screenshot without it.
+# PromptPanel also excludes itself from capture unless TIMESLICE_SEED_DEMO=1, which the caller must set.
+if [ -n "${SCREEN:-}" ]; then
+  sleep 2
+  screencapture -x -o "$OUT"
+else
+  screencapture -x -o -l "$ID" "$OUT"
+fi
 echo "$OUT"

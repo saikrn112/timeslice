@@ -103,7 +103,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private func configurePopover() {
         popover.behavior = .transient
         popover.delegate = self
-        let content = QuickPanelView(appState: appState, engine: engine)
+        let content = QuickPanelView(appState: appState, engine: engine, autoPause: autoPause)
         popover.contentViewController = NSHostingController(rootView: content)
     }
 

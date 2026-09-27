@@ -2296,6 +2296,9 @@ public final class IntervalStore {
         "deepBlockMinutes",
         // Same argument, one level down: it decides which pauses count as breaking a block at all.
         "microPauseSeconds",
+        // A rule about the day. Two devices nagging on different cycles each interrupt you at their
+        // own rhythm, which is how you end up with twice as many prompts as you configured.
+        "breakEveryMinutes", "breakRestMinutes",
         // The denominator of "Tracked": 4h of a 16h day and 4h of a 12h day are different claims.
         "wakingHours",
         // Cosmetic, and included anyway. It's a rendering preference rather than a fact about the

@@ -4154,8 +4154,9 @@ func testSharedSettings() {
         check(try! peer.settingValue("syncFolderPath") == nil,
               "so nothing accumulates rows that nothing reads")
         check(IntervalStore.syncedSettingKeys.sorted()
-                == ["autoPauseMinutes", "deepBlockMinutes", "highlightDimPercent",
-                    "idleNudgeMinutes", "microPauseSeconds", "promptsEnabled", "wakingHours"],
+                == ["autoPauseMinutes", "breakEveryMinutes", "breakRestMinutes",
+                    "deepBlockMinutes", "highlightDimPercent", "idleNudgeMinutes",
+                    "microPauseSeconds", "promptsEnabled", "wakingHours"],
               "everything that changes what's recorded or what a number MEANS is shared")
         for local in ["syncFolderPath", "syncMode", "googleClientID", "deviceLabel"] {
             check(!IntervalStore.syncedSettingKeys.contains(local),
@@ -4926,6 +4927,72 @@ func testBlendedAggregations() {
         check(Aggregations.summary(intervals: long, range: range, focus: blended,
                                    calendar: cal).deepSeconds == 0,
               "5 minutes on another task is over the tolerance, so neither half is a block")
+    }
+}
+
+func testBreakPolicy() {
+    print("Break reminder:")
+
+    let on = BreakPolicy.Config(promptsEnabled: true, everyMinutes: 30, restMinutes: 10)
+    let now = date(2026, 8, 1, 14, 0)
+    func fires(_ c: BreakPolicy.Config = on, worked: Double, running: Bool = true,
+               other: Bool = false, showing: Bool = false, offUntil: Date? = nil) -> Bool {
+        BreakPolicy.fires(c, workedSeconds: worked * 60, isRunning: running,
+                          awaitingOtherPrompt: other, promptShowing: showing,
+                          offUntil: offUntil, now: now)
+    }
+
+    check(!fires(worked: 29), "29 minutes of work is not due")
+    check(fires(worked: 30), "30 minutes is")
+    check(fires(worked: 95), "and so is anything past it — a missed tick isn't a missed prompt")
+    check(!fires(worked: 60, running: false),
+          "nothing is suggested while paused; you are already not working")
+    check(!fires(worked: 60, other: true),
+          "never stacked on an unanswered checkpoint — that one has already paused the timer")
+    check(!fires(worked: 60, showing: true), "nor on top of a prompt already up")
+    check(!fires(worked: 60, offUntil: now.addingTimeInterval(3600)),
+          "'not today' silences it without switching the setting off")
+    check(fires(worked: 60, offUntil: now.addingTimeInterval(-1)),
+          "and stops silencing it once that has passed")
+
+    check(!fires(BreakPolicy.Config(promptsEnabled: true, everyMinutes: 0, restMinutes: 10),
+                 worked: 600), "0 minutes means off")
+    check(!fires(BreakPolicy.Config(promptsEnabled: false, everyMinutes: 30, restMinutes: 10),
+                 worked: 600), "the master nudge switch silences this too")
+
+    check(approx(BreakPolicy.delay(on, workedSeconds: 10 * 60), 20 * 60, 0.001),
+          "20 minutes to go after 10 minutes of work")
+    check(BreakPolicy.delay(on, workedSeconds: 99 * 60) >= 1,
+          "already overdue fires on the next tick rather than never")
+    check(approx(on.snoozeSeconds, 15 * 60, 0.001),
+          "declining buys half the interval — real quiet, but not the rest of the stretch")
+
+    do { // the counter itself: the user's own example, and what a rest does to it
+        let t0 = date(2026, 8, 1, 9, 0)
+        func iv(_ id: Int64, _ task: Int64, from: Double, to: Double) -> Interval {
+            Interval(id: id, projectID: task, start: t0.addingTimeInterval(from * 60),
+                     end: t0.addingTimeInterval(to * 60))
+        }
+        // 5m on A, 10m on B, 10m on A, 5m on C — half an hour at the desk that no per-task counter sees.
+        let abac = [iv(1, 1, from: 0, to: 5), iv(2, 2, from: 5, to: 15),
+                    iv(3, 1, from: 15, to: 25), iv(4, 3, from: 25, to: 30)]
+        let at30 = t0.addingTimeInterval(30 * 60)
+        check(approx(WorkRuns.workedSeconds(abac, gap: on.restSeconds, perTask: false,
+                                            since: nil, now: at30), 30 * 60, 0.001),
+              "5m + 10m + 10m + 5m across three tasks accrues to 30m")
+        check(fires(worked: 30), "which is exactly when the prompt is due")
+
+        // A two-minute pause is not a rest, so it must not wipe the counter.
+        let sip = [iv(1, 1, from: 0, to: 20), iv(2, 1, from: 22, to: 32)]
+        check(approx(WorkRuns.workedSeconds(sip, gap: on.restSeconds, perTask: false, since: nil,
+                                            now: t0.addingTimeInterval(32 * 60)), 30 * 60, 0.001),
+              "2 minutes fetching water keeps the 30m — the counter bridges up to the REST length")
+
+        // A ten-minute one is.
+        let rest = [iv(1, 1, from: 0, to: 20), iv(2, 1, from: 31, to: 36)]
+        check(approx(WorkRuns.workedSeconds(rest, gap: on.restSeconds, perTask: false, since: nil,
+                                            now: t0.addingTimeInterval(36 * 60)), 5 * 60, 0.001),
+              "an 11-minute break clears it, leaving only the work since")
     }
 }
 
@@ -6662,6 +6729,7 @@ do {
     testTagTotals()
     testWorkRuns()
     testBlendedAggregations()
+    testBreakPolicy()
     testTargetMath()
     testDailyPlan()
     testPlannerWeekFacts()

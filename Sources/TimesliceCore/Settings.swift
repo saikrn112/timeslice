@@ -83,6 +83,30 @@ public final class AppSettings: ObservableObject {
         return ladder[min(ladder.count - 1, max(0, i + delta))]
     }
 
+    /// Minutes of accumulated work before suggesting a break (0 = off). Counts across tasks.
+    /// SYNCED — it's a rule about the day, and two devices nagging on different cycles would each
+    /// interrupt you at its own rhythm.
+    @Published public var breakEveryMinutes: Int {
+        didSet {
+            defaults.set(breakEveryMinutes, forKey: Keys.breakEveryMinutes)
+            publishSynced(Keys.breakEveryMinutes, String(breakEveryMinutes))
+        }
+    }
+
+    /// How long you have to be away for it to count as a rest. Also the tolerance the break counter
+    /// bridges: two minutes fetching water shouldn't wipe out half an hour of accrued work.
+    @Published public var breakRestMinutes: Int {
+        didSet {
+            defaults.set(breakRestMinutes, forKey: Keys.breakRestMinutes)
+            publishSynced(Keys.breakRestMinutes, String(breakRestMinutes))
+        }
+    }
+
+    public var breakConfig: BreakPolicy.Config {
+        .init(promptsEnabled: promptsEnabled, everyMinutes: breakEveryMinutes,
+              restMinutes: breakRestMinutes)
+    }
+
     /// The tolerances the aggregations need, as one value. They always travel together, and a call site
     /// that passed the threshold but forgot the tolerance would silently compute the old answer.
     public var focusRule: FocusRule {
@@ -226,6 +250,8 @@ public final class AppSettings: ObservableObject {
         }
         autoPauseMinutes = defaults.object(forKey: Keys.autoPauseMinutes) as? Int ?? 60
         idleNudgeMinutes = defaults.object(forKey: Keys.idleNudgeMinutes) as? Int ?? 15
+        breakEveryMinutes = defaults.object(forKey: Keys.breakEveryMinutes) as? Int ?? 30
+        breakRestMinutes = defaults.object(forKey: Keys.breakRestMinutes) as? Int ?? 10
         promptsEnabled = defaults.object(forKey: Keys.promptsEnabled) as? Bool ?? true
         // A capture run can ask for a different waking day without touching your settings, so "what does
         // this look like at 5h, or 24h" is answerable from a screenshot rather than by reasoning.
@@ -279,6 +305,8 @@ public final class AppSettings: ObservableObject {
          (Keys.promptsEnabled, promptsEnabled ? "1" : "0"),
          (Keys.deepBlockMinutes, String(deepBlockMinutes)),
          (Keys.microPauseSeconds, String(microPauseSeconds)),
+         (Keys.breakEveryMinutes, String(breakEveryMinutes)),
+         (Keys.breakRestMinutes, String(breakRestMinutes)),
          (Keys.dormantAfterDays, String(dormantAfterDays)),
          (Keys.wakingHours, String(wakingHours)),
          (Keys.highlightDimPercent, String(highlightDimPercent))]
@@ -310,6 +338,14 @@ public final class AppSettings: ObservableObject {
            let n = Int(row.value), n != deepBlockMinutes {
             deepBlockMinutes = n
         }
+        if let row = (try? store.settingValue(Keys.breakEveryMinutes)) ?? nil,
+           let n = Int(row.value), n != breakEveryMinutes {
+            breakEveryMinutes = n
+        }
+        if let row = (try? store.settingValue(Keys.breakRestMinutes)) ?? nil,
+           let n = Int(row.value), n != breakRestMinutes {
+            breakRestMinutes = n
+        }
         // The capture override wins, or `MICROPAUSE=0 scripts/shot.sh` would render your real setting.
         if ProcessInfo.processInfo.environment["TIMESLICE_MICRO_PAUSE"] == nil,
            let row = (try? store.settingValue(Keys.microPauseSeconds)) ?? nil,
@@ -336,6 +372,8 @@ public final class AppSettings: ObservableObject {
     private enum Keys {
         static let deepBlockMinutes = "deepBlockMinutes"
         static let microPauseSeconds = "microPauseSeconds"
+        static let breakEveryMinutes = "breakEveryMinutes"
+        static let breakRestMinutes = "breakRestMinutes"
         static let dormantAfterDays = "dormantAfterDays"
         static let autoPauseMinutes = "autoPauseMinutes"
         static let idleNudgeMinutes = "idleNudgeMinutes"
