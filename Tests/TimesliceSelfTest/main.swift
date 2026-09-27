@@ -4731,6 +4731,138 @@ func testTags() throws {
 
 // MARK: - Tag totals
 
+// MARK: - Work runs (fuzzy focus)
+
+func testWorkRuns() {
+    print("Work runs:")
+
+    let t0 = date(2026, 8, 1, 9, 0)
+    /// An interval by offset-in-seconds from 9am, so gaps can be expressed exactly.
+    func iv(_ id: Int64, _ task: Int64, from: Double, to: Double?) -> Interval {
+        Interval(id: id, projectID: task, start: t0.addingTimeInterval(from),
+                 end: to.map { t0.addingTimeInterval($0) })
+    }
+    let m = 60.0
+
+    do { // a five-second pause is not a break
+        let ivs = [iv(1, 1, from: 0, to: 15 * m), iv(2, 1, from: 15 * m + 5, to: 30 * m + 5)]
+        let blended = WorkRuns.runs(ivs, gap: 60, perTask: true)
+        check(blended.count == 1, "a 5s gap under a 60s tolerance is one run")
+        check(approx(blended[0].workSeconds, 30 * m, 0.001),
+              "the bridged gap is NOT counted as work: 30m of work, not 30m 5s")
+        check(approx(blended[0].spanSeconds, 30 * m + 5, 0.001),
+              "the span DOES include the gap")
+        check(blended[0].intervalIDs == [1, 2], "both intervals belong to the run")
+
+        let strict = WorkRuns.runs(ivs, gap: 0, perTask: true)
+        check(strict.count == 2, "with no tolerance the same pause splits the run")
+    }
+
+    do { // back-to-back intervals join even at zero tolerance
+        // This is `rollOpenInterval` chopping a long phone session at exactly the focus length with a
+        // zero-second gap: a 60m session read as 25 + 25 + 10 with only 50m focused.
+        let rolled = [iv(1, 1, from: 0, to: 25 * m), iv(2, 1, from: 25 * m, to: 50 * m),
+                      iv(3, 1, from: 50 * m, to: 60 * m)]
+        let runs = WorkRuns.runs(rolled, gap: 0, perTask: true)
+        check(runs.count == 1, "a rolled session is one run, not three")
+        check(approx(runs[0].workSeconds, 60 * m, 0.001), "and it is 60m long")
+        let deep = WorkRuns.deepIntervalIDs(rolled, focus: .strict(deepSeconds: 25 * m))
+        check(deep == [1, 2, 3], "so its 10m tail is focused too, not stranded below the threshold")
+    }
+
+    do { // perTask is the whole difference between the focus clock and the break counter
+        let abab = [iv(1, 1, from: 0, to: 10 * m), iv(2, 2, from: 10 * m, to: 20 * m),
+                    iv(3, 1, from: 20 * m, to: 30 * m), iv(4, 3, from: 30 * m, to: 35 * m)]
+        let perTask = WorkRuns.runs(abab, gap: 60, perTask: true)
+        check(perTask.count == 4, "per task, A-B-A-C is four runs — a switch ends 'still on A?'")
+        check(perTask.allSatisfy { $0.projectIDs.count == 1 }, "a per-task run touches one task")
+
+        let together = WorkRuns.runs(abab, gap: 60, perTask: false)
+        check(together.count == 1, "ignoring tasks it is ONE stretch of work at the desk")
+        check(approx(together[0].workSeconds, 35 * m, 0.001),
+              "5m + 10m + 10m + 10m accrues to 35m for the break counter")
+        check(together[0].projectIDs == [1, 2, 3], "tasks are listed in first-seen order")
+    }
+
+    do { // a real break ends everything
+        let ivs = [iv(1, 1, from: 0, to: 20 * m), iv(2, 1, from: 28 * m, to: 40 * m)]
+        check(WorkRuns.runs(ivs, gap: 60, perTask: false).count == 2,
+              "an 8m pause is over any tolerance, so it splits the run")
+    }
+
+    do { // focus: the case the whole feature exists for
+        let ivs = [iv(1, 1, from: 0, to: 15 * m), iv(2, 1, from: 15 * m + 1, to: 30 * m + 1)]
+        check(WorkRuns.deepIntervalIDs(ivs, focus: .strict(deepSeconds: 25 * m)).isEmpty,
+              "today: 15m + 1s pause + 15m is half an hour of work with NO focused time")
+        check(WorkRuns.deepIntervalIDs(ivs, focus: FocusRule(deepSeconds: 25 * m,
+                                                            blendSeconds: 60)) == [1, 2],
+              "blended: the same half hour is focused")
+    }
+
+    do { // the tolerance is inclusive, and one second past it is not
+        let exactly = [iv(1, 1, from: 0, to: 10 * m), iv(2, 1, from: 10 * m + 60, to: 20 * m)]
+        check(WorkRuns.runs(exactly, gap: 60, perTask: true).count == 1,
+              "a gap exactly equal to the tolerance still joins")
+        let over = [iv(1, 1, from: 0, to: 10 * m), iv(2, 1, from: 10 * m + 61, to: 20 * m)]
+        check(WorkRuns.runs(over, gap: 60, perTask: true).count == 2, "a second past it does not")
+    }
+
+    do { // input order is not trusted — store queries, fixtures and merged device sets all arrive here
+        let shuffled = [iv(2, 1, from: 15 * m, to: 30 * m), iv(1, 1, from: 0, to: 15 * m)]
+        let runs = WorkRuns.runs(shuffled, gap: 60, perTask: true)
+        check(runs.count == 1 && runs[0].intervalIDs == [1, 2],
+              "out-of-order rows are sorted, not split into two runs")
+    }
+
+    do { // degenerate rows can't corrupt a run
+        let withZero = [iv(1, 1, from: 0, to: 10 * m), iv(2, 1, from: 10 * m, to: 10 * m),
+                        iv(3, 1, from: 10 * m, to: 20 * m)]
+        let runs = WorkRuns.runs(withZero, gap: 0, perTask: true)
+        check(runs.count == 1 && approx(runs[0].workSeconds, 20 * m, 0.001),
+              "a zero-length row is skipped without ending the run")
+    }
+
+    do { // an open interval is measured to now, like everywhere else in Aggregations
+        let now = t0.addingTimeInterval(40 * m)
+        let open = [iv(1, 1, from: 0, to: nil)]
+        let runs = WorkRuns.runs(open, gap: 60, perTask: true, now: now)
+        check(approx(runs[0].workSeconds, 40 * m, 0.001), "a running interval counts up to now")
+    }
+
+    do { // current(): what the still-working clock and the break counter actually read
+        let now = t0.addingTimeInterval(40 * m)
+        let stale = [iv(1, 1, from: 0, to: 20 * m)]     // ended 20m ago
+        check(WorkRuns.current(stale, gap: 60, perTask: false, now: now) == nil,
+              "nothing is in progress 20m after the last interval ended")
+        check(WorkRuns.current([iv(1, 1, from: 0, to: 20 * m), iv(2, 1, from: 25 * m, to: 35 * m)],
+                               gap: 60, perTask: false, now: now) == nil,
+              "a 5m gap is a real break, so neither side is the current run 5m later")
+        let fresh = [iv(1, 1, from: 0, to: 20 * m), iv(2, 1, from: 20 * m + 30, to: 40 * m - 30)]
+        let run = WorkRuns.current(fresh, gap: 60, perTask: false, now: now)
+        check(run != nil && approx(run!.workSeconds, 39 * m, 0.001),
+              "a run whose last interval ended 30s ago is still the current one")
+    }
+
+    do { // workedSeconds(since:) — the floor that stops a re-prompt loop
+        // "Still working?" pauses for 10s, you answer Keep going. The pause is bridged, so the run
+        // start reverts to 9:00 and the clock would be over threshold again on the very next tick.
+        let now = t0.addingTimeInterval(70 * m)
+        let ivs = [iv(1, 1, from: 0, to: 60 * m), iv(2, 1, from: 60 * m + 10, to: 70 * m)]
+        let answered = t0.addingTimeInterval(60 * m + 10)
+        check(approx(WorkRuns.workedSeconds(ivs, gap: 60, perTask: true, since: nil, now: now),
+                     70 * m - 10, 0.001),
+              "unfloored, the whole blended run counts")
+        check(approx(WorkRuns.workedSeconds(ivs, gap: 60, perTask: true, since: answered, now: now),
+                     10 * m - 10, 0.001),
+              "floored at the answer, only the work since counts — so it can't re-fire immediately")
+        // Subtracting elapsed wall time instead would have over-credited the bridged pause.
+        let midInterval = t0.addingTimeInterval(65 * m)
+        check(approx(WorkRuns.workedSeconds(ivs, gap: 60, perTask: true, since: midInterval, now: now),
+                     5 * m, 0.001),
+              "a floor inside an interval counts only that interval's tail")
+    }
+}
+
 func testTagTotals() {
     print("Tag totals:")
 
@@ -6462,6 +6594,7 @@ do {
     try testTags()
     try testTagSync()
     testTagTotals()
+    testWorkRuns()
     testTargetMath()
     testDailyPlan()
     testPlannerWeekFacts()
