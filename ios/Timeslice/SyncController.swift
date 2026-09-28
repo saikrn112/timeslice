@@ -197,7 +197,11 @@ final class SyncController {
                 }
                 try await MainActor.run {
                     let store = try Self.requireStore()
-                    _ = try SyncEngine(store: store, deviceID: deviceID).merge(remote)
+                    let report = try SyncEngine(store: store, deviceID: deviceID).merge(remote)
+                    // A peer's newer threshold has landed in the table; take it on. Without this the
+                    // phone stored every shared setting and used none of them, so it split sessions and
+                    // measured "used" hours by its own defaults forever.
+                    if report.settingsApplied > 0 { TimerModel.shared.settings.adoptSyncedSettings() }
                 }
             }
 

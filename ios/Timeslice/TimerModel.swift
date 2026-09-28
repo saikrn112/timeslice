@@ -227,6 +227,11 @@ final class TimerModel: ObservableObject {
                 let store = try IntervalStore()
                 try store.migrateIfNeeded()
                 self.store = store
+                // Take on the shared thresholds. Missing entirely until now, which is why the phone sat
+                // on its OWN defaults however the Mac was configured: awake hours read 16 against a
+                // stored 12, and `rollChunks` split at the phone's 25 minutes instead of the Mac's 20.
+                // The rows were arriving and being stored all along — nothing ever adopted them.
+                settings.attach(store: store)
             }
             reload()
             // Recover a run left open by a previous launch. Elapsed is recomputed from the

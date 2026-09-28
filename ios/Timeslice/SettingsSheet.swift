@@ -36,6 +36,10 @@ struct SettingsScreen: View {
                             caption: "sessions this long count toward Focus %",
                             dec: { settings.deepBlockMinutes = max(5, settings.deepBlockMinutes - 5) },
                             inc: { settings.deepBlockMinutes = min(120, settings.deepBlockMinutes + 5) })
+                    stepper("Ignore pauses ≤", value: settings.microPauseLabel,
+                            caption: "a pause this short doesn't break a block — or your break counter",
+                            dec: { settings.microPauseSeconds = settings.steppedMicroPause(by: -1) },
+                            inc: { settings.microPauseSeconds = settings.steppedMicroPause(by: 1) })
                 } header: { header("Metrics") }
 
                 Section {
@@ -58,6 +62,17 @@ struct SettingsScreen: View {
                             dec: { settings.idleNudgeMinutes = max(0, settings.idleNudgeMinutes - 5) },
                             inc: { settings.idleNudgeMinutes = min(120, settings.idleNudgeMinutes + 5) })
                         .disabled(!settings.promptsEnabled)
+                    stepper("Break after",
+                            value: settings.breakEveryMinutes == 0 ? "Off" : "\(settings.breakEveryMinutes)m",
+                            caption: "suggest a break after this much work, counted across all tasks",
+                            dec: { settings.breakEveryMinutes = max(0, settings.breakEveryMinutes - 15) },
+                            inc: { settings.breakEveryMinutes = min(240, settings.breakEveryMinutes + 15) })
+                        .disabled(!settings.promptsEnabled)
+                    stepper("A break is", value: "\(settings.breakRestMinutes)m",
+                            caption: "time away this long resets the counter; shorter doesn't",
+                            dec: { settings.breakRestMinutes = max(1, settings.breakRestMinutes - 5) },
+                            inc: { settings.breakRestMinutes = min(60, settings.breakRestMinutes + 5) })
+                        .disabled(!settings.promptsEnabled || settings.breakEveryMinutes == 0)
                 } header: { header("Nudges") } footer: {
                     // The one place the phone's behaviour genuinely differs from the Mac's, so it
                     // says so rather than letting someone discover it.
