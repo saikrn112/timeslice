@@ -83,6 +83,17 @@ let package = Package(
         // Prints the planner's answer for a real database. Exists because the macOS UI can't be
         // screenshotted headlessly, so the numbers on the Planner page need to be checkable another
         // way — this runs the same `Planner` against the same database and prints what it computed.
+        // Interval corrections from a shell, through the store's own slice-delete so tombstones and
+        // fresh uids are right. See Tools/TimesliceTrim.
+        .executableTarget(
+            name: "TimesliceTrim",
+            dependencies: ["TimesliceCore"],
+            path: "Tools/TimesliceTrim",
+            linkerSettings: [
+                .linkedLibrary("sqlite3"),
+            ]
+        ),
+
         .executableTarget(
             name: "TimeslicePlan",
             dependencies: ["TimesliceCore"],
