@@ -1226,6 +1226,45 @@ public final class IntervalStore {
         return remaining.count
     }
 
+    /// Apply `OverlapResolver`'s clips: tombstone each original and re-insert what survives under the
+    /// DERIVED uid, so every device that computes the same clip writes the same row rather than each
+    /// adding its own copy. Returns the clips that were applied.
+    ///
+    /// Idempotent by construction: once applied there is no overlap left, so a second call finds nothing.
+    @discardableResult
+    public func resolveClosedOverlaps() throws -> [OverlapResolver.Clip] {
+        let all = try intervals()
+        var uids: [Int64: String] = [:]
+        for (interval, uid) in try intervalsWithUIDs() { uids[interval.id] = uid }
+        let clips = OverlapResolver.clips(all, uids: uids)
+        guard !clips.isEmpty else { return [] }
+        try transaction {
+            for clip in clips {
+                try recordTombstoneLocked(uid: clip.uid, kind: "interval")
+                let del = try prepare("DELETE FROM intervals WHERE id = ?")
+                defer { sqlite3_finalize(del) }
+                sqlite3_bind_int64(del, 1, clip.id)
+                try step(del)
+                for piece in clip.keep {
+                    let uid = clip.uid.map {
+                        OverlapResolver.clippedUID(original: $0, piece: piece)
+                    } ?? UUID().uuidString
+                    let ins = try prepare("INSERT OR IGNORE INTO intervals (project_id, start_utc, end_utc, running, uid, device_id) VALUES (?, ?, ?, 0, ?, ?)")
+                    defer { sqlite3_finalize(ins) }
+                    sqlite3_bind_int64(ins, 1, clip.projectID)
+                    sqlite3_bind_double(ins, 2, piece.start.timeIntervalSince1970)
+                    sqlite3_bind_double(ins, 3, piece.end.timeIntervalSince1970)
+                    bindText(ins, 4, uid)
+                    // The device that RECORDED it, kept — re-stamping would corrupt the attribution the
+                    // metrics page shows, the same reason `deleteIntervalSlice` carries it over.
+                    if let d = clip.deviceID { bindText(ins, 5, d) } else { sqlite3_bind_null(ins, 5) }
+                    try step(ins)
+                }
+            }
+        }
+        return clips
+    }
+
     public func insertClosedInterval(projectID: Int64, start: Date, end: Date,
                                      deviceID: String? = nil) throws {
         try insertClosedIntervalLocked(projectID: projectID, start: start, end: end,

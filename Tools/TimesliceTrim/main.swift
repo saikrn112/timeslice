@@ -35,7 +35,49 @@ func describe(_ i: Interval, _ name: String) -> String {
                   i.id, name, formatter.string(from: i.start), end, mins, i.deviceID ?? "-")
 }
 
+/// `--overlaps` reports (and with `--apply`, removes) every double-counted span in the database.
+func reportOverlaps(dbPath: String, apply: Bool) throws {
+    let store = try IntervalStore(databaseURL: URL(fileURLWithPath: dbPath))
+    try store.migrateIfNeeded()
+    let names = Dictionary(uniqueKeysWithValues: try store.listProjects(includeArchived: true)
+        .map { ($0.id, $0.name) })
+    let all = try store.intervals()
+    var uids: [Int64: String] = [:]
+    for (interval, uid) in try store.intervalsWithUIDs() { uids[interval.id] = uid }
+    let clips = OverlapResolver.clips(all, uids: uids)
+    let byID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
+    guard !clips.isEmpty else { print("no overlap"); return }
+
+    var removed: TimeInterval = 0
+    for clip in clips {
+        removed += clip.removedSeconds
+        let name = names[clip.projectID] ?? "?"
+        let lost = clip.lostTo.compactMap { id -> String? in
+            guard let o = byID[id] else { return nil }
+            return "\(names[o.projectID] ?? "?")@\(o.deviceID ?? "-")"
+        }.joined(separator: ", ")
+        print(String(format: "%@  %@ → %@  %@", formatter.string(from: clip.originalStart),
+                     name, clip.deviceID ?? "-", "overlaps \(lost)"))
+        print(String(format: "    -%.1fm, keeping %@", clip.removedSeconds / 60,
+                     clip.keep.isEmpty
+                        ? "nothing (covered entirely)"
+                        : clip.keep.map {
+                            "\(formatter.string(from: $0.start).suffix(8))–\(formatter.string(from: $0.end).suffix(8))"
+                          }.joined(separator: " + ")))
+    }
+    print(String(format: "\n%d interval(s), %.1f minutes double-counted", clips.count, removed / 60))
+    guard apply else { print("dry run — pass --apply to write"); return }
+    let applied = try store.resolveClosedOverlaps()
+    print("applied to \(applied.count) interval(s)")
+    print("remaining overlap: \(OverlapResolver.clips(try store.intervals()).count)")
+}
+
 do {
+    if CommandLine.arguments.contains("--overlaps") {
+        guard let dbPath = value(for: "--db") else { print("need --db"); exit(2) }
+        try reportOverlaps(dbPath: dbPath, apply: CommandLine.arguments.contains("--apply"))
+        exit(0)
+    }
     guard let dbPath = value(for: "--db"), let idRaw = value(for: "--id"), let id = Int64(idRaw) else {
         print("usage: TimesliceTrim --db <path> --id <interval id> "
               + "[--keep-minutes N | --from \"y-M-d H:m:s\" --to \"y-M-d H:m:s\"] [--apply]")

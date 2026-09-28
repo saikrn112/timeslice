@@ -4996,6 +4996,103 @@ func testBreakPolicy() {
     }
 }
 
+func testOverlapResolver() {
+    print("Overlap resolver:")
+
+    let t0 = date(2026, 8, 1, 9, 0)
+    func iv(_ id: Int64, _ task: Int64, _ dev: String, from: Double, to: Double?) -> Interval {
+        Interval(id: id, projectID: task, start: t0.addingTimeInterval(from * 60),
+                 end: to.map { t0.addingTimeInterval($0 * 60) }, deviceID: dev)
+    }
+    let m = 60.0
+
+    do { // the real case: the phone kept running after the Mac took over
+        let phone = iv(1, 1, "phone", from: 0, to: 51.8)
+        let mac = iv(2, 2, "mac", from: 38.75, to: 52.9)
+        let clips = OverlapResolver.clips([phone, mac])
+        check(clips.count == 1 && clips[0].id == 1,
+              "only the earlier-started interval gives up time")
+        check(clips[0].keep.count == 1
+                && approx(clips[0].keptSeconds, 38.75 * m, 1),
+              "the phone's interval ends where the Mac's begins")
+        check(clips[0].lostTo == [2], "and the report names what it lost to")
+        check(approx(clips[0].removedSeconds, (51.8 - 38.75) * m, 1),
+              "exactly the double-counted 13m comes off")
+    }
+
+    do { // nothing to do when they merely touch
+        let a = iv(1, 1, "mac", from: 0, to: 30)
+        let b = iv(2, 2, "mac", from: 30, to: 60)
+        check(OverlapResolver.clips([a, b]).isEmpty,
+              "back-to-back intervals don't overlap — this must not touch normal switching")
+    }
+
+    do { // a short interval INSIDE a long one keeps the long one's tail
+        // The first version back-dated the earlier one to where the later began, which threw the tail
+        // away even though it conflicted with nothing.
+        let long = iv(1, 1, "phone", from: 0, to: 60)
+        let short = iv(2, 2, "mac", from: 20, to: 30)
+        let clips = OverlapResolver.clips([long, short])
+        check(clips.count == 1 && clips[0].keep.count == 2, "the long one survives in two pieces")
+        check(approx(clips[0].keep[0].duration, 20 * m, 1)
+                && approx(clips[0].keep[1].duration, 30 * m, 1),
+              "0–20 and 30–60 kept; only the covered 10 minutes removed")
+        check(approx(clips[0].removedSeconds, 10 * m, 1), "so exactly the overlap comes off")
+    }
+
+    do { // swallowed whole
+        let inner = iv(1, 1, "phone", from: 10, to: 20)
+        let outer = iv(2, 2, "mac", from: 10, to: 40)
+        let clips = OverlapResolver.clips([inner, outer])
+        check(clips.count == 1 && clips[0].id == 1 && clips[0].keep.isEmpty,
+              "an interval covered entirely by a later-starting one is removed outright")
+    }
+
+    do { // three-way, settled in one pass
+        let a = iv(1, 1, "phone", from: 0, to: 60)
+        let b = iv(2, 2, "mac", from: 20, to: 40)
+        let c = iv(3, 3, "ipad", from: 35, to: 50)
+        let clips = OverlapResolver.clips([a, b, c])
+        let byID = Dictionary(uniqueKeysWithValues: clips.map { ($0.id, $0) })
+        check(approx(byID[1]?.keptSeconds ?? 0, 30 * m, 1),
+              "the oldest keeps 0–20 and 50–60 — the union of both later spans is removed")
+        check(approx(byID[2]?.keptSeconds ?? 0, 15 * m, 1),
+              "the middle one gives up only what the newest covered")
+        check(byID[3] == nil, "and the newest gives up nothing")
+    }
+
+    do { // a running interval is left alone — back-dating a live timer is TakeoverPolicy's job
+        let running = iv(1, 1, "mac", from: 0, to: nil)
+        let closed = iv(2, 2, "phone", from: 10, to: 20)
+        check(OverlapResolver.clips([running, closed]).isEmpty,
+              "nothing is clipped while one of them is still running")
+    }
+
+    do { // determinism: the uid depends only on the original and the bounds, never on the device
+        let piece = DateInterval(start: t0, end: t0.addingTimeInterval(600))
+        check(OverlapResolver.clippedUID(original: "abc", piece: piece)
+                == OverlapResolver.clippedUID(original: "abc", piece: piece),
+              "two devices computing the same clip derive the same uid, so the rows converge")
+        check(OverlapResolver.clippedUID(original: "abc", piece: piece)
+                != OverlapResolver.clippedUID(original: "abd", piece: piece),
+              "and different originals stay distinct")
+    }
+
+    do { // idempotent: the result of resolving has nothing left to resolve
+        let a = iv(1, 1, "phone", from: 0, to: 60)
+        let b = iv(2, 2, "mac", from: 20, to: 40)
+        let clips = OverlapResolver.clips([a, b])
+        var after: [Interval] = [b]
+        var nextID: Int64 = 100
+        for piece in clips[0].keep {
+            after.append(Interval(id: nextID, projectID: 1, start: piece.start, end: piece.end,
+                                  deviceID: "phone"))
+            nextID += 1
+        }
+        check(OverlapResolver.clips(after).isEmpty, "a second pass finds nothing")
+    }
+}
+
 func testTagTotals() {
     print("Tag totals:")
 
@@ -6730,6 +6827,7 @@ do {
     testWorkRuns()
     testBlendedAggregations()
     testBreakPolicy()
+    testOverlapResolver()
     testTargetMath()
     testDailyPlan()
     testPlannerWeekFacts()
