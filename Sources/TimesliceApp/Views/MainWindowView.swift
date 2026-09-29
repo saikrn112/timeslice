@@ -152,10 +152,11 @@ struct MainWindowView: View {
         // exactly like one where you simply didn't work those hours. This Mac spent eleven hours signed
         // out, kept reporting the month as badly behind, and nothing on screen said why.
         .overlay(alignment: .topTrailing) {
-            if let sync, let auth {
-                SyncBadge(sync: sync, auth: auth, settings: settings)
-                    .offset(x: 5, y: -4)
-            }
+            // Not gated on sync being wired up: the hotkey half of this warning applies to a purely
+            // local install too, and gating it there is how it would stay invisible for the people most
+            // likely to hit it.
+            SyncBadge(settings: settings, appState: appState, sync: sync, auth: auth)
+                .offset(x: 5, y: -4)
         }
         .popover(isPresented: $showSettings, arrowEdge: .bottom) {
             SettingsPanel(settings: settings, store: appState.storeForEditing,

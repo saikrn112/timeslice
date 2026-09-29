@@ -241,7 +241,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Requires Accessibility permission. If not yet granted, guide the user, then poll.
         // Only a screenshot run skips this — the modal would sit on top of the window being
         // captured. Plain demo mode still prompts, so hotkeys can be tested against demo data.
-        if !hotkeys.register() && !DemoData.isScreenshotRun && !DemoData.isSandboxRun
+        appState.hotkeysActive = hotkeys.register()
+        if !appState.hotkeysActive && !DemoData.isScreenshotRun && !DemoData.isSandboxRun
             && !DemoData.isCaptureRun {
             promptForAccessibility()
             pollForAccessibility()
@@ -278,8 +279,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func pollForAccessibility() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self else { return }
-            if self.hotkeys.isActive { return }
-            if self.hotkeys.register() { return }
+            if self.hotkeys.isActive { self.appState.hotkeysActive = true; return }
+            if self.hotkeys.register() { self.appState.hotkeysActive = true; return }
             self.pollForAccessibility()
         }
     }

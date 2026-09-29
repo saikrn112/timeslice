@@ -64,6 +64,16 @@ final class AppState: ObservableObject {
     @Published var scope: TimeScope = .today
     @Published var selectedProjectID: Int64?
 
+    /// Whether the global hotkeys are actually live.
+    ///
+    /// Published here, rather than read off `GlobalHotkeyManager`, because the manager is owned by the
+    /// AppDelegate while `AppState` is the thing every view already sees. It needs to be visible at all:
+    /// the event tap failing left the switcher dead with nothing on screen saying so, and the way that
+    /// happens is mundane — macOS ties the Accessibility grant to the code signature, an ad-hoc signature
+    /// changes on every build, and a grant re-enabled AFTER launch is not picked up by a process macOS
+    /// has already answered "not trusted".
+    @Published var hotkeysActive = false
+
     private var cancellables: Set<AnyCancellable> = []
 
     init(store: IntervalStore, engine: TimerEngine) {
