@@ -1,6 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
 import ApplicationServices
+import TimesliceCore
 
 /// System-wide hotkeys via a `CGEventTap`. The tap observes the `fn` (globe) modifier, consumes
 /// keystrokes, and detects modifier *release* — all needed for the ⌘-Tab-style task switcher.
@@ -29,6 +30,32 @@ final class GlobalHotkeyManager {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var switcherActive = false
+    /// Rate limit for the incomplete-chord log line.
+    private var lastChordMiss = Date.distantPast
+
+    /// Diagnostics go to a FILE beside the database, not `NSLog`.
+    ///
+    /// Learned the hard way: nothing this app writes with `NSLog` reaches the unified log — `log show`
+    /// finds zero mentions of the process at any level, including at launch — so the one question that
+    /// mattered ("is the tap even receiving the key?") was unanswerable from outside. A file always works
+    /// and can be read while the app keeps running.
+    private static let logURL = TimeslicePaths.defaultSupportDirectoryURL()
+        .appendingPathComponent("hotkeys.log")
+
+    private static var lastDenialNote = Date.distantPast
+
+    private static func note(_ message: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let line = "\(stamp)  \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: logURL) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: logURL)
+        }
+    }
     /// Polls actual hardware modifier state to detect chord release — far more reliable than
     /// depending on flagsChanged delivery (the fn/globe key in particular is inconsistent).
     private var releasePoll: Timer?
@@ -55,7 +82,16 @@ final class GlobalHotkeyManager {
     /// Install the event tap. Returns false if Accessibility permission isn't granted yet.
     @discardableResult
     func register() -> Bool {
-        guard hasAccessibilityPermission(prompt: false) else { return false }
+        guard hasAccessibilityPermission(prompt: false) else {
+            // Rate-limited: the two-second poll calls this forever while permission is missing, and an
+            // unbounded line per poll turns a diagnostic into a growing file.
+            if Date().timeIntervalSince(Self.lastDenialNote) > 60 {
+                Self.lastDenialNote = Date()
+                Self.note("not registering — Accessibility not granted to THIS process; "
+                          + "a grant added after launch needs a relaunch")
+            }
+            return false
+        }
 
         let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
         let refcon = Unmanaged.passUnretained(self).toOpaque()
@@ -72,9 +108,11 @@ final class GlobalHotkeyManager {
             },
             userInfo: refcon
         ) else {
+            Self.note("tapCreate FAILED despite Accessibility being granted")
             return false
         }
 
+        Self.note("event tap installed")
         eventTap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
@@ -109,7 +147,25 @@ final class GlobalHotkeyManager {
         if type == .keyDown {
             let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
 
+            // The one thing that was impossible to see from outside: the tap IS receiving the key and
+            // the chord test is what rejects it. Logged only for the switcher's own keys and only when
+            // some modifier is held, so ordinary typing stays silent, and rate-limited so leaning on a
+            // key can't fill the log.
+            if keyCode == backslash || keyCode == rightBracket, !chordHeld(flags),
+               flags.contains(.maskCommand) || flags.contains(.maskShift)
+                || flags.contains(.maskSecondaryFn) {
+                let now = Date()
+                if now.timeIntervalSince(lastChordMiss) > 2 {
+                    lastChordMiss = now
+                    Self.note("switcher key \(keyCode) with an incomplete chord — "
+                              + "cmd=\(flags.contains(.maskCommand)) shift=\(flags.contains(.maskShift)) "
+                              + "fn=\(flags.contains(.maskSecondaryFn)) raw=0x"
+                              + String(flags.rawValue, radix: 16))
+                }
+            }
+
             if chordHeld(flags) {
+                Self.note("chord held, key \(keyCode)")
                 if keyCode == backslash || keyCode == rightBracket {
                     let delta = keyCode == backslash ? 1 : -1
                     if !switcherActive {
