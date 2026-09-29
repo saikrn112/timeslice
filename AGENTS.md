@@ -271,6 +271,17 @@ sqlite3 "$DB" "SELECT COUNT(*) FROM intervals a JOIN intervals b ON a.id<b.id
   AND a.start_utc < COALESCE(b.end_utc, strftime('%s','now'));"   # must be 0
 ```
 
+Two mechanisms keep it true, and they cover different moments. `TakeoverPolicy` settles a race caught
+in the act, off the running markers. `OverlapResolver` settles the one where both devices stopped before
+they ever saw each other — by then both rows are closed facts and the merge would insert the overlap
+permanently. It runs at the end of every `SyncEngine.merge`, removes only the genuinely double-counted
+span (not the earlier row's whole tail), and is **bounded**: a clip removing more than a minute is
+counted in `MergeReport.overlapsLeft` and left for `swift run TimesliceTrim --overlaps`, because deciding
+which device was really in use for twenty minutes of recorded work is not a background merge's call.
+
+Its replacement uids are DERIVED from the original plus the surviving bounds. Every device computes the
+same clip independently, so a fresh random uid would replace one overlap with one duplicate per device.
+
 Seed realistic data with `swift run TimesliceSeed --preset rich --db <path>` (`--preset screenshot`
 reproduces the Mac's original fixture exactly). Pointing it at a simulator container works because
 that database is an ordinary file, and going through `IntervalStore` keeps uids, `updated_at` and

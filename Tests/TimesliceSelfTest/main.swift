@@ -6293,6 +6293,54 @@ final class MemoryTransport: SyncTransport, @unchecked Sendable {
     func deleteUnreadablePayloads(excluding deviceID: String) -> Int { 0 }
 }
 
+func testMergeResolvesClosedOverlaps() throws {
+    print("\nOverlap at merge time:")
+
+    /// Two stores, each with the same task, and one closed interval apiece.
+    func merge(aSpan: (Double, Double), bSpan: (Double, Double))
+        throws -> (report: MergeReport, intervals: [Interval]) {
+        let (a, ua) = try makeStore(); let (b, ub) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: ua); try? FileManager.default.removeItem(at: ub) }
+        let ea = SyncEngine(store: a, deviceID: "phone")
+        let eb = SyncEngine(store: b, deviceID: "mac")
+        let task = try a.createProject(name: "work", colorHex: "#4E79A7")
+        _ = try eb.merge(try ea.buildPayload())
+        let onB = try b.listProjects(includeArchived: true)[0].id
+
+        let t0 = date(2026, 9, 28, 9, 0)
+        try a.insertClosedInterval(projectID: task, start: t0.addingTimeInterval(aSpan.0 * 60),
+                                   end: t0.addingTimeInterval(aSpan.1 * 60), deviceID: "phone")
+        try b.insertClosedInterval(projectID: onB, start: t0.addingTimeInterval(bSpan.0 * 60),
+                                   end: t0.addingTimeInterval(bSpan.1 * 60), deviceID: "mac")
+        // B learns about A's row — the moment the overlap becomes visible anywhere.
+        let report = try eb.merge(try ea.buildPayload())
+        return (report, try b.intervals().sorted { $0.start < $1.start })
+    }
+
+    do { // a sub-second sliver, which is all takeover's own back-dating ever leaves
+        let (report, intervals) = try merge(aSpan: (0, 20.0 + 0.5 / 60), bSpan: (20, 40))
+        check(report.overlapsResolved == 1, "cleaned unattended: it is noise, not a decision")
+        check(report.overlapsLeft == 0, "and nothing is left needing a person")
+        check(OverlapResolver.clips(intervals).isEmpty, "no overlap survives the merge")
+        check(intervals.count == 2, "both rows are still there, one of them shortened")
+    }
+
+    do { // the real case from 28 Sep: 13 minutes, far too much to rewrite silently
+        let (report, intervals) = try merge(aSpan: (15, 66.8), bSpan: (53.75, 67.9))
+        check(report.overlapsResolved == 0,
+              "13 minutes of recorded work is not a merge's call to make")
+        check(report.overlapsLeft == 1, "but it is reported rather than passing unnoticed")
+        check(OverlapResolver.clips(intervals).count == 1, "and the rows are left exactly as they were")
+    }
+
+    do { // nothing to do in the ordinary case, which is the one that must not be disturbed
+        let (report, intervals) = try merge(aSpan: (0, 20), bSpan: (20, 40))
+        check(report.overlapsResolved == 0 && report.overlapsLeft == 0,
+              "back-to-back intervals from two devices are normal switching, not an overlap")
+        check(intervals.count == 2, "both untouched")
+    }
+}
+
 func testCrossDeviceTakeover() throws {
     print("\nCross-device takeover:")
     let (macStore, macURL) = try makeStore()
@@ -6855,6 +6903,7 @@ do {
     testFootprintSeries()
     try testWindowTotals()
     try testCrossDeviceTakeover()
+    try testMergeResolvesClosedOverlaps()
     try testRollOpenInterval()
     try testFeedback()
     try testAllocationOrdering()

@@ -333,6 +333,25 @@ public struct SyncEngine {
                 report.attachmentsApplied += 1
             }
         }
+        // Finally, the one-timer invariant for rows that arrived ALREADY CLOSED. `TakeoverPolicy` runs
+        // over the running markers and can only settle a race caught in the act; this settles the one
+        // where both devices stopped before they ever saw each other. Done after the intervals are in,
+        // because the overlap only exists once both sides are present.
+        //
+        // Bounded on purpose. Takeover's own back-dating leaves sub-second slivers behind — pure noise,
+        // and cleaning them unattended is right. A clip that would remove minutes of recorded work is a
+        // judgement call about which device was really in use, and a background merge is the worst place
+        // to make it silently, so those are counted and left for `TimesliceTrim --overlaps`.
+        let clips = OverlapResolver.clips(try store.intervals())
+        report.overlapsLeft = clips.filter { $0.removedSeconds > Self.autoResolveOverlapSeconds }.count
+        if clips.contains(where: { $0.removedSeconds <= Self.autoResolveOverlapSeconds }) {
+            report.overlapsResolved = try store
+                .resolveClosedOverlaps(upToRemovedSeconds: Self.autoResolveOverlapSeconds).count
+        }
         return report
     }
+
+    /// How much a clip may remove before it needs a person. One minute: every overlap this has produced
+    /// unattended was a fraction of a second, and the smallest genuine device race seen was 1.3 minutes.
+    public static let autoResolveOverlapSeconds: TimeInterval = 60
 }

@@ -92,7 +92,10 @@ public enum OverlapResolver {
             // empty block — the same rule `deleteIntervalSlice` uses.
             keep = keep.filter { $0.duration >= 1 }
             let kept = keep.reduce(0.0) { $0 + $1.duration }
-            guard kept < end.timeIntervalSince(earlier.start) - 0.5 else { continue }
+            // 50ms, not half a second. The bigger tolerance left the sub-second slivers that takeover's
+            // own back-dating produces sitting in the data, so the "no overlapping intervals" invariant
+            // that the day timeline's single lane rests on stayed false by a few hundred milliseconds.
+            guard kept < end.timeIntervalSince(earlier.start) - 0.05 else { continue }
 
             out.append(Clip(id: earlier.id, uid: uids[earlier.id], projectID: earlier.projectID,
                             deviceID: earlier.deviceID, originalStart: earlier.start, originalEnd: end,

@@ -336,6 +336,11 @@ public struct MergeReport: Equatable, Sendable {
     public var tagLinksAdded = 0
     public var targetsApplied = 0
     public var feedbackApplied = 0
+    /// Intervals clipped because a peer's rows revealed double-counted time. See `OverlapResolver`.
+    public var overlapsResolved = 0
+    /// Overlaps found but left alone because clipping them would remove more than
+    /// `SyncEngine.autoResolveOverlapSeconds` of recorded work — a judgement call, not a merge's to make.
+    public var overlapsLeft = 0
     public var attachmentsApplied = 0
     /// Settings adopted from a peer. Surfaced so the app knows to re-read them.
     public var settingsApplied = 0
