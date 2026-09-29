@@ -38,7 +38,7 @@ struct SyncBadge: View {
         // Checked before sync, and NOT gated on `syncEnabled`: the hotkeys have nothing to do with sync,
         // and someone running the app entirely locally still needs to be told.
         if !appState.hotkeysActive && (!DemoData.isScreenshotRun || forced == "hotkeys") {
-            return "The fn+⌘+⇧ switcher isn't active — macOS hasn't granted Accessibility.\n"
+            return "The ⌃+⌘+⇧ switcher isn't active — macOS hasn't granted Accessibility.\n"
                  + "Enable Timeslice under System Settings › Privacy & Security › Accessibility,\n"
                  + "then QUIT AND REOPEN Timeslice: a grant added after launch isn't picked up."
         }

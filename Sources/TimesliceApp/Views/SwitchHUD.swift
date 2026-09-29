@@ -3,7 +3,7 @@ import TimesliceUI
 import SwiftUI
 import TimesliceCore
 
-/// Center-screen HUD for the global task switcher. While cycling (holding fn+⌘+⇧, tapping \)
+/// Center-screen HUD for the global task switcher. While cycling (holding ⌃+⌘+⇧, tapping \)
 /// it shows the task list as a "revolver" with the selected task centered and highlighted and
 /// neighbors dimmed above/below. On commit it shows a compact confirmation.
 @MainActor

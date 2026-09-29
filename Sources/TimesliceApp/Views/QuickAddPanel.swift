@@ -3,7 +3,7 @@ import TimesliceUI
 import SwiftUI
 import TimesliceCore
 
-/// Spotlight-style task palette (fn+⌘+⇧+A). Type to fuzzy-search your tasks — active and
+/// Spotlight-style task palette (⌃+⌘+⇧+A). Type to fuzzy-search your tasks — active and
 /// finished, but not archived — and Return acts on the highlighted row: resuming an existing task
 /// (un-finishing it as needed) or creating a new one from the last row. This is how you pick a
 /// task back up later without making a duplicate.
@@ -96,7 +96,7 @@ final class QuickAddPanel {
         return panel
     }
 
-    /// Build the panel and its SwiftUI hierarchy up front so the first fn+⌘+⇧+A doesn't pay for it.
+    /// Build the panel and its SwiftUI hierarchy up front so the first ⌃+⌘+⇧+A doesn't pay for it.
     func prewarm() {
         guard window == nil else { return }
         let panel = makePanel()
