@@ -36,7 +36,7 @@ func describe(_ i: Interval, _ name: String) -> String {
 }
 
 /// `--overlaps` reports (and with `--apply`, removes) every double-counted span in the database.
-func reportOverlaps(dbPath: String, apply: Bool) throws {
+func reportOverlaps(dbPath: String, apply: Bool, limitMinutes: Double?) throws {
     let store = try IntervalStore(databaseURL: URL(fileURLWithPath: dbPath))
     try store.migrateIfNeeded()
     let names = Dictionary(uniqueKeysWithValues: try store.listProjects(includeArchived: true)
@@ -44,7 +44,8 @@ func reportOverlaps(dbPath: String, apply: Bool) throws {
     let all = try store.intervals()
     var uids: [Int64: String] = [:]
     for (interval, uid) in try store.intervalsWithUIDs() { uids[interval.id] = uid }
-    let clips = OverlapResolver.clips(all, uids: uids)
+    let limit = (limitMinutes ?? .infinity) * 60
+    let clips = OverlapResolver.clips(all, uids: uids).filter { $0.removedSeconds <= limit }
     let byID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
     guard !clips.isEmpty else { print("no overlap"); return }
 
@@ -67,7 +68,7 @@ func reportOverlaps(dbPath: String, apply: Bool) throws {
     }
     print(String(format: "\n%d interval(s), %.1f minutes double-counted", clips.count, removed / 60))
     guard apply else { print("dry run — pass --apply to write"); return }
-    let applied = try store.resolveClosedOverlaps()
+    let applied = try store.resolveClosedOverlaps(upToRemovedSeconds: limit)
     print("applied to \(applied.count) interval(s)")
     print("remaining overlap: \(OverlapResolver.clips(try store.intervals()).count)")
 }
@@ -75,7 +76,8 @@ func reportOverlaps(dbPath: String, apply: Bool) throws {
 do {
     if CommandLine.arguments.contains("--overlaps") {
         guard let dbPath = value(for: "--db") else { print("need --db"); exit(2) }
-        try reportOverlaps(dbPath: dbPath, apply: CommandLine.arguments.contains("--apply"))
+        try reportOverlaps(dbPath: dbPath, apply: CommandLine.arguments.contains("--apply"),
+                           limitMinutes: value(for: "--max-minutes").flatMap(Double.init))
         exit(0)
     }
     guard let dbPath = value(for: "--db"), let idRaw = value(for: "--id"), let id = Int64(idRaw) else {

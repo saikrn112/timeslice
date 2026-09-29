@@ -1231,12 +1231,18 @@ public final class IntervalStore {
     /// adding its own copy. Returns the clips that were applied.
     ///
     /// Idempotent by construction: once applied there is no overlap left, so a second call finds nothing.
+    /// `upToRemovedSeconds` bounds how much a single clip may take off. The sub-second overlaps
+    /// takeover's own back-dating leaves behind are safe to clean unattended; one that would remove
+    /// twenty minutes is a judgement call about real recorded work and shouldn't be made by a merge.
     @discardableResult
-    public func resolveClosedOverlaps() throws -> [OverlapResolver.Clip] {
+    public func resolveClosedOverlaps(
+        upToRemovedSeconds limit: TimeInterval = .infinity
+    ) throws -> [OverlapResolver.Clip] {
         let all = try intervals()
         var uids: [Int64: String] = [:]
         for (interval, uid) in try intervalsWithUIDs() { uids[interval.id] = uid }
         let clips = OverlapResolver.clips(all, uids: uids)
+            .filter { $0.removedSeconds <= limit }
         guard !clips.isEmpty else { return [] }
         try transaction {
             for clip in clips {
