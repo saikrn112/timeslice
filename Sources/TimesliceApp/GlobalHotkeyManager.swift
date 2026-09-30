@@ -8,11 +8,11 @@ import TimesliceCore
 /// This requires Accessibility permission (granted once in System Settings › Privacy & Security ›
 /// Accessibility). Carbon is imported only for its `kVK_*` key-code constants.
 ///
-/// Interaction (all use the chord ⌃+⌘+⇧):
-///   • Hold ⌃+⌘+⇧ and tap `\` (forward) or `]` (reverse) → cycle the selected task (a HUD shows
+/// Interaction (all use the chord fn+⌘+⇧):
+///   • Hold fn+⌘+⇧ and tap `\` (forward) or `]` (reverse) → cycle the selected task (a HUD shows
 ///     the current one). Release the modifiers → commit: pause the previously-running task and
 ///     start the selected one. If you release without moving off the running task, it pauses.
-///   • ⌃+⌘+⇧+P → cycle menu-bar privacy level.
+///   • fn+⌘+⇧+P → cycle menu-bar privacy level.
 @MainActor
 final class GlobalHotkeyManager {
     /// Called each time `\`/`]` is tapped while the switcher chord is held. `delta` is +1 for
@@ -22,9 +22,9 @@ final class GlobalHotkeyManager {
     var onCommit: (() -> Void)?
     /// Called when the switcher first activates (so the HUD can show the current selection).
     var onActivate: (() -> Void)?
-    /// Called on ⌃+⌘+⇧+P.
+    /// Called on fn+⌘+⇧+P.
     var onPrivacy: (() -> Void)?
-    /// Called on ⌃+⌘+⇧+A (quick-add a task and start it).
+    /// Called on fn+⌘+⇧+A (quick-add a task and start it).
     var onQuickAdd: (() -> Void)?
 
     private var eventTap: CFMachPort?
@@ -112,7 +112,10 @@ final class GlobalHotkeyManager {
             return false
         }
 
-        Self.note("event tap installed")
+        Self.note("event tap installed"
+                  + (Self.secureInputBlocking
+                     ? " — but macOS Secure Input is ON, so NO key events will be delivered to it"
+                     : ""))
         eventTap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
@@ -131,22 +134,31 @@ final class GlobalHotkeyManager {
 
     // MARK: - Event handling (runs on the main thread via the tap)
 
-    /// The prefix, as ⌃+⌘+⇧.
+    /// The prefix, as fn+⌘+⇧.
     ///
-    /// Was fn+⌘+⇧, and fn is why this stopped working: the tap was installed and enabled, Accessibility
-    /// was granted, and nothing happened — because the chord test was never satisfied. The source already
-    /// called the fn/globe key "inconsistent"; ⌃ is an ordinary modifier that behaves like the other two.
+    /// Briefly remapped to ⌃+⌘+⇧ while chasing a dead switcher; fn was innocent. macOS **Secure Input**
+    /// had got stuck on (`kCGSSessionSecureInputPID` non-zero, attributed to `loginwindow`), and while
+    /// that is active the system delivers no key events to ANY event tap — so the tap was created,
+    /// enabled and permitted, and its callback never fired once. A restart cleared it. See
+    /// `secureInputBlocking` below, which now says so instead of leaving it to be rediscovered.
     ///
     /// Defined once in both vocabularies, because the tap tests `CGEventFlags` while the release poll
     /// reads `NSEvent.modifierFlags`, and the two drifting apart would mean a chord that activates and
-    /// never commits.
+    /// never commits. They were written out separately before.
     private func chordHeld(_ flags: CGEventFlags) -> Bool {
-        flags.contains(.maskControl) && flags.contains(.maskCommand) && flags.contains(.maskShift)
+        flags.contains(.maskCommand) && flags.contains(.maskShift) && flags.contains(.maskSecondaryFn)
     }
 
     private func chordHeld(_ mods: NSEvent.ModifierFlags) -> Bool {
-        mods.contains(.control) && mods.contains(.command) && mods.contains(.shift)
+        mods.contains(.command) && mods.contains(.shift) && mods.contains(.function)
     }
+
+    /// True when macOS Secure Input is on, which silently stops every event tap from receiving keys.
+    ///
+    /// `IsSecureEventInputEnabled()` is the cheap public answer (Carbon, already imported here for the
+    /// key codes). Worth checking precisely because nothing else reveals it: permission, tap creation and
+    /// `CGGetEventTapList` all look perfect while no keystroke ever arrives.
+    static var secureInputBlocking: Bool { IsSecureEventInputEnabled() }
 
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         // The system disables a tap that takes too long; re-enable it.
@@ -166,13 +178,13 @@ final class GlobalHotkeyManager {
             // key can't fill the log.
             if keyCode == backslash || keyCode == rightBracket, !chordHeld(flags),
                flags.contains(.maskCommand) || flags.contains(.maskShift)
-                || flags.contains(.maskControl) {
+                || flags.contains(.maskSecondaryFn) {
                 let now = Date()
                 if now.timeIntervalSince(lastChordMiss) > 2 {
                     lastChordMiss = now
                     Self.note("switcher key \(keyCode) with an incomplete chord — "
-                              + "ctrl=\(flags.contains(.maskControl)) cmd=\(flags.contains(.maskCommand)) "
-                              + "shift=\(flags.contains(.maskShift)) raw=0x"
+                              + "cmd=\(flags.contains(.maskCommand)) shift=\(flags.contains(.maskShift)) "
+                              + "fn=\(flags.contains(.maskSecondaryFn)) raw=0x"
                               + String(flags.rawValue, radix: 16))
                 }
             }
@@ -207,7 +219,7 @@ final class GlobalHotkeyManager {
         return Unmanaged.passUnretained(event)
     }
 
-    /// Poll hardware modifier flags ~20x/sec; when the ⌃+⌘+⇧ chord is no longer held, commit.
+    /// Poll hardware modifier flags ~20x/sec; when the fn+⌘+⇧ chord is no longer held, commit.
     private func startReleasePolling() {
         releasePoll?.invalidate()
         releasePoll = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in

@@ -74,6 +74,11 @@ final class AppState: ObservableObject {
     /// has already answered "not trusted".
     @Published var hotkeysActive = false
 
+    /// True when macOS Secure Input is on. It stops EVERY event tap from receiving keys, so the hotkeys
+    /// are dead while it is set even though permission, tap creation and the tap list all look perfect.
+    /// Seen stuck on for hours, attributed to `loginwindow`, with nothing anywhere saying so.
+    @Published var secureInputBlocking = false
+
     private var cancellables: Set<AnyCancellable> = []
 
     init(store: IntervalStore, engine: TimerEngine) {

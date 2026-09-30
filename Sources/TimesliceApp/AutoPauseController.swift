@@ -241,6 +241,10 @@ final class AutoPauseController: ObservableObject {
     /// Fire anything already overdue. Idempotent: `checkpointReached` pauses the timer, so the very
     /// condition that got us here stops being true and it can't fire twice.
     private func sweep() {
+        // Piggybacks on the existing sweep rather than adding a timer: it's one cheap Carbon call, and
+        // Secure Input can turn on at any moment (a password field in any app) without telling anyone.
+        appState.secureInputBlocking = GlobalHotkeyManager.secureInputBlocking
+
         // Don't interrupt a prompt that's already waiting for an answer.
         guard !awaitingResponse, !promptShowing else { return }
 

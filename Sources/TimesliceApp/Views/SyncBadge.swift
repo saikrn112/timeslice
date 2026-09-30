@@ -3,7 +3,7 @@ import TimesliceCore
 
 /// A warning dot on the Settings gear when something has quietly stopped working.
 ///
-/// Four states count as broken, and all four were silent before:
+/// Five states count as broken, and all five were silent before:
 ///
 /// - **signed out** while sync is switched on. Nothing auto-signs the app out, but a credential can still go
 ///   missing — a Keychain item whose ACL no longer matches the code signature, a token file removed — and the
@@ -13,6 +13,9 @@ import TimesliceCore
 ///   grant to the code signature, and an ad-hoc signature changes on every build — so a rebuild silently
 ///   kills it. Worse, a grant re-enabled AFTER launch isn't picked up by a process macOS has already
 ///   answered "not trusted", so the fix is a relaunch and nothing said so.
+/// - **macOS Secure Input is on**, which stops every event tap from receiving keys. It was found stuck
+///   on for hours, attributed to `loginwindow`, while Accessibility, tap creation and `CGGetEventTapList`
+///   all reported perfect health — the hardest failure in this app to date to see from outside.
 /// - **nothing has synced for hours** while the app has been running. Only counted once a sync HAS succeeded
 ///   this launch, because `lastSyncedAt` starts nil and a badge on every cold start would cry wolf.
 struct SyncBadge: View {
@@ -37,8 +40,15 @@ struct SyncBadge: View {
         }
         // Checked before sync, and NOT gated on `syncEnabled`: the hotkeys have nothing to do with sync,
         // and someone running the app entirely locally still needs to be told.
+        // Before the permission case: with Secure Input on, the tap is created and permitted and still
+        // receives nothing, so "hotkeys are active" is true and useless.
+        if appState.secureInputBlocking && !DemoData.isScreenshotRun {
+            return "The hotkeys can't work: macOS Secure Input is on, and it stops every app from\n"
+                 + "seeing keystrokes. Usually a password field left focused — quit the browser or\n"
+                 + "password manager you last typed one into, or log out and back in."
+        }
         if !appState.hotkeysActive && (!DemoData.isScreenshotRun || forced == "hotkeys") {
-            return "The ⌃+⌘+⇧ switcher isn't active — macOS hasn't granted Accessibility.\n"
+            return "The fn+⌘+⇧ switcher isn't active — macOS hasn't granted Accessibility.\n"
                  + "Enable Timeslice under System Settings › Privacy & Security › Accessibility,\n"
                  + "then QUIT AND REOPEN Timeslice: a grant added after launch isn't picked up."
         }

@@ -58,7 +58,7 @@ final class PrivacyController: ObservableObject {
         for entry in managed { applySharing(to: entry.window) }
     }
 
-    /// Cycle privacy (bound to ⌃+⌘+⇧+P and the window's eye button).
+    /// Cycle privacy (bound to fn+⌘+⇧+P and the window's eye button).
     func cycleLevel() {
         level = level.next
     }

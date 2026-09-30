@@ -18,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Keeps App Nap off for the app's whole lifetime, so a global hotkey is answered promptly.
     ///
     /// TimerEngine holds its own assertion, but only WHILE a timer ticks — so a paused or idle
-    /// Timeslice sitting in the background was nap-eligible, and the first ⌃+⌘+⇧+\ had to wake a
+    /// Timeslice sitting in the background was nap-eligible, and the first fn+⌘+⇧+\ had to wake a
     /// throttled process before it could draw anything.
     ///
     /// Deliberately `.userInitiatedAllowingIdleSystemSleep`, NOT `.userInitiated`: the latter
@@ -86,7 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupHotkeys()
 
         // Build the two hotkey panels now, while we're already doing launch work, so the first
-        // ⌃+⌘+⇧+\ or +A doesn't wait on SwiftUI construction. Nothing is shown.
+        // fn+⌘+⇧+\ or +A doesn't wait on SwiftUI construction. Nothing is shown.
         hud.prewarm()
         quickAdd.prewarm()
 
@@ -149,7 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = mainMenu
     }
 
-    // MARK: - Global hotkey handling (⌃+⌘+⇧ task switcher)
+    // MARK: - Global hotkey handling (fn+⌘+⇧ task switcher)
 
     /// The task selected when the switcher chord was pressed — so we can tell if the user
     /// actually cycled to a different task before releasing.
@@ -257,7 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "Turn on Timeslice’s quick task switcher"
         alert.informativeText = """
-        The switcher lets you hold ⌃+⌘+⇧ and tap \\ or ] to flip through tasks — like ⌘-Tab \
+        The switcher lets you hold fn+⌘+⇧ and tap \\ or ] to flip through tasks — like ⌘-Tab \
         for apps — then release to start the one you land on.
 
         macOS needs your OK for this because two parts require it: reading the fn (globe) key, \
