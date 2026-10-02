@@ -92,7 +92,12 @@ final class QuickAddPanel {
         panel.hasShadow = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         // Normally excluded from screen capture; in demo mode leave it visible for recordings.
-        panel.sharingType = ProcessInfo.processInfo.environment["TIMESLICE_SEED_DEMO"] == "1" ? .readOnly : .none
+        // Capturable in demo mode, and also when a capture run has explicitly asked for the palette —
+        // otherwise the only way to photograph it was against seeded data, which has no projects, so the
+        // destination strip could never be reviewed with more than one entry in it.
+        let capturable = ProcessInfo.processInfo.environment["TIMESLICE_SEED_DEMO"] == "1"
+            || ProcessInfo.processInfo.environment["TIMESLICE_OPEN_PALETTE"] == "1"
+        panel.sharingType = capturable ? .readOnly : .none
         return panel
     }
 
@@ -145,11 +150,8 @@ private struct PaletteView: View {
     /// True while the arrow keys own the selection, so hover can't hijack it as rows scroll
     /// beneath a stationary pointer. Reset by any genuine pointer movement.
     @State private var keyboardDriving = false
-    /// Destination for the Create row, cycled with Tab: nil = Inbox, otherwise an index into `groups()`.
-    ///
-    /// Separate from the `/token` in the query, and the token wins when present — typing a destination is
-    /// explicit, and having Tab silently override what you typed would be worse than it having no effect.
-    @State private var groupCycle: Int?
+    /// Which of `destinationOptions` the Create row will file into. Cycled with Tab.
+    @State private var option = 0
     @FocusState private var focused: Bool
 
     /// The query split into task name + optional /group token.
@@ -199,19 +201,30 @@ private struct PaletteView: View {
         return "\(base) in /\(destination)"
     }
 
-    /// Where the Create row would file the task: the typed `/token` if there is one, else whatever Tab has
-    /// cycled to, else Inbox. One definition, so the label can't promise a different destination from the
-    /// one that gets used.
-    private var createDestination: String? {
-        if let token = parsed.groupToken, !token.isEmpty {
-            // A partial token resolves to the best matching existing group; otherwise it's a new group by
-            // that literal name.
-            return groupSuggestions.first?.name ?? token
+    /// The destinations Tab walks, in order. `nil` means Inbox.
+    ///
+    /// The list depends on what you have typed, which is the whole fix here: a `/token` used to win
+    /// outright, so Tab cycled a highlight while the Create row never changed. A token now *filters* the
+    /// options and Tab chooses among them — the first is still the best-ranked match, so Return alone
+    /// behaves exactly as before.
+    private var destinationOptions: [String?] {
+        guard let token = parsed.groupToken else { return [nil] + groups().map { $0.name } }
+        // A bare "/" means you have asked for a project, so Inbox is not among the answers.
+        guard !token.isEmpty else { return groups().map { $0.name } }
+        var out: [String?] = groupSuggestions.map { $0.name }
+        // Offer the literal token last, as a new project, unless it already names one.
+        if !groups().contains(where: { $0.name.caseInsensitiveCompare(token) == .orderedSame }) {
+            out.append(token)
         }
-        guard let i = groupCycle else { return nil }
-        let all = groups()
-        guard i >= 0 && i < all.count else { return nil }
-        return all[i].name
+        return out
+    }
+
+    /// Where the Create row would file the task. One definition, so the label can't promise a different
+    /// destination from the one that gets used.
+    private var createDestination: String? {
+        let options = destinationOptions
+        guard !options.isEmpty else { return nil }
+        return options[min(max(0, option), options.count - 1)]
     }
 
     private func commitCreate() {
@@ -241,10 +254,16 @@ private struct PaletteView: View {
                 .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.12), lineWidth: 1))
         )
         .onAppear {
-            matches = search("")
+            // `PALETTE_Q="standup /off"` pre-fills the field, because the Create row and the destination
+            // strip only exist once something is typed, and there is no way to type into a panel from a
+            // capture run.
+            if let q = ProcessInfo.processInfo.environment["TIMESLICE_PALETTE_QUERY"], !q.isEmpty {
+                query = q
+            }
+            matches = search(TaskSearch.parse(query).name)
             // Fresh every time the palette opens: a destination remembered from the last task you created
             // would file the next one somewhere you never chose.
-            groupCycle = nil
+            option = 0
             DispatchQueue.main.async { focused = true }
         }
     }
@@ -261,6 +280,9 @@ private struct PaletteView: View {
                     // Match on the name only — the /group token isn't part of any task name.
                     matches = search(TaskSearch.parse(q).name)
                     selection = 0
+                    // The option list is re-ranked by what you type, so a held index would point at a
+                    // different project than the one that was highlighted a keystroke ago.
+                    option = 0
                 }
                 .onSubmit(activateSelection)
                 .onKeyPress(.upArrow) { move(-1); return .handled }
@@ -320,28 +342,10 @@ private struct PaletteView: View {
                     if case .active = phase { keyboardDriving = false }
                 }
             }
-            if let token = parsed.groupToken, !groupSuggestions.isEmpty {
-                Divider().opacity(0.25)
-                HStack(spacing: 6) {
-                    Text("/").font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
-                    ForEach(groupSuggestions.prefix(4)) { g in
-                        HStack(spacing: 4) {
-                            Circle().fill(Color(hex: g.colorHex)).frame(width: 6, height: 6)
-                            Text(g.name).font(.system(size: 11))
-                                // The first suggestion is the one Return will use.
-                                .foregroundStyle(g.id == groupSuggestions.first?.id
-                                                 ? Color.primary : Color.secondary)
-                        }
-                    }
-                    if token.isEmpty && groupSuggestions.count > 4 {
-                        Text("+\(groupSuggestions.count - 4)")
-                            .font(.system(size: 10)).foregroundStyle(.tertiary)
-                    }
-                }
-                .padding(.horizontal, 14).padding(.vertical, 5)
-            } else if showsCreateRow {
-                // The destinations Tab walks, with the current one picked out. Showing them all means
-                // cycling is a visible choice from a list rather than a guess about what comes next.
+            if showsCreateRow, !destinationOptions.isEmpty {
+                // ONE strip for both cases. There used to be two — ranked suggestions when a /token was
+                // typed, cycled destinations otherwise — and they disagreed about which project was
+                // selected, which is what made Tab look broken.
                 Divider().opacity(0.25)
                 destinationStrip
             }
@@ -362,30 +366,49 @@ private struct PaletteView: View {
         }
     }
 
-    /// Inbox plus every group, scrolled horizontally, with the Tab destination highlighted.
+    /// The destinations Tab walks, scrolled horizontally, with the chosen one highlighted.
     private var destinationStrip: some View {
-        let all = groups()
+        let options = destinationOptions
+        let chosen = min(max(0, option), options.count - 1)
         return ScrollViewReader { sp in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
-                    chip(name: "Inbox", color: .gray, active: groupCycle == nil).id(-1)
-                    ForEach(Array(all.enumerated()), id: \.element.id) { idx, g in
-                        chip(name: g.name, color: Color(hex: g.colorHex), active: groupCycle == idx)
+                    ForEach(Array(options.enumerated()), id: \.offset) { idx, name in
+                        chip(name: name ?? "Inbox", color: colorForGroup(name),
+                             active: idx == chosen,
+                             isNew: name != nil && !groups().contains {
+                                 $0.name.caseInsensitiveCompare(name!) == .orderedSame
+                             })
                             .id(idx)
+                            .onTapGesture { option = idx; selection = matches.count }
                     }
                 }
                 .padding(.horizontal, 14).padding(.vertical, 5)
             }
             // Keep the chosen one on screen: with a dozen projects, Tab would otherwise cycle to
             // something sitting off the right edge.
-            .onChange(of: groupCycle) { _, new in sp.scrollTo(new ?? -1) }
+            .onChange(of: option) { _, new in sp.scrollTo(min(new, options.count - 1)) }
         }
         .frame(height: 26)
     }
 
-    private func chip(name: String, color: Color, active: Bool) -> some View {
+    private func colorForGroup(_ name: String?) -> Color {
+        guard let name, let g = groups().first(where: {
+            $0.name.caseInsensitiveCompare(name) == .orderedSame
+        }) else { return .gray }
+        return Color(hex: g.colorHex)
+    }
+
+    private func chip(name: String, color: Color, active: Bool, isNew: Bool = false) -> some View {
         HStack(spacing: 4) {
-            Circle().fill(color).frame(width: 6, height: 6)
+            if isNew {
+                // Marked, because creating a project by accident is the one irreversible-ish thing the
+                // palette can do.
+                Image(systemName: "plus").font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(active ? Color.white : Color.white.opacity(0.45))
+            } else {
+                Circle().fill(color).frame(width: 6, height: 6)
+            }
             Text(name).font(.system(size: 11))
                 .foregroundStyle(active ? Color.white : Color.white.opacity(0.45))
         }
@@ -466,11 +489,12 @@ private struct PaletteView: View {
     /// `PaletteNav` so it can be tested — a human pressing Tab is the only other way to exercise it.
     private func tab(_ delta: Int) {
         keyboardDriving = true
-        let next = PaletteNav.tab(from: .init(selection: selection, groupCycle: groupCycle),
+        let next = PaletteNav.tab(from: .init(selection: selection, option: option),
                                   delta: delta, matchCount: matches.count,
-                                  showsCreateRow: showsCreateRow, groupCount: groups().count)
+                                  showsCreateRow: showsCreateRow,
+                                  optionCount: destinationOptions.count)
         selection = next.selection
-        groupCycle = next.groupCycle
+        option = next.option
     }
 
     private func move(_ delta: Int) {

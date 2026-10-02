@@ -5096,55 +5096,64 @@ func testOverlapResolver() {
 func testPaletteNav() {
     print("Palette Tab:")
 
-    func step(_ sel: Int, _ cycle: Int?, delta: Int = 1, matches: Int = 5,
-              create: Bool = true, groups: Int = 3) -> PaletteNav.Position {
-        PaletteNav.tab(from: .init(selection: sel, groupCycle: cycle), delta: delta,
-                       matchCount: matches, showsCreateRow: create, groupCount: groups)
+    /// `options` is the destination list the palette is offering: Inbox plus every project when nothing
+    /// is typed, or the projects matching a `/token` when one is.
+    func step(_ sel: Int, _ opt: Int, delta: Int = 1, matches: Int = 5,
+              create: Bool = true, options: Int = 4) -> PaletteNav.Position {
+        PaletteNav.tab(from: .init(selection: sel, option: opt), delta: delta,
+                       matchCount: matches, showsCreateRow: create, optionCount: options)
     }
 
     do { // the whole point: reach Create without arrowing through the matches
-        check(step(0, nil).selection == 5, "Tab from the first match jumps straight to the Create row")
-        check(step(3, nil).selection == 5, "and from anywhere else in the list too")
+        check(step(0, 0).selection == 5, "Tab from the first match jumps straight to the Create row")
+        check(step(3, 0).selection == 5, "and from anywhere else in the list too")
+        check(step(0, 0).option == 0, "arriving there without having changed the destination")
     }
 
-    do { // then it cycles the destination, Inbox first
-        check(step(5, nil).groupCycle == 0, "Tab on the Create row moves off Inbox to the first group")
-        check(step(5, 0).groupCycle == 1, "and on through the groups")
-        check(step(5, 2).groupCycle == nil, "wrapping back to Inbox after the last one")
+    do { // then it cycles the destination
+        check(step(5, 0).option == 1, "Tab on the Create row moves to the next destination")
+        check(step(5, 2).option == 3, "and on through them")
+        check(step(5, 3).option == 0, "wrapping round after the last")
         check(step(5, 1).selection == 5, "without ever leaving the Create row")
     }
 
-    do { // shift-tab reverses, and leaves rather than dead-ending at Inbox
-        check(step(5, 0, delta: -1).groupCycle == nil, "Shift-Tab steps back towards Inbox")
-        check(step(5, nil, delta: -1).selection == 4,
-              "and from Inbox goes back into the match list, at the last match")
-        check(step(2, nil, delta: -1).selection == 1, "inside the list it behaves like an arrow")
+    do { // shift-tab reverses, and leaves rather than dead-ending at the first option
+        check(step(5, 2, delta: -1).option == 1, "Shift-Tab steps back through the destinations")
+        check(step(5, 0, delta: -1).selection == 4,
+              "and from the first one goes back into the match list, at the last match")
+        check(step(5, 0, delta: -1).option == 0, "leaving the destination alone as it goes")
+        check(step(2, 0, delta: -1).selection == 1, "inside the list it behaves like an arrow")
+    }
+
+    do { // with a /token typed the list is just the matching projects — the case that was broken
+        // Tab moved a highlight while the Create row never changed, because the token won outright.
+        // One option means Tab is a no-op on the destination rather than a lie.
+        check(step(5, 0, options: 1).option == 0, "a single matching project has nothing to cycle to")
+        check(step(5, 0, options: 2).option == 1, "two of them do")
     }
 
     do { // nothing to create — an empty query, or a name that already exists in the target project
-        check(step(1, nil, create: false, groups: 3).selection == 2,
+        check(step(1, 0, create: false).selection == 2,
               "with no Create row Tab moves the selection rather than being inert")
-        check(step(4, nil, matches: 5, create: false).selection == 0, "wrapping at the end")
+        check(step(4, 0, matches: 5, create: false).selection == 0, "wrapping at the end")
     }
 
     do { // degenerate shapes must not trap the cursor or crash
-        check(step(0, nil, matches: 0, create: false, groups: 0).selection == 0,
+        check(step(0, 0, matches: 0, create: false, options: 0).selection == 0,
               "an empty palette stays put")
-        check(step(0, nil, matches: 0, create: true, groups: 0).selection == 0,
-              "a Create row with no groups has nowhere to cycle to")
-        check(step(0, nil, matches: 0, create: true, groups: 0).groupCycle == nil,
-              "and stays on Inbox")
-        check(step(0, nil, matches: 0, create: true, groups: 2).groupCycle == 0,
-              "a create-only palette still cycles groups")
+        check(step(0, 0, matches: 0, create: true, options: 0).option == 0,
+              "a Create row with no destinations has nowhere to cycle to")
+        check(step(0, 0, matches: 0, create: true, options: 2).option == 1,
+              "a create-only palette still cycles destinations")
     }
 
     do { // a full round trip returns exactly where it started, so Tab is never a one-way door
-        var p = PaletteNav.Position(selection: 5, groupCycle: nil)
+        var p = PaletteNav.Position(selection: 5, option: 0)
         for _ in 0..<4 {
-            p = PaletteNav.tab(from: p, delta: 1, matchCount: 5, showsCreateRow: true, groupCount: 3)
+            p = PaletteNav.tab(from: p, delta: 1, matchCount: 5, showsCreateRow: true, optionCount: 4)
         }
-        check(p == PaletteNav.Position(selection: 5, groupCycle: nil),
-              "four Tabs through three groups come back to Inbox")
+        check(p == PaletteNav.Position(selection: 5, option: 0),
+              "four Tabs through four destinations come back to the first")
     }
 }
 

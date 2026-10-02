@@ -11,24 +11,28 @@ import Foundation
 /// into, so "new task, in that project" needs no `/token` typing at all.
 public enum PaletteNav {
 
-    /// A step through the palette. `groupCycle` is nil for Inbox, otherwise an index into the group list.
+    /// A step through the palette. `option` indexes the destination list the caller is offering, which
+    /// differs by context: Inbox plus every project when nothing is typed, or the projects matching a
+    /// `/token` when one is. Indexing a caller-supplied list rather than modelling Inbox as a special
+    /// `nil` is what lets both cases behave identically — the first version special-cased Inbox, and with
+    /// a token typed Tab then moved a highlight while changing nothing.
     public struct Position: Equatable, Sendable {
         public var selection: Int
-        public var groupCycle: Int?
+        public var option: Int
 
-        public init(selection: Int, groupCycle: Int?) {
+        public init(selection: Int, option: Int) {
             self.selection = selection
-            self.groupCycle = groupCycle
+            self.option = option
         }
     }
 
     /// Tab (`delta` = +1) and Shift-Tab (-1).
     ///
-    /// Forward: anything → the Create row → its destinations, cycling Inbox → each group → Inbox.
-    /// Backward: the destinations in reverse, and from Inbox back into the match list rather than
+    /// Forward: anything → the Create row → each destination in turn, wrapping.
+    /// Backward: the destinations in reverse, and from the first one back into the match list rather than
     /// dead-ending there.
     public static func tab(from position: Position, delta: Int, matchCount: Int,
-                          showsCreateRow: Bool, groupCount: Int) -> Position {
+                          showsCreateRow: Bool, optionCount: Int) -> Position {
         var next = position
         let rowCount = matchCount + (showsCreateRow ? 1 : 0)
         guard rowCount > 0 else { return next }
@@ -47,16 +51,14 @@ public enum PaletteNav {
             }
             return next
         }
-        // On the Create row. Shift-Tab from Inbox leaves for the last match; otherwise cycle.
-        if delta < 0, position.groupCycle == nil {
+        // On the Create row. Shift-Tab from the first destination leaves for the last match.
+        if delta < 0, position.option <= 0 {
             next.selection = max(0, matchCount - 1)
+            next.option = 0
             return next
         }
-        guard groupCount > 0 else { return next }
-        // Inbox occupies slot 0, the groups 1...groupCount.
-        let current = position.groupCycle.map { $0 + 1 } ?? 0
-        let slot = (current + delta + (groupCount + 1)) % (groupCount + 1)
-        next.groupCycle = slot == 0 ? nil : slot - 1
+        guard optionCount > 0 else { return next }
+        next.option = (position.option + delta + optionCount) % optionCount
         return next
     }
 }
