@@ -145,6 +145,11 @@ private struct PaletteView: View {
     /// True while the arrow keys own the selection, so hover can't hijack it as rows scroll
     /// beneath a stationary pointer. Reset by any genuine pointer movement.
     @State private var keyboardDriving = false
+    /// Destination for the Create row, cycled with Tab: nil = Inbox, otherwise an index into `groups()`.
+    ///
+    /// Separate from the `/token` in the query, and the token wins when present — typing a destination is
+    /// explicit, and having Tab silently override what you typed would be worse than it having no effect.
+    @State private var groupCycle: Int?
     @FocusState private var focused: Bool
 
     /// The query split into task name + optional /group token.
@@ -183,24 +188,35 @@ private struct PaletteView: View {
     }
     private var rowCount: Int { matches.count + (showsCreateRow ? 1 : 0) }
 
-    /// "Create “x”" or "Create “x” in /group" so the destination is visible before committing.
+    /// "Create “x” in /group" — always naming the destination, including Inbox.
+    ///
+    /// It used to say nothing when filing into Inbox, which was fine when Inbox was the only silent case.
+    /// Now that Tab cycles the destination, a label that sometimes omits it would hide the thing Tab
+    /// changes.
     private var createRowLabel: String {
         let base = "Create “\(parsed.name)”"
-        guard let token = parsed.groupToken, !token.isEmpty else { return base }
-        // Show the group we'd actually resolve to, so a partial token reads truthfully.
-        let resolved = groupSuggestions.first?.name ?? token
-        return "\(base) in /\(resolved)"
+        guard let destination = createDestination else { return "\(base) in Inbox" }
+        return "\(base) in /\(destination)"
+    }
+
+    /// Where the Create row would file the task: the typed `/token` if there is one, else whatever Tab has
+    /// cycled to, else Inbox. One definition, so the label can't promise a different destination from the
+    /// one that gets used.
+    private var createDestination: String? {
+        if let token = parsed.groupToken, !token.isEmpty {
+            // A partial token resolves to the best matching existing group; otherwise it's a new group by
+            // that literal name.
+            return groupSuggestions.first?.name ?? token
+        }
+        guard let i = groupCycle else { return nil }
+        let all = groups()
+        guard i >= 0 && i < all.count else { return nil }
+        return all[i].name
     }
 
     private func commitCreate() {
         guard !parsed.name.isEmpty else { return }
-        var group = parsed.groupToken
-        if let token = group, !token.isEmpty {
-            // A partial token resolves to the best matching existing group; otherwise it's a
-            // new group by that literal name.
-            group = groupSuggestions.first?.name ?? token
-        }
-        onCreate(parsed.name, (group?.isEmpty ?? true) ? nil : group)
+        onCreate(parsed.name, createDestination)
     }
 
     var body: some View {
@@ -226,6 +242,9 @@ private struct PaletteView: View {
         )
         .onAppear {
             matches = search("")
+            // Fresh every time the palette opens: a destination remembered from the last task you created
+            // would file the next one somewhere you never chose.
+            groupCycle = nil
             DispatchQueue.main.async { focused = true }
         }
     }
@@ -249,6 +268,16 @@ private struct PaletteView: View {
                 // Esc: a TextField normally swallows this (AppKit treats it as "clear field"),
                 // so handle it explicitly here rather than relying on onExitCommand.
                 .onKeyPress(.escape) { onCancel(); return .handled }
+                // Tab reaches the Create row without arrowing past every match — with a long match list
+                // that was the whole cost of creating a task. Once there, Tab keeps going and cycles the
+                // destination project, so "new task, in that project" is Tab-Tab rather than typing a
+                // /token. Deliberately NOT the arrow keys: ← → and ⌥← ⌥→ belong to editing the name.
+                // ONE handler, reading the modifier itself: two `.onKeyPress(.tab)` handlers would both
+                // see Shift-Tab and fight over it.
+                .onKeyPress(keys: [.tab], phases: .down) { press in
+                    tab(press.modifiers.contains(.shift) ? -1 : 1)
+                    return .handled
+                }
         }
         .padding(.horizontal, 16).padding(.vertical, 14)
     }
@@ -310,6 +339,11 @@ private struct PaletteView: View {
                     }
                 }
                 .padding(.horizontal, 14).padding(.vertical, 5)
+            } else if showsCreateRow {
+                // The destinations Tab walks, with the current one picked out. Showing them all means
+                // cycling is a visible choice from a list rather than a guess about what comes next.
+                Divider().opacity(0.25)
+                destinationStrip
             }
             if showsCreateRow {
                 Divider().opacity(0.25)
@@ -326,6 +360,37 @@ private struct PaletteView: View {
                 .onHover { if $0 { selection = idx } }
             }
         }
+    }
+
+    /// Inbox plus every group, scrolled horizontally, with the Tab destination highlighted.
+    private var destinationStrip: some View {
+        let all = groups()
+        return ScrollViewReader { sp in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    chip(name: "Inbox", color: .gray, active: groupCycle == nil).id(-1)
+                    ForEach(Array(all.enumerated()), id: \.element.id) { idx, g in
+                        chip(name: g.name, color: Color(hex: g.colorHex), active: groupCycle == idx)
+                            .id(idx)
+                    }
+                }
+                .padding(.horizontal, 14).padding(.vertical, 5)
+            }
+            // Keep the chosen one on screen: with a dozen projects, Tab would otherwise cycle to
+            // something sitting off the right edge.
+            .onChange(of: groupCycle) { _, new in sp.scrollTo(new ?? -1) }
+        }
+        .frame(height: 26)
+    }
+
+    private func chip(name: String, color: Color, active: Bool) -> some View {
+        HStack(spacing: 4) {
+            Circle().fill(color).frame(width: 6, height: 6)
+            Text(name).font(.system(size: 11))
+                .foregroundStyle(active ? Color.white : Color.white.opacity(0.45))
+        }
+        .padding(.horizontal, 7).padding(.vertical, 3)
+        .background(Capsule().fill(active ? Color.accentColor.opacity(0.75) : Color.white.opacity(0.06)))
     }
 
     private func row(color: Color, name: String, badge: (String, Color)?, selected: Bool,
@@ -379,6 +444,7 @@ private struct PaletteView: View {
     private var footer: some View {
         HStack(spacing: 12) {
             hint("↑↓", "select")
+            hint("⇥", selection < matches.count || !showsCreateRow ? "create row" : "project")
             hint("↵", selection < matches.count ? "start" : "create")
             hint("esc", "cancel")
             Spacer()
@@ -393,6 +459,18 @@ private struct PaletteView: View {
                 .background(RoundedRectangle(cornerRadius: 3).fill(Color.white.opacity(0.12)))
             Text(label).font(.system(size: 10)).foregroundStyle(.white.opacity(0.45))
         }
+    }
+
+    /// Tab forward: jump to the Create row, then cycle its destination. Shift-Tab reverses, and from
+    /// Inbox it steps back into the match list rather than dead-ending. The stepping itself lives in
+    /// `PaletteNav` so it can be tested — a human pressing Tab is the only other way to exercise it.
+    private func tab(_ delta: Int) {
+        keyboardDriving = true
+        let next = PaletteNav.tab(from: .init(selection: selection, groupCycle: groupCycle),
+                                  delta: delta, matchCount: matches.count,
+                                  showsCreateRow: showsCreateRow, groupCount: groups().count)
+        selection = next.selection
+        groupCycle = next.groupCycle
     }
 
     private func move(_ delta: Int) {

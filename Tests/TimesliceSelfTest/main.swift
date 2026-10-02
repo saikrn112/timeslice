@@ -5093,6 +5093,61 @@ func testOverlapResolver() {
     }
 }
 
+func testPaletteNav() {
+    print("Palette Tab:")
+
+    func step(_ sel: Int, _ cycle: Int?, delta: Int = 1, matches: Int = 5,
+              create: Bool = true, groups: Int = 3) -> PaletteNav.Position {
+        PaletteNav.tab(from: .init(selection: sel, groupCycle: cycle), delta: delta,
+                       matchCount: matches, showsCreateRow: create, groupCount: groups)
+    }
+
+    do { // the whole point: reach Create without arrowing through the matches
+        check(step(0, nil).selection == 5, "Tab from the first match jumps straight to the Create row")
+        check(step(3, nil).selection == 5, "and from anywhere else in the list too")
+    }
+
+    do { // then it cycles the destination, Inbox first
+        check(step(5, nil).groupCycle == 0, "Tab on the Create row moves off Inbox to the first group")
+        check(step(5, 0).groupCycle == 1, "and on through the groups")
+        check(step(5, 2).groupCycle == nil, "wrapping back to Inbox after the last one")
+        check(step(5, 1).selection == 5, "without ever leaving the Create row")
+    }
+
+    do { // shift-tab reverses, and leaves rather than dead-ending at Inbox
+        check(step(5, 0, delta: -1).groupCycle == nil, "Shift-Tab steps back towards Inbox")
+        check(step(5, nil, delta: -1).selection == 4,
+              "and from Inbox goes back into the match list, at the last match")
+        check(step(2, nil, delta: -1).selection == 1, "inside the list it behaves like an arrow")
+    }
+
+    do { // nothing to create — an empty query, or a name that already exists in the target project
+        check(step(1, nil, create: false, groups: 3).selection == 2,
+              "with no Create row Tab moves the selection rather than being inert")
+        check(step(4, nil, matches: 5, create: false).selection == 0, "wrapping at the end")
+    }
+
+    do { // degenerate shapes must not trap the cursor or crash
+        check(step(0, nil, matches: 0, create: false, groups: 0).selection == 0,
+              "an empty palette stays put")
+        check(step(0, nil, matches: 0, create: true, groups: 0).selection == 0,
+              "a Create row with no groups has nowhere to cycle to")
+        check(step(0, nil, matches: 0, create: true, groups: 0).groupCycle == nil,
+              "and stays on Inbox")
+        check(step(0, nil, matches: 0, create: true, groups: 2).groupCycle == 0,
+              "a create-only palette still cycles groups")
+    }
+
+    do { // a full round trip returns exactly where it started, so Tab is never a one-way door
+        var p = PaletteNav.Position(selection: 5, groupCycle: nil)
+        for _ in 0..<4 {
+            p = PaletteNav.tab(from: p, delta: 1, matchCount: 5, showsCreateRow: true, groupCount: 3)
+        }
+        check(p == PaletteNav.Position(selection: 5, groupCycle: nil),
+              "four Tabs through three groups come back to Inbox")
+    }
+}
+
 func testTagTotals() {
     print("Tag totals:")
 
@@ -6876,6 +6931,7 @@ do {
     testBlendedAggregations()
     testBreakPolicy()
     testOverlapResolver()
+    testPaletteNav()
     testTargetMath()
     testDailyPlan()
     testPlannerWeekFacts()

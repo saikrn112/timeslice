@@ -116,6 +116,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let first = appState.projects.first { engine.switchTo(projectID: first.id) }
             appState.reload()
             showMainWindow()
+        }
+        // `PALETTE=1 SCREEN=1 scripts/shot.sh` photographs the task palette. It is a separate panel, so
+        // `screencapture -l <main window>` cannot see it, and nothing else can open it headlessly —
+        // the hotkey needs a human and `simctl`-style synthetic keys don't exist on macOS.
+        if ProcessInfo.processInfo.environment["TIMESLICE_OPEN_PALETTE"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.showTaskPalette() }
         } else if ProcessInfo.processInfo.environment["TIMESLICE_OPEN_WINDOW"] == "1" {
             // Open the window and touch nothing else. `scripts/shot.sh` uses this to photograph the
             // real UI with real data; the demo path above would seed rows and START A TIMER, which
