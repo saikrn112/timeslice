@@ -1167,14 +1167,14 @@ struct MetricsScreen: View {
             .sorted { newestFirst ? $0.start > $1.start : $0.start < $1.start }
             .prefix(40).map { $0 }
         d.budgets = BudgetRows.build(
-            targets: (try? store.listTargets()) ?? [], tasks: model.allTasks,
+            targets: (try? store.listTargets(includeCompleted: true)) ?? [], tasks: model.allTasks,
             groups: model.groups, tags: model.allTags, tagIDsByTask: tagIDsByTask,
             intervals: all, viewedRange: range, now: now)
         // The planner's view of the viewed day, assembled exactly as the Mac's Planner page assembles
         // it — same `Planner.Input`, same `SubjectMembership`. Day ranges only: the solver's unit is a
         // week of waking hours, and there is no honest DayPlan to read for a month or a year.
         if isDay {
-            let targets = (try? store.listTargets()) ?? []
+            let targets = (try? store.listTargets(includeCompleted: true)) ?? []
             if targets.isEmpty {
                 d.plannedDay = nil
             } else {

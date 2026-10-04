@@ -19,12 +19,23 @@ public extension Target {
     var dayWindow: DateInterval? { dayWindow(calendar: .current) }
 
     func dayWindow(calendar: Calendar) -> DateInterval? {
-        guard startsOn != nil || endsOn != nil else { return nil }
+        // Archiving an allocation is an END BOUND, not a filter. `listTargets` used to drop retired rows
+        // from every query, which removed them from the periods they HAD been live in: archive the vllm
+        // goal today and last month stopped showing it was ever set, so history quietly rewrote itself to
+        // claim you had never intended the thing you worked on.
+        //
+        // The end is the START of the day it was archived, so the day you archive it no longer asks.
+        // Archiving is something you do when you are finished, and a goal that still nags for the rest of
+        // the afternoon reads as not having taken.
+        let retired = completedAt.map { calendar.startOfDay(for: $0) }
+        guard startsOn != nil || endsOn != nil || retired != nil else { return nil }
         let start = startsOn.map { calendar.startOfDay(for: $0) } ?? Date.distantPast
-        let end = endsOn
+        var end = endsOn
             .map { calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: $0))
                    ?? calendar.startOfDay(for: $0) }
             ?? Date.distantFuture
+        // Whichever comes first: an explicit end date you set, or the day you archived it.
+        if let retired { end = min(end, retired) }
         guard end > start else { return DateInterval(start: start, end: start) }
         return DateInterval(start: start, end: end)
     }

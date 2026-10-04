@@ -1199,7 +1199,7 @@ struct PlannerView: View {
         // inside it becomes a plain weekly target asking exactly what it asks of THIS window. That keeps
         // `Planner` and `Replan` — which work in weekday numbers with no dates — free of windows, cycles and
         // one-offs, rather than threading dates through both.
-        let stored = (try? store.listTargets()) ?? []
+        let stored = (try? store.listTargets(includeCompleted: true)) ?? []
         let calendar = Calendar.current
         let viewedWindow = periodWindow()
             ?? calendar.dateInterval(of: .weekOfYear, for: Date())

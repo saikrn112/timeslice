@@ -2322,7 +2322,7 @@ struct MetricsView: View {
         deviceLabels = (try? store.deviceLabels()) ?? [:]
         tags = (try? store.listTags()) ?? []
         tagIDsByTask = (try? store.effectiveTagIDsByTask()) ?? [:]
-        targets = (try? store.listTargets()) ?? []
+        targets = (try? store.listTargets(includeCompleted: true)) ?? []
 
         // Kept so the tag breakdown can be recomputed for a selection without another DB read.
         rangeIntervals = all

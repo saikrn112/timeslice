@@ -5157,6 +5157,63 @@ func testPaletteNav() {
     }
 }
 
+func testArchivedAllocationHistory() {
+    print("Archived allocations in history:")
+
+    let archivedOn = date(2026, 10, 1, 14, 30)      // a Thursday afternoon
+    func target(_ completed: Date?, from: Date? = nil, to: Date? = nil) -> Target {
+        Target(id: 1, subject: .tag(1), seconds: 10 * 3600, direction: .atLeast, period: .week,
+               completedAt: completed, startsOn: from, endsOn: to)
+    }
+    func week(_ d: Int) -> DateInterval {   // Sun-Sat weeks of Sep/Oct 2026
+        DateInterval(start: date(2026, 9, d, 0, 0), end: date(2026, 9, d + 7, 0, 0))
+    }
+
+    do { // the bug: archiving removed it from the periods it HAD been live in
+        let live = target(nil)
+        let archived = target(archivedOn)
+        let past = week(20)                           // 20-27 Sep, well before archiving
+        check(live.applies(to: past, calendar: cal), "a live allocation applies to a past week")
+        check(archived.applies(to: past, calendar: cal),
+              "and so does an archived one — history must still show what was set and acted upon")
+    }
+
+    do { // but it stops asking from the day it was archived
+        let archived = target(archivedOn)
+        let after = DateInterval(start: date(2026, 10, 4, 0, 0), end: date(2026, 10, 11, 0, 0))
+        check(!archived.applies(to: after, calendar: cal),
+              "the week after archiving shows nothing at all")
+        let onTheDay = DateInterval(start: date(2026, 10, 1, 0, 0), end: date(2026, 10, 2, 0, 0))
+        check(!archived.applies(to: onTheDay, calendar: cal),
+              "nor does the day you archived it — you were finished with it")
+        let dayBefore = DateInterval(start: date(2026, 9, 30, 0, 0), end: date(2026, 10, 1, 0, 0))
+        check(archived.applies(to: dayBefore, calendar: cal), "the day before still does")
+    }
+
+    do { // the part-week it was archived in asks only for the days before
+        // Archived Thursday 1 Oct, so the week of Sun 27 Sep claims Sun-Wed: four days of seven.
+        let archived = target(archivedOn)
+        let partWeek = DateInterval(start: date(2026, 9, 27, 0, 0), end: date(2026, 10, 4, 0, 0))
+        check(archived.claimedDays(in: partWeek, calendar: cal) == 4,
+              "four claimed days, not seven — it was live for part of that week")
+        check(approx(archived.ask(in: partWeek, calendar: cal), 10 * 3600 * 4.0 / 7, 60),
+              "so it asks four sevenths of the weekly figure")
+    }
+
+    do { // an explicit end date still wins when it comes first
+        let endedEarly = target(archivedOn, to: date(2026, 9, 15, 0, 0))
+        let between = DateInterval(start: date(2026, 9, 20, 0, 0), end: date(2026, 9, 27, 0, 0))
+        check(!endedEarly.applies(to: between, calendar: cal),
+              "an end date before the archive date is what bounds it")
+        check(endedEarly.applies(to: week(13), calendar: cal), "and it still applies before that")
+    }
+
+    do { // an unarchived, unbounded allocation is unchanged — the common case must not acquire a window
+        check(target(nil).dayWindow(calendar: cal) == nil,
+              "no dates and not archived means no window at all")
+    }
+}
+
 func testTagTotals() {
     print("Tag totals:")
 
@@ -6941,6 +6998,7 @@ do {
     testBreakPolicy()
     testOverlapResolver()
     testPaletteNav()
+    testArchivedAllocationHistory()
     testTargetMath()
     testDailyPlan()
     testPlannerWeekFacts()
