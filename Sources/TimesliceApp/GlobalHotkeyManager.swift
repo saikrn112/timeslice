@@ -190,7 +190,6 @@ final class GlobalHotkeyManager {
             }
 
             if chordHeld(flags) {
-                Self.note("chord held, key \(keyCode)")
                 if keyCode == backslash || keyCode == rightBracket {
                     let delta = keyCode == backslash ? 1 : -1
                     if !switcherActive {

@@ -3,8 +3,8 @@ import TimesliceUI
 import SwiftUI
 import TimesliceCore
 
-/// Spotlight-style task palette (fn+⌘+⇧+A). Type to fuzzy-search your tasks — active and
-/// finished, but not archived — and Return acts on the highlighted row: resuming an existing task
+/// Spotlight-style task palette (fn+⌘+⇧+A). Type to fuzzy-search your tasks — active, finished and
+/// archived — and Return acts on the highlighted row: resuming an existing task
 /// (un-finishing it as needed) or creating a new one from the last row. This is how you pick a
 /// task back up later without making a duplicate.
 @MainActor
@@ -461,7 +461,9 @@ private struct PaletteView: View {
     }
 
     private func statusBadge(_ p: Project) -> (String, Color)? {
-        p.finished ? ("done", .green) : nil   // archived tasks never reach the palette
+        // Selecting either brings it back: `resumeAndStart` un-archives and un-finishes.
+        if p.archived { return ("archived", .gray) }
+        return p.finished ? ("done", .green) : nil
     }
 
     private var footer: some View {

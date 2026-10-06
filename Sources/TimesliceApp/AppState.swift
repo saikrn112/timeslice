@@ -297,7 +297,12 @@ final class AppState: ObservableObject {
     /// The palette's list scrolls, so the cap only exists to keep ranking cheap — 8 was tight
     /// enough that finished tasks fell off the end for anyone with a handful of active ones.
     func searchTasks(_ query: String, limit: Int = 40) -> [TaskMatch] {
-        let all = (try? store.listProjects(includeArchived: false)) ?? []
+        // Archived tasks are searchable once something is typed. Hiding them meant typing an archived
+        // task's name offered only "Create", which made a second task of the same name and split its
+        // history in two. The empty palette stays a list of live work — `TaskSearch.rank` tiers
+        // archived last, and a recents list has no reason to show them at all.
+        let typed = !TaskSearch.parse(query).name.isEmpty
+        let all = (try? store.listProjects(includeArchived: typed)) ?? []
         let activity = (try? store.lastActivityByProject()) ?? [:]
         // Also match a task by its PROJECT's name — typing "inference" should surface the tasks
         // in that project, not just tasks literally called that. Built in Core so the phone's

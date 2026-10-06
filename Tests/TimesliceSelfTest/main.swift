@@ -4155,7 +4155,7 @@ func testSharedSettings() {
               "so nothing accumulates rows that nothing reads")
         check(IntervalStore.syncedSettingKeys.sorted()
                 == ["autoPauseMinutes", "breakEveryMinutes", "breakRestMinutes",
-                    "deepBlockMinutes", "highlightDimPercent", "idleNudgeMinutes",
+                    "deepBlockMinutes", "dormantAfterDays", "highlightDimPercent", "idleNudgeMinutes",
                     "microPauseSeconds", "promptsEnabled", "wakingHours"],
               "everything that changes what's recorded or what a number MEANS is shared")
         for local in ["syncFolderPath", "syncMode", "googleClientID", "deviceLabel"] {
@@ -4346,12 +4346,42 @@ func testTaskNameReuse() throws {
         check(reopened?.finished == false, "reusing a finished task reopens it")
     }
 
-    do { // an ARCHIVED task is left alone — archiving means "out of the way"
+    do { // re-adding an ARCHIVED task brings it back rather than forking
+        // This used to be the opposite on purpose — "archiving means out of the way" — and the owner
+        // overruled it: a second task with the same name splits one piece of work's history in two, and
+        // there's never a reason to want that. Out of the way now means out of the empty palette and the
+        // lists, not unreachable.
         let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
         let a = try store.createProject(name: "old", colorHex: "#fff")
         try store.setProjectArchived(id: a, archived: true)
         let b = try store.createProject(name: "old", colorHex: "#fff")
-        check(a != b, "an archived task is not silently resurrected")
+        check(a == b, "an archived task is reused, not duplicated")
+        let back = try store.listProjects(includeArchived: true).first { $0.id == a }
+        check(back?.archived == false, "and reusing it un-archives it")
+    }
+
+    do { // a live task still wins over an archived one of the same name
+        // Possible in existing data, since the old rule created exactly these duplicates.
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let old = try store.createProject(name: "standup", colorHex: "#fff")
+        try store.setProjectArchived(id: old, archived: true)
+        let live = try store.insertRemoteTask(uid: UUID().uuidString, name: "standup", colorHex: "#fff",
+                                              sortOrder: 1, archived: false, finished: false,
+                                              finishedAt: nil, taskProjectID: nil,
+                                              updatedAt: Date().timeIntervalSince1970)
+        check(try store.createProject(name: "standup", colorHex: "#fff") == live,
+              "the live one is reused, and the archived duplicate stays archived")
+        check(try store.listProjects(includeArchived: true).first { $0.id == old }?.archived == true,
+              "rather than both coming back")
+    }
+
+    do { // archiving is still per group: the same name in another project is a different task
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let g = try store.upsertTaskProject(name: "office", colorHex: "#fff")
+        let a = try store.createProject(name: "notes", colorHex: "#fff", inGroup: g)
+        try store.setProjectArchived(id: a, archived: true)
+        let inbox = try store.createProject(name: "notes", colorHex: "#fff")
+        check(inbox != a, "an archived task in one project isn't revived by an add to another")
     }
 
     do { // reuse keeps the interval history attached to one task

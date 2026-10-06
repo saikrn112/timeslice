@@ -375,11 +375,16 @@ public final class IntervalStore {
     /// resurrecting one would be surprising. Finished tasks DO match — a finished task is a
     /// completed instance of the same thing, so re-adding it should reopen it rather than fork the
     /// history in two.
+    /// The task of this name in this group, live or archived — a live one preferred when both exist.
+    ///
+    /// Archived tasks used to be skipped here, so "create `standup`" next to an archived `standup` made a
+    /// second task with the same name, and the work's history ended up split across the two. The caller
+    /// brings an archived match back instead.
     public func task(named name: String, inGroup taskProjectID: Int64?) throws -> Project? {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         let groupClause = taskProjectID == nil ? "task_project_id IS NULL" : "task_project_id = ?"
         let stmt = try prepare("SELECT id FROM projects WHERE name = ? COLLATE NOCASE "
-                               + "AND archived = 0 AND \(groupClause) LIMIT 1")
+                               + "AND \(groupClause) ORDER BY archived ASC, id ASC LIMIT 1")
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, 1, trimmed)
         if let taskProjectID { sqlite3_bind_int64(stmt, 2, taskProjectID) }
@@ -399,6 +404,7 @@ public final class IntervalStore {
     public func createProject(name: String, colorHex: String,
                              inGroup taskProjectID: Int64? = nil) throws -> Int64 {
         if let existing = try task(named: name, inGroup: taskProjectID) {
+            if existing.archived { try setProjectArchived(id: existing.id, archived: false) }
             if existing.finished { try setProjectFinished(id: existing.id, finished: false) }
             return existing.id
         }
@@ -2350,6 +2356,9 @@ public final class IntervalStore {
         // data, so this is the one that could reasonably have gone either way — but a highlight that
         // dims by 85% here and 40% there makes the same page read differently for no reason.
         "highlightDimPercent",
+        // Published as synced since it was added, but missing from this list, so every peer rejected it
+        // and the "quiet after" threshold never left the device it was set on.
+        "dormantAfterDays",
     ]
 
     public func setSetting(_ key: String, value: String, at when: Date = Date()) throws {

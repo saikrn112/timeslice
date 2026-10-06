@@ -222,11 +222,9 @@ Five places, all in Core, and missing any one fails silently:
 5. The key in `IntervalStore.syncedSettingKeys` — the merge rejects anything not listed. Update the
    self-test assertion that lists them.
 
-Then expose it in **both** Settings screens (Mac `SettingsPanel`, iOS `SettingsSheet`).
+Then expose it in **both** Settings screens (Mac `SettingsPanel`, iOS `SettingsSheet`). Missing step 5
+is the easy one to miss: `dormantAfterDays` shipped without it and its value never left the device.
 
-**Known bug:** `dormantAfterDays` does steps 1–4 but is missing from `syncedSettingKeys`, so it is
-published and then rejected by every peer. The "quiet after" threshold therefore doesn't sync. One-line
-fix; not yet made.
 
 ## Working on the iPhone app
 
@@ -501,10 +499,6 @@ badly behind; the gear badge exists because of that.
 
 Things found and deliberately left, so you don't rediscover them:
 
-- `dormantAfterDays` isn't in `syncedSettingKeys` (see above).
-- `hotkeys.log` writes a line on every switcher press (`chord held, key N`), a diagnostic left in from
-  the Secure Input chase. Trim it in the next install that's happening anyway — installing just for
-  this costs the user a re-grant.
 - Two overlapping intervals on 10 Aug, 28.6 minutes, from a one-time backfill of personal history
   entered around 24 Aug on top of live-recorded rows. Waiting on the user; `TimesliceTrim --overlaps`
   lists them.
