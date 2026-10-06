@@ -5244,6 +5244,64 @@ func testArchivedAllocationHistory() {
     }
 }
 
+func testMergeTask() throws {
+    print("Merge a duplicate task:")
+
+    do { // the ordinary case: history moves, the duplicate goes
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let keeper = try store.createProject(name: "outsideworld", colorHex: "#fff")
+        try store.insertClosedInterval(projectID: keeper, start: date(2026, 8, 22, 9, 0),
+                                       end: date(2026, 8, 22, 10, 0), deviceID: "mac")
+        let dup = try store.insertRemoteTask(uid: UUID().uuidString, name: "outsideworld",
+                                             colorHex: "#fff", sortOrder: 1, archived: true,
+                                             finished: true, finishedAt: nil, taskProjectID: nil,
+                                             updatedAt: Date().timeIntervalSince1970)
+        try store.insertClosedInterval(projectID: dup, start: date(2026, 8, 20, 9, 0),
+                                       end: date(2026, 8, 20, 9, 11), deviceID: "phone")
+        let before = try store.intervals().reduce(0.0) { $0 + ($1.end!.timeIntervalSince($1.start)) }
+
+        let moved = try store.mergeTask(id: dup, into: keeper)
+        check(moved == 1, "the duplicate's one interval moves")
+        let after = try store.intervals()
+        check(after.allSatisfy { $0.projectID == keeper }, "and now belongs to the keeper")
+        check(approx(after.reduce(0.0) { $0 + ($1.end!.timeIntervalSince($1.start)) }, before, 0.001),
+              "no time is gained or lost")
+        check(after.contains { $0.deviceID == "phone" && $0.start == date(2026, 8, 20, 9, 0) },
+              "the moved interval keeps its device and its exact times")
+        check(try !store.listProjects(includeArchived: true).contains { $0.id == dup },
+              "the duplicate task is gone")
+    }
+
+    do { // it must SYNC: the moved row's old uid is tombstoned, or a peer re-sends it under the duplicate
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let keeper = try store.createProject(name: "k", colorHex: "#fff")
+        let dup = try store.createProject(name: "d", colorHex: "#fff")
+        try store.insertClosedInterval(projectID: dup, start: date(2026, 8, 20, 9, 0),
+                                       end: date(2026, 8, 20, 9, 30))
+        let oldUID = try store.intervalsWithUIDs().first { $0.interval.projectID == dup }!.uid
+        let taskUID = try store.uid(table: "projects", id: dup)!
+        try store.mergeTask(id: dup, into: keeper)
+        let tomb = try store.tombstoneUIDs()
+        check(tomb.contains(oldUID), "the original interval is tombstoned")
+        check(tomb.contains(taskUID), "and so is the duplicate task")
+        check(try !store.intervalsWithUIDs().contains { $0.uid == oldUID },
+              "the re-inserted interval has a fresh uid, not the tombstoned one")
+    }
+
+    do { // refusals, each of which would otherwise need a decision nobody made
+        let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+        let keeper = try store.createProject(name: "k", colorHex: "#fff")
+        let running = try store.createProject(name: "r", colorHex: "#fff")
+        try store.switchTo(projectID: running)
+        var refused = false
+        do { try store.mergeTask(id: running, into: keeper) } catch { refused = true }
+        check(refused, "a task with a running interval is refused — its end moves with the clock")
+        check(try store.intervals().contains { $0.projectID == running },
+              "and nothing about it changed")
+        check(try store.mergeTask(id: keeper, into: keeper) == 0, "merging a task into itself is a no-op")
+    }
+}
+
 func testTagTotals() {
     print("Tag totals:")
 
@@ -7029,6 +7087,7 @@ do {
     testOverlapResolver()
     testPaletteNav()
     testArchivedAllocationHistory()
+    try testMergeTask()
     testTargetMath()
     testDailyPlan()
     testPlannerWeekFacts()

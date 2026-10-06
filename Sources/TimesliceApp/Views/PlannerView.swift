@@ -96,14 +96,17 @@ struct PlannerView: View {
         }
         return PlannerMonth.Resolution(rawValue: monthResolutionRaw) ?? .week
     }
-    @AppStorage("plannerMethod") private var methodRaw = Replan.Method.catchUp.rawValue
+    /// Per day by default. Catch-up shows the backlog already redistributed onto the days ahead, which
+    /// is the more accurate picture and the more alarming one: a single slow Monday makes every later day
+    /// look overloaded. The owner found it scary as a first view, so it is one click away, not the default.
+    @AppStorage("plannerMethod") private var methodRaw = Replan.Method.perDay.rawValue
     private var method: Replan.Method {
         // A capture run can force one, so both readings are reviewable without changing your setting.
         if let forced = ProcessInfo.processInfo.environment["TIMESLICE_PLANNER_METHOD"],
            let parsed = Replan.Method(rawValue: forced.replacingOccurrences(of: "-", with: " ")) {
             return parsed
         }
-        return Replan.Method(rawValue: methodRaw) ?? .catchUp
+        return Replan.Method(rawValue: methodRaw) ?? .perDay
     }
     @State private var showAllocations = false
     /// Built once per rebuild rather than per redraw: the calendar needs every interval placed at its

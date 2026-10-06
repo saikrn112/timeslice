@@ -74,6 +74,25 @@ func reportOverlaps(dbPath: String, apply: Bool, limitMinutes: Double?) throws {
 }
 
 do {
+    // `--merge FROM --into TO` folds a duplicate task into its keeper. Dry run by default, like the rest.
+    if let fromRaw = value(for: "--merge"), let from = Int64(fromRaw),
+       let toRaw = value(for: "--into"), let to = Int64(toRaw) {
+        guard let dbPath = value(for: "--db") else { print("need --db"); exit(2) }
+        let store = try IntervalStore(databaseURL: URL(fileURLWithPath: dbPath))
+        try store.migrateIfNeeded()
+        let tasks = try store.listProjects(includeArchived: true)
+        guard let a = tasks.first(where: { $0.id == from }), let b = tasks.first(where: { $0.id == to }) else {
+            print("no such task"); exit(1)
+        }
+        let moving = try store.intervals().filter { $0.projectID == from }
+        let mins = moving.reduce(0.0) { $0 + (($1.end ?? Date()).timeIntervalSince($1.start)) } / 60
+        print(String(format: "merge [%d] %@ (%d intervals, %.1fm) into [%d] %@",
+                     from, a.name, moving.count, mins, to, b.name))
+        guard CommandLine.arguments.contains("--apply") else { print("dry run — pass --apply to write"); exit(0) }
+        let moved = try store.mergeTask(id: from, into: to)
+        print("moved \(moved) interval(s); [\(from)] deleted")
+        exit(0)
+    }
     if CommandLine.arguments.contains("--overlaps") {
         guard let dbPath = value(for: "--db") else { print("need --db"); exit(2) }
         try reportOverlaps(dbPath: dbPath, apply: CommandLine.arguments.contains("--apply"),

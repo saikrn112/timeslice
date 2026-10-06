@@ -505,6 +505,66 @@ public final class IntervalStore {
     }
 
     /// Permanently delete a project and all its intervals. Destructive — removes time history.
+    /// Why `mergeTask` declined, in words a shell user can act on.
+    public enum StoreError: Error, CustomStringConvertible {
+        case mergeRefused(String)
+        public var description: String {
+            switch self { case .mergeRefused(let why): return "merge refused: \(why)" }
+        }
+    }
+
+    /// Fold one task into another: its intervals move to `into`, then it is deleted.
+    ///
+    /// For the duplicates an older rule created — a second task with the same name as an archived one,
+    /// splitting a single piece of work's history in two. Each interval is tombstoned and re-inserted
+    /// under the keeper rather than re-pointed in place: intervals are immutable synced facts, so an
+    /// in-place `UPDATE project_id` would be undone by the next merge from a device still holding the
+    /// original row. The recording device is carried over, since the work is still that device's.
+    ///
+    /// Refuses a running interval (its end moves with the clock) and a task with an allocation or tag
+    /// pointing at it, which would need a decision about where those go rather than silently following.
+    /// Returns the number of intervals moved.
+    @discardableResult
+    public func mergeTask(id from: Int64, into keeper: Int64) throws -> Int {
+        guard from != keeper else { return 0 }
+        let tasks = try listProjects(includeArchived: true)
+        guard tasks.contains(where: { $0.id == from }), tasks.contains(where: { $0.id == keeper }) else {
+            throw StoreError.mergeRefused("both tasks must exist")
+        }
+        let mine = try intervals().filter { $0.projectID == from }
+        guard !mine.contains(where: { $0.end == nil }) else {
+            throw StoreError.mergeRefused("task \(from) has a running interval")
+        }
+        if try listTargets(includeCompleted: true).contains(where: { $0.subject == .task(from) }) {
+            throw StoreError.mergeRefused("task \(from) has an allocation")
+        }
+        let tagged = try prepare("SELECT COUNT(*) FROM tag_links WHERE subject_kind = 'task' AND subject_id = ?")
+        sqlite3_bind_int64(tagged, 1, from)
+        let hasTags = sqlite3_step(tagged) == SQLITE_ROW && sqlite3_column_int64(tagged, 0) > 0
+        sqlite3_finalize(tagged)
+        guard !hasTags else { throw StoreError.mergeRefused("task \(from) has tags") }
+
+        var uids: [Int64: String] = [:]
+        for (interval, uid) in try intervalsWithUIDs() where interval.projectID == from {
+            uids[interval.id] = uid
+        }
+        try transaction {
+            for interval in mine {
+                guard let end = interval.end else { continue }
+                try recordTombstoneLocked(uid: uids[interval.id], kind: "interval")
+                let del = try prepare("DELETE FROM intervals WHERE id = ?")
+                defer { sqlite3_finalize(del) }
+                sqlite3_bind_int64(del, 1, interval.id)
+                try step(del)
+                try insertClosedIntervalLocked(projectID: keeper, start: interval.start, end: end,
+                                               deviceID: interval.deviceID)
+            }
+        }
+        // Now empty, so this tombstones only the task itself.
+        try deleteProject(id: from)
+        return mine.count
+    }
+
     public func deleteProject(id: Int64) throws {
         try transaction {
             try detachSubjectLocked(.task(id))

@@ -165,6 +165,7 @@ The user regularly asks for data corrections ("that was 20 minutes, not 40"). Ru
   swift run TimesliceTrim --db "$DB" --id 2353 --keep-minutes 20            # dry run
   swift run TimesliceTrim --db "$DB" --id 2353 --from "y-M-d H:m:s" --to "…" --apply
   swift run TimesliceTrim --db "$DB" --overlaps [--max-minutes 1] [--apply] # double-counted time
+  swift run TimesliceTrim --db "$DB" --merge 107 --into 94 [--apply]         # fold a duplicate task
   ```
 
   Dry run is the default; nothing is written without `--apply`.
@@ -173,6 +174,9 @@ The user regularly asks for data corrections ("that was 20 minutes, not 40"). Ru
 - **Rehearse on a copy first, then apply to the live file.** `cp` the `.db` **and** its `-wal`, then run
   `PRAGMA wal_checkpoint(TRUNCATE)` on the copy. Never copy a live `-shm`: it poisons the WAL and
   silently discards edits made to the copy.
+- **Quote the database path.** It contains a space (`Application Support`), and zsh doesn't
+  word-split an unquoted variable the way bash does, so `$=CMD` or `set -- $pair` tricks silently pass
+  the wrong arguments. Wrap the tool in a shell function that takes `"$@"`.
 - **SQL timestamps are UTC.** Use `datetime(x,'unixepoch','localtime')` when matching what the UI shows,
   or you will be looking at the wrong hours (this produced a false "no rows" more than once).
 - The user may already have fixed something themselves from another device. Read the current rows
