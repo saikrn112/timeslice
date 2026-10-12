@@ -204,15 +204,38 @@ final class AutoPauseController: ObservableObject {
     /// re-prompts immediately, forever.
     private func workClockStart() -> Date? {
         guard let since = engine.runningSince else { return nil }
+        // The check-in asks about time THIS process watched go by. Two backfills tripped it the moment
+        // they were made: a forgotten start moved back to 10:30 made the session look 36 minutes old, so
+        // the app paused it and asked "still working?" about time nobody had left unattended — you had
+        // just told it about that time yourself.
+        //
+        //  • `watchingSince`: nothing before this launch counts. A relaunch reads the open interval's start
+        //    from the database, so without this a back-dated start fires on every relaunch.
+        //  • `since`, the engine's own start, bounds the running interval: a start edited earlier in the
+        //    database while the app runs is a correction, not unattended time.
+        let floor = max(watchingSince, checkpointAnsweredAt ?? .distantPast)
         let gap = TimeInterval(settings.microPauseSeconds)
-        guard gap > 0 else { return since }
+        guard gap > 0 else { return max(since, floor) }
         // A day's worth of rows is plenty to find the current run and keeps this off the critical path;
         // a run longer than that has bigger problems than its prompt timing.
-        let recent = (try? appState.storeForEditing
-            .intervals(from: since.addingTimeInterval(-86_400))) ?? []
-        guard let run = WorkRuns.current(recent, gap: gap, perTask: true) else { return since }
-        return min(since, max(run.start, checkpointAnsweredAt ?? .distantPast))
+        let recent = ((try? appState.storeForEditing
+            .intervals(from: since.addingTimeInterval(-86_400))) ?? [])
+            .map { i -> Interval in
+                // The open row as the ENGINE knows it, so an external edit to its start is ignored here.
+                guard i.end == nil, i.start < since else { return i }
+                return Interval(id: i.id, projectID: i.projectID, start: since, end: nil,
+                                deviceID: i.deviceID)
+            }
+        guard let run = WorkRuns.current(recent, gap: gap, perTask: true) else {
+            return max(since, floor)
+        }
+        // Earlier closed intervals still bridge into the run (a 5-second pause doesn't restart the
+        // clock), but never back past the floor.
+        return max(min(since, run.start), floor)
     }
+
+    /// When this process began watching. See `workClockStart`.
+    private let watchingSince = Date()
 
     /// When a "still working?" prompt was last answered. See `workClockStart`.
     private var checkpointAnsweredAt: Date?

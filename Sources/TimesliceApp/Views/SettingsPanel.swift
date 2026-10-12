@@ -4,6 +4,8 @@ import TimesliceCore
 /// Compact settings for the metrics: daily goal, deep-block threshold, trend window.
 struct SettingsPanel: View {
     @ObservedObject var settings: AppSettings
+    /// Read by `MainWindowView`; same key, so flipping it here shows or hides the tab immediately.
+    @AppStorage("showPlannerTab") private var showPlanner = false
     /// The store, for the notes sheet. Passed in rather than reached for through the sync
     /// controller, which owns its copy privately and shouldn't be a back door to it.
     let store: IntervalStore
@@ -50,6 +52,15 @@ struct SettingsPanel: View {
                 onDec: { settings.dormantAfterDays = max(0, settings.dormantAfterDays - 5) },
                 onInc: { settings.dormantAfterDays = min(365, settings.dormantAfterDays + 5) }
             )
+
+            Toggle(isOn: $showPlanner) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Planner tab")
+                    Text("hidden for now; allocations still show in Metrics")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
 
             Divider()
 

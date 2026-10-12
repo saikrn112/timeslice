@@ -18,6 +18,18 @@ struct MainWindowView: View {
         return Tab.allCases.first { $0.rawValue.lowercased() == hint } ?? .projects
     }()
 
+    /// Whether the Planner tab is offered at all. Off by default: the owner asked for it out of the way
+    /// "for a while", so it is hidden rather than removed — everything behind it still compiles, still
+    /// runs in the self-test, and comes back with the Settings switch. Local to this Mac, not synced: the
+    /// phone has no Planner page, so there is nothing for the setting to mean there.
+    @AppStorage("showPlannerTab") private var showPlanner = false
+
+    /// A capture run that asked for the Planner gets it regardless, or `scripts/shot.sh planner` would
+    /// silently photograph the Tasks tab.
+    private var plannerAvailable: Bool {
+        showPlanner || ProcessInfo.processInfo.environment["TIMESLICE_DEMO_TAB"]?.lowercased() == "planner"
+    }
+
     enum Tab: String, CaseIterable, Identifiable {
         case projects = "Tasks"
         case metrics = "Metrics"
@@ -33,7 +45,12 @@ struct MainWindowView: View {
             switch selectedTab {
             case .projects: ProjectListView(appState: appState, engine: engine)
             case .metrics: MetricsView(appState: appState, engine: engine, settings: settings)
-            case .planner: PlannerView(appState: appState, engine: engine, settings: settings)
+            case .planner:
+                if plannerAvailable {
+                    PlannerView(appState: appState, engine: engine, settings: settings)
+                } else {
+                    ProjectListView(appState: appState, engine: engine)
+                }
             }
         }
         .frame(minWidth: 640, minHeight: 460)
@@ -42,6 +59,11 @@ struct MainWindowView: View {
         // job because it is the only one that owns the selection.
         .onChange(of: appState.metricsHandoff) { _, handoff in
             if handoff != nil { selectedTab = .metrics }
+        }
+        // Switching the Planner off while it is the open tab must not leave the window on a tab whose
+        // button no longer exists.
+        .onChange(of: showPlanner) { _, on in
+            if !on, selectedTab == .planner, !plannerAvailable { selectedTab = .projects }
         }
     }
 
@@ -52,7 +74,9 @@ struct MainWindowView: View {
             HStack(spacing: 4) {
                 tabButton(.projects, icon: "checklist")
                 tabButton(.metrics, icon: "chart.bar.xaxis")
-                tabButton(.planner, icon: "calendar.badge.clock")
+                if plannerAvailable {
+                    tabButton(.planner, icon: "calendar.badge.clock")
+                }
             }
 
             if selectedTab == .projects {

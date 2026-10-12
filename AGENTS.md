@@ -201,7 +201,9 @@ it was archived, so history still shows it. Load `listTargets(includeCompleted: 
 window decide. Pace is measured against each allocation's *own* claimed days
 (`elapsedFraction`), not the calendar's — a Mon–Fri goal is fully elapsed on Friday night.
 
-**Planner** (`planner_todo.md`). Week view is self-contained; month view reallocates across its weeks
+**Planner** (`planner_todo.md`). **Hidden by default since 12 Oct 2026** at the owner's request ("for a
+while") — the tab only appears with Settings → Planner tab on (`showPlannerTab`, local to the Mac).
+All of it still compiles and is tested; `scripts/shot.sh planner` still reaches it. Week view is self-contained; month view reallocates across its weeks
 (or days, `RES=day`) and never spills across months. One placement algorithm for every view. Past
 periods draw no plan blocks; what never happened goes in the pool below.
 
