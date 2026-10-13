@@ -5302,6 +5302,59 @@ func testMergeTask() throws {
     }
 }
 
+func testOverlapSessions() {
+    print("Overlap by session:")
+    func at(_ h: Int, _ m: Int, _ s: Int = 0) -> Date {
+        date(2026, 10, 13, h, m).addingTimeInterval(TimeInterval(s))
+    }
+    func iv(_ id: Int64, _ task: Int64, _ dev: String, _ a: Date, _ b: Date) -> Interval {
+        Interval(id: id, projectID: task, start: a, end: b, deviceID: dev)
+    }
+
+    do { // 13 Oct: the Air's session chunked at 10:02:51 must not count as starting then
+        let rows = [iv(2716, 1, "air", at(9, 42, 51), at(10, 2, 51)),
+                    iv(2717, 1, "air", at(10, 2, 51), at(10, 12, 51)),
+                    iv(2712, 2, "mac", at(9, 57, 21), at(10, 17, 21)),
+                    iv(2713, 2, "mac", at(10, 17, 21), at(10, 27, 21))]
+        let clips = OverlapResolver.clips(rows)
+        let byID = Dictionary(uniqueKeysWithValues: clips.map { ($0.id, $0) })
+        check(byID[2712] == nil && byID[2713] == nil,
+              "the Mac, which took over at 09:57:21, gives up nothing")
+        check(byID[2716].map { $0.keep.count == 1 && $0.keep[0].end == at(9, 57, 21) } ?? false,
+              "the Air's first chunk ends where the Mac started")
+        check(byID[2717]?.keep.isEmpty ?? false,
+              "and its rolled-over chunk, entirely after the takeover, goes")
+        check(clips.allSatisfy { OverlapResolver.isTakeoverRace($0, intervals: rows) },
+              "both are cross-device races, so a merge settles them unattended")
+    }
+
+    do { // a real pause is a real restart, however short — that is when the device last claimed the timer
+        let rows = [iv(1, 1, "air", at(9, 0), at(9, 20)),
+                    iv(2, 1, "air", at(9, 20, 5), at(9, 40)),
+                    iv(3, 2, "mac", at(9, 10), at(9, 30))]
+        let clips = OverlapResolver.clips(rows)
+        check(clips.contains { $0.id == 3 },
+              "a session resumed after a 5-second pause outranks one started before the pause")
+    }
+
+    do { // the same instant still has exactly one winner, and every device picks the same one
+        let rows = [iv(1, 1, "phone", at(10, 0), at(10, 10)), iv(2, 2, "mac", at(10, 0), at(10, 30))]
+        let clips = OverlapResolver.clips(rows)
+        check(clips.count == 1 && clips[0].id == 1, "the lower id yields on a tie")
+    }
+
+    do { // one device overlapping itself is a manual entry, never a race
+        let rows = [iv(1, 1, "mac", at(16, 33), at(17, 9)), iv(2, 2, "mac", at(16, 42), at(16, 50))]
+        let clips = OverlapResolver.clips(rows)
+        check(clips.count == 1 && !OverlapResolver.isTakeoverRace(clips[0], intervals: rows),
+              "a same-device overlap is left for a person")
+        let unknown = [iv(1, 1, "mac", at(16, 33), at(17, 9)),
+                       Interval(id: 2, projectID: 2, start: at(16, 42), end: at(16, 50), deviceID: nil)]
+        check(!OverlapResolver.isTakeoverRace(OverlapResolver.clips(unknown)[0], intervals: unknown),
+              "and so is one against a row with no device — unknown is not evidence of a race")
+    }
+}
+
 func testTagTotals() {
     print("Tag totals:")
 
@@ -6534,12 +6587,16 @@ func testMergeResolvesClosedOverlaps() throws {
         check(intervals.count == 2, "both rows are still there, one of them shortened")
     }
 
-    do { // the real case from 28 Sep: 13 minutes, far too much to rewrite silently
+    do { // the real case from 28 Sep: a 13-minute takeover race between two devices
+        // Capped at a minute in the first version, which left every missed takeover double-counted. Across
+        // devices the later start wins at any size — the rule takeover itself applies live.
         let (report, intervals) = try merge(aSpan: (15, 66.8), bSpan: (53.75, 67.9))
-        check(report.overlapsResolved == 0,
-              "13 minutes of recorded work is not a merge's call to make")
-        check(report.overlapsLeft == 1, "but it is reported rather than passing unnoticed")
-        check(OverlapResolver.clips(intervals).count == 1, "and the rows are left exactly as they were")
+        check(report.overlapsResolved == 1, "a cross-device race is settled whatever its size")
+        check(report.overlapsLeft == 0, "leaving nothing for a person")
+        check(OverlapResolver.clips(intervals).isEmpty, "and no overlap survives the merge")
+        let phone = intervals.filter { $0.deviceID == "phone" }
+        check(phone.count == 1 && approx(phone[0].end!.timeIntervalSince(phone[0].start), 38.75 * 60, 1),
+              "the earlier-started device gives up exactly the overlap")
     }
 
     do { // nothing to do in the ordinary case, which is the one that must not be disturbed
@@ -7086,6 +7143,7 @@ do {
     testBreakPolicy()
     testOverlapResolver()
     testPaletteNav()
+    testOverlapSessions()
     testArchivedAllocationHistory()
     try testMergeTask()
     testTargetMath()

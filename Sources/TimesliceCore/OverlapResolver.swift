@@ -42,6 +42,26 @@ public enum OverlapResolver {
         }
     }
 
+    /// Whether a clip is a takeover that failed — this interval overlaps only intervals recorded on OTHER
+    /// devices — rather than an overlap on one device.
+    ///
+    /// The distinction is what decides who may resolve it. Across devices, two timers running at once is
+    /// exactly what `TakeoverPolicy` exists to prevent, and its rule (the later start wins) is the right
+    /// answer however long the overlap ran: a laptop left timing while you worked on another machine.
+    /// That is safe to settle unattended at any size. On ONE device an overlap can only come from a
+    /// manual entry — a backfill typed over live rows — and which side is true is the user's call.
+    ///
+    /// Rows with no device recorded are treated as same-device: unknown attribution is not evidence of a
+    /// race.
+    public static func isTakeoverRace(_ clip: Clip, intervals: [Interval]) -> Bool {
+        guard let mine = clip.deviceID, !clip.lostTo.isEmpty else { return false }
+        let byID = Dictionary(uniqueKeysWithValues: intervals.map { ($0.id, $0) })
+        return clip.lostTo.allSatisfy { id in
+            guard let other = byID[id]?.deviceID else { return false }
+            return other != mine
+        }
+    }
+
     /// Deterministic replacement uid. Derived from the original uid and the piece's bounds, so the same
     /// clip computed on two devices is the same row, and re-inserting is an `INSERT OR IGNORE` rather
     /// than a duplicate. Seconds resolution is enough — the bounds come from another interval's stored
@@ -62,23 +82,35 @@ public enum OverlapResolver {
     /// same answer. Only closed intervals are considered: a running one's end moves with the clock, and
     /// back-dating a live timer is `TakeoverPolicy`'s job.
     public static func clips(_ intervals: [Interval], uids: [Int64: String] = [:]) -> [Clip] {
-        let closed = intervals.filter { $0.end != nil }.sorted {
-            $0.start == $1.start ? $0.id < $1.id : $0.start < $1.start
+        let closed = intervals.filter { $0.end != nil }
+        // "Who started later" is decided per SESSION, not per row. A long session is stored as back-to-back
+        // chunks (`rollOpenInterval` splits at the focus length), so comparing rows made the Air's
+        // `parents`, chunked at 10:02:51, look as if it had started AFTER the Mac's 09:57:21 — and the
+        // resolver handed ten minutes of the Mac's work to it. A chunk inherits the start of its session.
+        let sessionStart = sessionStarts(closed)
+        func began(_ i: Interval) -> Date { sessionStart[i.id] ?? i.start }
+        let ordered = closed.sorted {
+            let a = began($0), b = began($1)
+            if a != b { return a < b }
+            return $0.start == $1.start ? $0.id < $1.id : $0.start < $1.start
         }
         var out: [Clip] = []
 
-        for (index, earlier) in closed.enumerated() {
+        for (index, earlier) in ordered.enumerated() {
             guard let end = earlier.end, end > earlier.start else { continue }
-            // Everything that starts later and reaches into this one. Later-starting wins, so it is the
-            // earlier interval that gives up the shared time.
-            var covered: [DateInterval] = []
-            for later in closed[(index + 1)...] {
-                guard later.start < end else { break }        // sorted by start: nothing after can reach
-                guard let lEnd = later.end, lEnd > earlier.start else { continue }
-                covered.append(DateInterval(start: max(later.start, earlier.start),
-                                            end: min(lEnd, end)))
+            // Everything later in the order — a later-started session, or the same instant with a higher id,
+            // so a tie still has exactly one winner on every device — that reaches into this row. The
+            // earlier one gives up the shared time. No early `break`: ordered by session start, a later
+            // session's chunk can begin at any time. Rows of one session never overlap each other, so they
+            // can't appear here as rivals.
+            let rivals = ordered[(index + 1)...].filter { l in
+                guard let lEnd = l.end else { return false }
+                return l.start < end && lEnd > earlier.start
             }
-            guard !covered.isEmpty else { continue }
+            guard !rivals.isEmpty else { continue }
+            let covered = rivals.map {
+                DateInterval(start: max($0.start, earlier.start), end: min($0.end!, end))
+            }
 
             // Subtract the union of the covered spans.
             var keep: [DateInterval] = []
@@ -99,11 +131,30 @@ public enum OverlapResolver {
 
             out.append(Clip(id: earlier.id, uid: uids[earlier.id], projectID: earlier.projectID,
                             deviceID: earlier.deviceID, originalStart: earlier.start, originalEnd: end,
-                            keep: keep,
-                            lostTo: closed[(index + 1)...].filter { l in
-                                guard let lEnd = l.end else { return false }
-                                return l.start < end && lEnd > earlier.start
-                            }.map(\.id)))
+                            keep: keep, lostTo: rivals.map(\.id)))
+        }
+        return out.sorted { $0.originalStart < $1.originalStart }
+    }
+
+    /// The start of the session each row belongs to: consecutive rows of the same task on the same device
+    /// with no gap between them (within a second — `rollOpenInterval` writes them exactly end-to-start).
+    /// Deliberately NOT the micro-pause tolerance: a real pause, however short, is a real restart as far as
+    /// takeover is concerned, because that is when the device last claimed the timer.
+    static func sessionStarts(_ closed: [Interval]) -> [Int64: Date] {
+        var out: [Int64: Date] = [:]
+        let groups = Dictionary(grouping: closed) { "\($0.deviceID ?? "-")|\($0.projectID)" }
+        for (_, rows) in groups {
+            var start: Date?
+            var lastEnd: Date?
+            for row in rows.sorted(by: { $0.start < $1.start }) {
+                if let s = start, let e = lastEnd, row.start.timeIntervalSince(e) <= 1 {
+                    out[row.id] = s
+                } else {
+                    start = row.start
+                    out[row.id] = row.start
+                }
+                lastEnd = row.end
+            }
         }
         return out
     }

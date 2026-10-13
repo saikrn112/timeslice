@@ -36,7 +36,15 @@ func describe(_ i: Interval, _ name: String) -> String {
 }
 
 /// `--overlaps` reports (and with `--apply`, removes) every double-counted span in the database.
+/// `--auto` selects exactly what `SyncEngine.merge` settles unattended, so running it here is the same as
+/// waiting for the next sync — and a dry run shows what the next sync is about to do.
+func autoResolvable(_ clip: OverlapResolver.Clip, _ rows: [Interval]) -> Bool {
+    clip.removedSeconds <= SyncEngine.autoResolveOverlapSeconds
+        || OverlapResolver.isTakeoverRace(clip, intervals: rows)
+}
+
 func reportOverlaps(dbPath: String, apply: Bool, limitMinutes: Double?) throws {
+    let auto = CommandLine.arguments.contains("--auto")
     let store = try IntervalStore(databaseURL: URL(fileURLWithPath: dbPath))
     try store.migrateIfNeeded()
     let names = Dictionary(uniqueKeysWithValues: try store.listProjects(includeArchived: true)
@@ -45,7 +53,8 @@ func reportOverlaps(dbPath: String, apply: Bool, limitMinutes: Double?) throws {
     var uids: [Int64: String] = [:]
     for (interval, uid) in try store.intervalsWithUIDs() { uids[interval.id] = uid }
     let limit = (limitMinutes ?? .infinity) * 60
-    let clips = OverlapResolver.clips(all, uids: uids).filter { $0.removedSeconds <= limit }
+    let clips = OverlapResolver.clips(all, uids: uids)
+        .filter { $0.removedSeconds <= limit && (!auto || autoResolvable($0, all)) }
     let byID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
     guard !clips.isEmpty else { print("no overlap"); return }
 
@@ -68,7 +77,9 @@ func reportOverlaps(dbPath: String, apply: Bool, limitMinutes: Double?) throws {
     }
     print(String(format: "\n%d interval(s), %.1f minutes double-counted", clips.count, removed / 60))
     guard apply else { print("dry run — pass --apply to write"); return }
-    let applied = try store.resolveClosedOverlaps(upToRemovedSeconds: limit)
+    let applied = try store.resolveClosedOverlaps { clip, rows in
+        clip.removedSeconds <= limit && (!auto || autoResolvable(clip, rows))
+    }
     print("applied to \(applied.count) interval(s)")
     print("remaining overlap: \(OverlapResolver.clips(try store.intervals()).count)")
 }

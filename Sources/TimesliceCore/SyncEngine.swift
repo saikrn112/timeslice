@@ -335,23 +335,31 @@ public struct SyncEngine {
         }
         // Finally, the one-timer invariant for rows that arrived ALREADY CLOSED. `TakeoverPolicy` runs
         // over the running markers and can only settle a race caught in the act; this settles the one
-        // where both devices stopped before they ever saw each other. Done after the intervals are in,
-        // because the overlap only exists once both sides are present.
+        // where it was missed. Done after the intervals are in, because the overlap only exists once both
+        // sides are present.
         //
-        // Bounded on purpose. Takeover's own back-dating leaves sub-second slivers behind — pure noise,
-        // and cleaning them unattended is right. A clip that would remove minutes of recorded work is a
-        // judgement call about which device was really in use, and a background merge is the worst place
-        // to make it silently, so those are counted and left for `TimesliceTrim --overlaps`.
-        let clips = OverlapResolver.clips(try store.intervals())
-        report.overlapsLeft = clips.filter { $0.removedSeconds > Self.autoResolveOverlapSeconds }.count
-        if clips.contains(where: { $0.removedSeconds <= Self.autoResolveOverlapSeconds }) {
-            report.overlapsResolved = try store
-                .resolveClosedOverlaps(upToRemovedSeconds: Self.autoResolveOverlapSeconds).count
+        // Two kinds are settled unattended, and only two:
+        //  • a takeover that failed — the overlap is with another device's rows — at any size, by the same
+        //    later-start-wins rule takeover itself applies. The first version capped EVERYTHING at a
+        //    minute, so a laptop left timing for 15 minutes after work moved to another Mac stayed
+        //    double-counted with nothing to show it was ever the system's fault.
+        //  • a sub-minute sliver on one device, which is takeover's own back-dating rounding.
+        // A larger overlap on ONE device can only come from a manual entry, and which side is true is the
+        // user's call; those are counted and left for `TimesliceTrim --overlaps`.
+        let all = try store.intervals()
+        let clips = OverlapResolver.clips(all)
+        let auto = { (clip: OverlapResolver.Clip, rows: [Interval]) -> Bool in
+            clip.removedSeconds <= Self.autoResolveOverlapSeconds
+                || OverlapResolver.isTakeoverRace(clip, intervals: rows)
+        }
+        report.overlapsLeft = clips.filter { !auto($0, all) }.count
+        if clips.contains(where: { auto($0, all) }) {
+            report.overlapsResolved = try store.resolveClosedOverlaps(where: auto).count
         }
         return report
     }
 
-    /// How much a clip may remove before it needs a person. One minute: every overlap this has produced
-    /// unattended was a fraction of a second, and the smallest genuine device race seen was 1.3 minutes.
+    /// How much a SAME-device clip may remove before it needs a person. Cross-device races are settled at
+    /// any size (see `merge`), so this only governs the slivers of rounding on one device.
     public static let autoResolveOverlapSeconds: TimeInterval = 60
 }

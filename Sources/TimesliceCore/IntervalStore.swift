@@ -1304,11 +1304,21 @@ public final class IntervalStore {
     public func resolveClosedOverlaps(
         upToRemovedSeconds limit: TimeInterval = .infinity
     ) throws -> [OverlapResolver.Clip] {
+        try resolveClosedOverlaps { clip, _ in clip.removedSeconds <= limit }
+    }
+
+    /// The same, with the choice of WHICH overlaps to settle made by `shouldResolve` — given each clip and
+    /// every interval, so a rule can look at the other side of the overlap (see
+    /// `OverlapResolver.isTakeoverRace`).
+    @discardableResult
+    public func resolveClosedOverlaps(
+        where shouldResolve: (OverlapResolver.Clip, [Interval]) -> Bool
+    ) throws -> [OverlapResolver.Clip] {
         let all = try intervals()
         var uids: [Int64: String] = [:]
         for (interval, uid) in try intervalsWithUIDs() { uids[interval.id] = uid }
         let clips = OverlapResolver.clips(all, uids: uids)
-            .filter { $0.removedSeconds <= limit }
+            .filter { shouldResolve($0, all) }
         guard !clips.isEmpty else { return [] }
         try transaction {
             for clip in clips {

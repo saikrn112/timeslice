@@ -443,12 +443,24 @@ sqlite3 "$DB" "SELECT COUNT(*) FROM intervals a JOIN intervals b ON a.id<b.id
 ```
 
 Two mechanisms keep it true, and they cover different moments. `TakeoverPolicy` settles a race caught
-in the act, off the running markers. `OverlapResolver` settles the one where both devices stopped before
-they ever saw each other — by then both rows are closed facts and the merge would insert the overlap
-permanently. It runs at the end of every `SyncEngine.merge`, removes only the genuinely double-counted
-span (not the earlier row's whole tail), and is **bounded**: a clip removing more than a minute is
-counted in `MergeReport.overlapsLeft` and left for `swift run TimesliceTrim --overlaps`, because deciding
-which device was really in use for twenty minutes of recorded work is not a background merge's call.
+in the act, off the running markers. `OverlapResolver` settles the one it missed — by then both rows are
+closed facts and the merge would insert the overlap permanently. It runs at the end of every
+`SyncEngine.merge` and removes only the genuinely double-counted span, by the same rule: **the later
+start wins**.
+
+What a merge may settle unattended is decided by *where* the overlap is, not how big it is:
+
+- **Across devices it's always a missed takeover**, and is settled at any size. A one-minute cap
+  everywhere (the first version) left a laptop that kept timing for 15 minutes after work moved to
+  another Mac double-counted indefinitely.
+- **On one device it can only be a manual entry** (a backfill typed over live rows), so anything over a
+  minute is counted in `MergeReport.overlapsLeft` and left for `swift run TimesliceTrim --overlaps`.
+  `--auto` previews exactly what the next merge will do.
+
+"Later start" means the **session**, not the row. Long sessions are stored as back-to-back chunks
+(`rollOpenInterval`), so judging by row made a chunk look like a fresh start and handed ten minutes of the
+winner's work to the loser. A chunk inherits its session's start (same task, same device, gap ≤ 1s);
+a real pause, however short, is a real restart.
 
 Its replacement uids are DERIVED from the original plus the surviving bounds. Every device computes the
 same clip independently, so a fresh random uid would replace one overlap with one duplicate per device.
