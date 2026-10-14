@@ -293,8 +293,13 @@ public final class AppSettings: ObservableObject {
     /// on this build joins in with the values already configured here rather than with nothing.
     public func attach(store: IntervalStore) {
         self.store = store
+        // Seeded at the EPOCH, not now. Sync keeps the newest value, so a seed stamped with the current
+        // time beat every real choice made earlier on another device: when `dormantAfterDays` first became
+        // synced, the first device to attach seeded its default 30 and overwrote the 10 the owner had set
+        // three weeks before, everywhere. A seed is only a placeholder; anything a person actually chose
+        // must outrank it.
         for (key, value) in syncedValues() where (try? store.settingValue(key)) ?? nil == nil {
-            try? store.setSetting(key, value: value)
+            try? store.setSetting(key, value: value, at: Date(timeIntervalSince1970: 0))
         }
         adoptSyncedSettings()
     }

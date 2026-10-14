@@ -573,6 +573,17 @@ struct ProjectListView: View {
 
             Spacer(minLength: 6)
 
+            // When it was last worked on, so a Today list padded with things untouched for weeks says so
+            // at a glance. Nothing for the running row or one already worked today — the time beside it
+            // already answers that.
+            if !isRunning, let label = lastWorkedLabel(project) {
+                Text(label)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+                    .help("last tracked \(label)")
+            }
+
             // Live ms only for the running row; others show a static value. LiveTimeText
             // observes the clock so only this label re-renders at tick rate.
             LiveTimeText(clock: engine.clock, base: total.seconds, isRunning: isRunning, showMs: isRunning,
@@ -688,6 +699,17 @@ struct ProjectListView: View {
     }
 
     /// Why a row is marked dormant, in the row's own tooltip.
+    /// "yesterday", "5d ago", "never". Nil when it was worked on today.
+    private func lastWorkedLabel(_ project: Project) -> String? {
+        guard let days = appState.quietDaysByTask[project.id] else { return nil }
+        switch days {
+        case ..<0: return "never"
+        case 0: return nil
+        case 1: return "yesterday"
+        default: return "\(days)d ago"
+        }
+    }
+
     private func dormantHelp(_ project: Project) -> String {
         let days = appState.quietDaysByTask[project.id] ?? -1
         if days < 0 { return "Never tracked. Marked quiet automatically — start it and the mark goes." }

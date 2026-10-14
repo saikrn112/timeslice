@@ -228,6 +228,12 @@ Five places, all in Core, and missing any one fails silently:
 5. The key in `IntervalStore.syncedSettingKeys` — the merge rejects anything not listed. Update the
    self-test assertion that lists them.
 
+**Seeds are stamped at the epoch, never now.** `attach(store:)` writes a device's defaults for any key it
+has no row for, and sync keeps the newest value — so a seed stamped "now" beats every real choice made
+earlier on another device. That is exactly what happened when `dormantAfterDays` first became synced:
+the first device to attach seeded 30 and overwrote the owner's 10 everywhere. If you add a key, it will
+be seeded on every device on first launch; the epoch stamp is what keeps that harmless.
+
 Then expose it in **both** Settings screens (Mac `SettingsPanel`, iOS `SettingsSheet`). Missing step 5
 is the easy one to miss: `dormantAfterDays` shipped without it and its value never left the device.
 

@@ -5355,6 +5355,20 @@ func testOverlapSessions() {
     }
 }
 
+func testSettingSeedNeverWins() throws {
+    print("Setting seeds:")
+    // A device attaching with no stored value seeds its default. That seed must lose to a real choice
+    // made earlier elsewhere, or a fresh install overwrites everyone's settings with defaults.
+    let (store, url) = try makeStore(); defer { try? FileManager.default.removeItem(at: url) }
+    let chosen = Date(timeIntervalSince1970: 1_789_000_000)          // three weeks earlier
+    // What attach() does: seed at the epoch.
+    try store.setSetting("dormantAfterDays", value: "30", at: Date(timeIntervalSince1970: 0))
+    let applied = try store.applyRemoteSetting(key: "dormantAfterDays", value: "10",
+                                               remoteUpdatedAt: chosen.timeIntervalSince1970)
+    check(applied, "a real choice made weeks ago replaces a fresh device's seeded default")
+    check(try store.settingValue("dormantAfterDays")?.value == "10", "so the owner's 10 survives")
+}
+
 func testTagTotals() {
     print("Tag totals:")
 
@@ -7144,6 +7158,7 @@ do {
     testOverlapResolver()
     testPaletteNav()
     testOverlapSessions()
+    try testSettingSeedNeverWins()
     testArchivedAllocationHistory()
     try testMergeTask()
     testTargetMath()
