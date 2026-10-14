@@ -40,6 +40,13 @@ struct SettingsScreen: View {
                             caption: "a pause this short doesn't break a block — or your break counter",
                             dec: { settings.microPauseSeconds = settings.steppedMicroPause(by: -1) },
                             inc: { settings.microPauseSeconds = settings.steppedMicroPause(by: 1) })
+                    // The phone already went quiet by this threshold (`TimerModel.quietAfterDays`) and
+                    // synced it, but had no row to change it, so it could only be set from a Mac.
+                    stepper("Quiet after",
+                            value: settings.dormantAfterDays == 0 ? "Off" : "\(settings.dormantAfterDays)d",
+                            caption: "tasks untouched this long are marked quiet, not done",
+                            dec: { settings.dormantAfterDays = max(0, settings.dormantAfterDays - 5) },
+                            inc: { settings.dormantAfterDays = min(365, settings.dormantAfterDays + 5) })
                 } header: { header("Metrics") }
 
                 Section {
