@@ -62,6 +62,44 @@ final class AppState: ObservableObject {
     /// Archived (finished) tasks with their all-time totals.
     @Published var archivedTotals: [ProjectTotal] = []
     @Published var scope: TimeScope = .today
+
+    /// How the task list is arranged: grouped under projects, or one flat list most-recently-worked first.
+    ///
+    /// Recent is the switcher's own order, so the window and the revolver agree about what "the task I was
+    /// just on" means. Persisted, and local to this Mac — it's how you like to look at the list, not a fact
+    /// about your data.
+    enum ListOrder: String, CaseIterable, Identifiable {
+        case projects = "Projects"
+        case recent = "Recent"
+        var id: String { rawValue }
+    }
+    @Published var listOrder: ListOrder =
+        // `ORDER=recent scripts/shot.sh projects` renders either arrangement without touching the setting.
+        ListOrder(rawValue: ProcessInfo.processInfo.environment["TIMESLICE_LIST_ORDER"] ?? "")
+        ?? ListOrder(rawValue: UserDefaults.standard.string(forKey: "taskListOrder") ?? "") ?? .projects {
+        didSet { UserDefaults.standard.set(listOrder.rawValue, forKey: "taskListOrder") }
+    }
+
+    /// Last time each task was tracked. Cached on reload so the recent list can sort without querying the
+    /// store on every render.
+    @Published private(set) var lastActivityByTask: [Int64: Date] = [:]
+
+    /// `visibleTotals`, most recently worked first: the running task, then by last activity, then tasks
+    /// never tracked, newest first. Finished tasks sink to the bottom, as in the popover.
+    var recentVisibleTotals: [ProjectTotal] {
+        let running = engine.runningProjectID
+        return visibleTotals.sorted { a, b in
+            if a.project.finished != b.project.finished { return !a.project.finished }
+            if (a.project.id == running) != (b.project.id == running) { return a.project.id == running }
+            let la = lastActivityByTask[a.project.id], lb = lastActivityByTask[b.project.id]
+            switch (la, lb) {
+            case let (x?, y?) where x != y: return x > y
+            case (_?, nil): return true
+            case (nil, _?): return false
+            default: return a.project.id > b.project.id
+            }
+        }
+    }
     @Published var selectedProjectID: Int64?
 
     /// Whether the global hotkeys are actually live.
@@ -109,7 +147,8 @@ final class AppState: ObservableObject {
 
     /// Ids of the rows ↑/↓ can land on in the window, matching what the list actually shows.
     private var arrowableIDs: [Int64] {
-        scope == .today
+        if listOrder == .recent { return recentVisibleTotals.map(\.project.id) }
+        return scope == .today
             ? selectableProjects.filter { !dormantTaskIDs.contains($0.id) }.map(\.id)
             : selectableProjects.map(\.id)
     }
@@ -160,6 +199,7 @@ final class AppState: ObservableObject {
             ?? override
             ?? UserDefaults.standard.object(forKey: "dormantAfterDays") as? Int ?? 30
         let activity = (try? store.lastActivityByProject()) ?? [:]
+        lastActivityByTask = activity
         dormantTaskIDs = Dormancy.dormantTaskIDs(lastActivity: activity,
                                                  created: (try? store.projectCreationDates()) ?? [:],
                                                  tasks: projects, afterDays: days)

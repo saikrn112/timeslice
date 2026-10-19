@@ -82,6 +82,8 @@ struct MainWindowView: View {
             if selectedTab == .projects {
                 Divider().frame(height: 14)
                 scopeToggle
+                Divider().frame(height: 14)
+                orderToggle
             }
 
             Spacer()
@@ -127,6 +129,23 @@ struct MainWindowView: View {
                         .foregroundStyle(appState.scope == scope ? Color.accentColor : Color.secondary)
                 }
                 .buttonStyle(.plain)
+            }
+        }
+    }
+
+    /// Projects · Recent, styled like the scope toggle beside it.
+    private var orderToggle: some View {
+        HStack(spacing: 6) {
+            ForEach(Array(AppState.ListOrder.allCases.enumerated()), id: \.element.id) { idx, order in
+                if idx > 0 { Text("·").font(.system(size: 11)).foregroundStyle(.tertiary) }
+                Button { appState.listOrder = order } label: {
+                    Text(order.rawValue)
+                        .font(.system(size: 12, weight: appState.listOrder == order ? .semibold : .regular))
+                        .foregroundStyle(appState.listOrder == order ? Color.accentColor : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(order == .recent ? "Most recently worked first — the switcher's order"
+                                       : "Grouped under projects")
             }
         }
     }

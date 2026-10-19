@@ -189,7 +189,13 @@ struct ProjectListView: View {
             LazyVStack(spacing: 3) {
                 // Flat until you create a project; grouped headers appear only once there's
                 // something to group by, so the list never gains chrome it doesn't need.
-                if appState.taskProjects.isEmpty {
+                if appState.listOrder == .recent {
+                    // One flat list in the switcher's order. Each row names its project, since there's
+                    // no section header above it to say so.
+                    ForEach(appState.recentVisibleTotals, id: \.rowIdentity) { total in
+                        activeRow(total, showsGroup: true)
+                    }
+                } else if appState.taskProjects.isEmpty {
                     ForEach(appState.visibleTotals, id: \.rowIdentity) { total in
                         activeRow(total)
                     }
@@ -493,7 +499,7 @@ struct ProjectListView: View {
 
     // MARK: - Active row
 
-    private func activeRow(_ total: ProjectTotal) -> some View {
+    private func activeRow(_ total: ProjectTotal, showsGroup: Bool = false) -> some View {
         let project = total.project
         let isSelected = appState.selectedProjectID == project.id
         let isRunning = engine.runningProjectID == project.id
@@ -558,6 +564,13 @@ struct ProjectListView: View {
                 // row sits under, and repeating "office" on all nine of that project's tasks would
                 // be nine copies of one fact. What the row can't otherwise tell you is the tag it
                 // carries in ADDITION to its project's.
+                if showsGroup, let group = appState.shortGroupName(forTaskID: project.id) {
+                    Text(group)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.secondary.opacity(0.14)))
+                }
                 if let tags = appState.ownTagsByTask[project.id] {
                     ForEach(tags) { tag in
                         Text(tag.name)
