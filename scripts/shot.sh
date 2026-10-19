@@ -26,6 +26,10 @@ SRC="${DB_SRC:-$HOME/Library/Application Support/Timeslice/timeslice.db}"
 SHOT_DB="/tmp/timeslice-shot/timeslice.db"
 mkdir -p /tmp/timeslice-shot
 if [ -f "$SRC" ]; then
+  # Clear the sidecars FIRST. They are copied only when the source has them, so a WAL left behind by an
+  # earlier run against a different database (say the real one, then a DB_SRC demo) was paired with the
+  # wrong file — the app then never opened a window, with an empty log to show for it.
+  rm -f "$SHOT_DB-wal" "$SHOT_DB-shm"
   cp "$SRC" "$SHOT_DB"
   [ -f "$SRC-wal" ] && cp "$SRC-wal" "$SHOT_DB-wal"
   [ -f "$SRC-shm" ] && cp "$SRC-shm" "$SHOT_DB-shm"
