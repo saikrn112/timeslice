@@ -47,7 +47,10 @@ struct SyncBadge: View {
                  + "seeing keystrokes. Usually a password field left focused — quit the browser or\n"
                  + "password manager you last typed one into, or log out and back in."
         }
-        if !appState.hotkeysActive && (!DemoData.isScreenshotRun || forced == "hotkeys") {
+        // Not in a capture run either: an unbundled debug build never has Accessibility, so every
+        // screenshot would carry this badge for a reason that has nothing to do with what's photographed.
+        if !appState.hotkeysActive
+            && ((!DemoData.isScreenshotRun && !DemoData.isCaptureRun) || forced == "hotkeys") {
             return "The fn+⌘+⇧ switcher isn't active — macOS hasn't granted Accessibility.\n"
                  + "Enable Timeslice under System Settings › Privacy & Security › Accessibility,\n"
                  + "then QUIT AND REOPEN Timeslice: a grant added after launch isn't picked up."

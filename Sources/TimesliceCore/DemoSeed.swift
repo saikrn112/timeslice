@@ -18,6 +18,11 @@ public enum DemoSeed {
     public enum Preset: String, Sendable {
         case screenshot
         case rich
+        /// The product page's data. Generic names only — it is published. Contains EXACTLY the page's
+        /// scripted Thursday (the most recent Thursday before today), so a screenshot of that day in the
+        /// real app shows the same intervals the page animates; plus five weeks of history, projects, tags,
+        /// allocations and two devices, so every view the page photographs has something true to show.
+        case showcase
     }
 
     /// Wipe and repopulate. Destructive by design; callers point it at a demo/simulator database.
@@ -35,6 +40,7 @@ public enum DemoSeed {
         switch preset {
         case .screenshot: try seedScreenshot(store, now: now)
         case .rich: try seedRich(store, now: now)
+        case .showcase: try seedShowcase(store, now: now)
         }
     }
 
@@ -83,6 +89,104 @@ public enum DemoSeed {
     }
 
     // MARK: - Scale fixture
+
+    // MARK: - The product page
+
+    /// The scripted Thursday, as (task, start, end, device). Mirrored in the product page's JavaScript —
+    /// change one and the other must follow, or the page stops showing what the app shows.
+    static let showcaseDay: [(String, String, String, String)] = [
+        ("Deep Work", "9:02", "9:18", "mac"), ("Deep Work", "9:18:08", "9:35", "mac"),
+        ("Deep Work", "9:35:05", "9:51", "mac"), ("Deep Work", "9:51:40", "10:28", "mac"),
+        ("Code Review", "10:28", "11:05", "mac"), ("Email & Slack", "11:05", "11:16", "mac"),
+        ("Code Review", "11:16", "12:10", "mac"), ("Code Review", "12:58", "13:20", "mac"),
+        ("Writing", "13:20", "13:40", "mac"), ("Design Review", "13:40:30", "14:36", "mac"),
+        ("Design Review", "14:48", "16:12", "mac"), ("Meetings", "16:12", "16:58", "phone"),
+        ("Planning", "17:05", "18:30", "mac"),
+    ]
+
+    private static func seedShowcase(_ store: IntervalStore, now: Date) throws {
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = .current
+        // Projects, then tasks inside them. Tags cut ACROSS projects — that combination is what the page
+        // explains: "work" spans Product, Docs and two Inbox tasks, so one allocation can cover all of it.
+        let groupSpecs: [(String, String)] = [("Product", "#4E79A7"), ("Docs", "#B07AA1"), ("Personal", "#59A14F")]
+        var groups: [String: Int64] = [:]
+        for (name, hex) in groupSpecs { groups[name] = try store.upsertTaskProject(name: name, colorHex: hex) }
+        let taskSpecs: [(String, String?)] = [
+            ("Deep Work", "Product"), ("Code Review", "Product"), ("Design Review", "Product"),
+            ("Planning", "Product"), ("Writing", "Docs"), ("Release notes", "Docs"),
+            ("Learning", "Personal"), ("Gym", "Personal"),
+            ("Email & Slack", nil), ("Meetings", nil),
+        ]
+        var ids: [String: Int64] = [:]
+        for (i, (name, group)) in taskSpecs.enumerated() {
+            ids[name] = try store.createProject(name: name, colorHex: Palette.color(forIndex: i),
+                                                inGroup: group.flatMap { groups[$0] })
+        }
+        let work = try store.upsertTag(name: "work", colorHex: "#4E79A7")
+        for g in ["Product", "Docs"] { if let id = groups[g] { try store.addTag(work, to: .project(id)) } }
+        for t in ["Email & Slack", "Meetings"] { if let id = ids[t] { try store.addTag(work, to: .task(id)) } }
+        let deep = try store.upsertTag(name: "deep", colorHex: "#B07AA1")
+        for t in ["Deep Work", "Design Review", "Writing"] { if let id = ids[t] { try store.addTag(deep, to: .task(id)) } }
+
+        let monFri = Weekdays(rawValue: 0b0111110)
+        _ = try store.setTarget(subject: .tag(work), seconds: 35 * 3600, direction: .atLeast,
+                                period: .week, weekdays: monFri)
+        if let id = ids["Writing"] {
+            _ = try store.setTarget(subject: .task(id), seconds: 5 * 3600, direction: .atLeast, period: .week)
+        }
+        if let id = ids["Email & Slack"] {
+            _ = try store.setTarget(subject: .task(id), seconds: 3600, direction: .atMost, period: .day)
+        }
+        if let id = ids["Learning"] {
+            _ = try store.setTarget(subject: .task(id), seconds: 3 * 3600, direction: .atLeast, period: .week)
+        }
+
+        try store.rememberDevice(id: "macbook-pro", label: "MacBook Pro")
+        try store.rememberDevice(id: "iphone", label: "iPhone")
+        let device = ["mac": "macbook-pro", "phone": "iphone"]
+
+        func at(_ day: Date, _ hms: String) -> Date {
+            let parts = hms.split(separator: ":").compactMap { Double($0) }
+            let secs = parts[0] * 3600 + (parts.count > 1 ? parts[1] * 60 : 0) + (parts.count > 2 ? parts[2] : 0)
+            return day.addingTimeInterval(secs)
+        }
+        func add(_ task: String, _ start: Date, _ end: Date, _ dev: String) throws {
+            guard let id = ids[task], end > start, end <= now else { return }
+            try store.insertClosedInterval(projectID: id, start: start, end: end, deviceID: device[dev])
+        }
+
+        let today = cal.startOfDay(for: now)
+        // The most recent Thursday strictly before today, so the whole story day is in the past.
+        var story = cal.date(byAdding: .day, value: -1, to: today)!
+        while cal.component(.weekday, from: story) != 5 { story = cal.date(byAdding: .day, value: -1, to: story)! }
+
+        // Ordinary days around it: the same cast in a different order, so the week and month views have a
+        // believable shape. Deterministic, so a re-seed photographs identically.
+        let weekdayShapes: [[(String, String, String, String)]] = [
+            [("Email & Slack", "8:50", "9:10", "mac"), ("Deep Work", "9:10", "11:20", "mac"),
+             ("Meetings", "11:30", "12:15", "phone"), ("Code Review", "13:10", "14:40", "mac"),
+             ("Writing", "14:45", "15:50", "mac"), ("Planning", "16:00", "16:40", "mac")],
+            [("Deep Work", "9:00", "10:45", "mac"), ("Email & Slack", "10:45", "11:05", "mac"),
+             ("Design Review", "11:05", "12:20", "mac"), ("Code Review", "13:30", "15:10", "mac"),
+             ("Meetings", "15:15", "16:00", "phone"), ("Release notes", "16:05", "16:50", "mac")],
+            [("Planning", "9:15", "9:45", "mac"), ("Deep Work", "9:45", "12:10", "mac"),
+             ("Email & Slack", "13:00", "13:25", "mac"), ("Design Review", "13:25", "15:00", "mac"),
+             ("Writing", "15:05", "16:20", "mac"), ("Learning", "20:30", "21:15", "phone")],
+        ]
+        let weekendShape: [(String, String, String, String)] = [
+            ("Learning", "10:30", "11:30", "phone"), ("Gym", "17:00", "18:00", "phone"),
+        ]
+        for back in 0..<36 {
+            guard let day = cal.date(byAdding: .day, value: -back, to: today) else { continue }
+            if day == story {
+                for (t, a, b, d) in showcaseDay { try add(t, at(day, a), at(day, b), d) }
+                continue
+            }
+            let wd = cal.component(.weekday, from: day)
+            let shape = (wd == 1 || wd == 7) ? weekendShape : weekdayShapes[back % weekdayShapes.count]
+            for (t, a, b, d) in shape { try add(t, at(day, a), at(day, b), d) }
+        }
+    }
 
     private static func seedRich(_ store: IntervalStore, now: Date) throws {
         // 8 projects. Colours from the shared palette so shades derive the way they do in real use.

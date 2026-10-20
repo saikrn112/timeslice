@@ -30,6 +30,9 @@ if [ -f "$SRC" ]; then
   # earlier run against a different database (say the real one, then a DB_SRC demo) was paired with the
   # wrong file — the app then never opened a window, with an empty log to show for it.
   rm -f "$SHOT_DB-wal" "$SHOT_DB-shm"
+  # DEVICE=<id> makes the capture app BE that device, so a seeded database's own device lane is this one
+  # instead of an empty extra lane named after the machine taking the screenshot.
+  if [ -n "${DEVICE:-}" ]; then printf %s "$DEVICE" >| "$(dirname "$SHOT_DB")/device-id"; fi
   cp "$SRC" "$SHOT_DB"
   [ -f "$SRC-wal" ] && cp "$SRC-wal" "$SHOT_DB-wal"
   [ -f "$SRC-shm" ] && cp "$SRC-shm" "$SHOT_DB-shm"
@@ -60,6 +63,7 @@ env "${EXTRA[@]+"${EXTRA[@]}"}" \
   TIMESLICE_OPEN_PALETTE="${PALETTE:-}" \
   TIMESLICE_PALETTE_QUERY="${PALETTE_Q:-}" \
   TIMESLICE_UNIT="${UNIT:-}" \
+  TIMESLICE_DAY="${DAY:-}" \
   TIMESLICE_MICRO_PAUSE="${MICROPAUSE:-}" \
   TIMESLICE_BREAK_SECONDS="${BREAK:-}" \
   TIMESLICE_FORCE_BREAK="${FORCE_BREAK:-}" \
@@ -85,9 +89,14 @@ fi
 sleep 1.5                      # let the first data load and the charts settle
 
 # Optional: hover a point first, so the capture includes a tooltip. HOVER="x,y" in screen coordinates.
+# Otherwise park the pointer in the corner: a cursor that happens to rest over a row highlights it, and
+# hovering an allocation SELECTS it — which once photographed a "1 selected" state nobody chose.
 if [ -n "${HOVER:-}" ]; then
   ./.build/debug/TimesliceHover "${HOVER%,*}" "${HOVER#*,}"
   sleep 2.2                    # macOS tooltip delay is about 1.5s
+else
+  ./.build/debug/TimesliceHover 2 2 2>/dev/null || true
+  sleep 0.4
 fi
 rm -f "$OUT"
 # SCREEN=1 captures the whole display instead of the window. Needed for anything that isn't IN the main

@@ -67,9 +67,16 @@ struct MetricsView: View {
         }
         // Screenshot hooks: `screencapture` cannot click, so the range pills and the selection — which
         // the overlay and its average need — are settable from the environment.
-        if let unit = ProcessInfo.processInfo.environment["TIMESLICE_UNIT"],
-           let wanted = RangeUnit.allCases.first(where: { "\($0)" == unit }) {
-            range = DateRange.resolve(unit: wanted, anchor: range.start, earliest: earliest)
+        // `DAY=2026-10-15` anchors the range on a date, so a capture can show a specific past day or week.
+        var anchor = range.start
+        if let raw = ProcessInfo.processInfo.environment["TIMESLICE_DAY"], !raw.isEmpty {
+            let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
+            if let d = f.date(from: raw) { anchor = d }
+        }
+        let unitName = ProcessInfo.processInfo.environment["TIMESLICE_UNIT"]
+        if unitName != nil || anchor != range.start {
+            let wanted = RangeUnit.allCases.first(where: { "\($0)" == unitName }) ?? range.unit
+            range = DateRange.resolve(unit: wanted, anchor: anchor, earliest: earliest)
         }
         if let wanted = ProcessInfo.processInfo.environment["TIMESLICE_SELECT"], !wanted.isEmpty,
            let row = targetProgress.first(where: { $0.name.localizedCaseInsensitiveContains(wanted) }) {

@@ -47,6 +47,14 @@ final class MainWindowController {
         // minHeight:) is applied on assignment and otherwise shrinks the window back down.
         window.setContentSize(Self.defaultContentSize)
         window.center()
+        // A capture run goes to the sharpest display there is. `center()` picks the screen with keyboard
+        // focus, which with an external monitor attached is often a 1× one — so half of a batch of
+        // screenshots came out at half the resolution of the rest.
+        if DemoData.isCaptureRun,
+           let retina = NSScreen.screens.max(by: { $0.backingScaleFactor < $1.backingScaleFactor }) {
+            let f = retina.visibleFrame, size = window.frame.size
+            window.setFrameOrigin(NSPoint(x: f.midX - size.width / 2, y: f.midY - size.height / 2))
+        }
         window.isReleasedWhenClosed = false
         privacy.manage(window)
     }

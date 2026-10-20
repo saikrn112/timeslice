@@ -20,7 +20,7 @@ func value(for flag: String) -> String? {
 
 let presetName = value(for: "--preset") ?? "rich"
 guard let preset = DemoSeed.Preset(rawValue: presetName) else {
-    print("unknown preset '\(presetName)' — use screenshot | rich")
+    print("unknown preset '\(presetName)' — use screenshot | rich | showcase")
     exit(2)
 }
 

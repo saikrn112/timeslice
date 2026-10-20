@@ -1206,8 +1206,15 @@ struct PlannerView: View {
         let calendar = Calendar.current
         let viewedWindow = periodWindow()
             ?? calendar.dateInterval(of: .weekOfYear, for: Date())
+        // Projection is for the WEEK view only. The month view's arithmetic (`PlannerMonth`) already asks
+        // each allocation for real dates via `ask(in:)`, so handing it a projected target asked twice: a
+        // 35h-a-week allocation projected onto October became "150h a week", and the month then asked that
+        // for every claimed day — 593h, and a header reading "Over by 491h". The week view only came out
+        // right because a week projected onto itself is unchanged. Out-of-window allocations still vanish.
         targets = viewedWindow.map { window in
-            stored.compactMap { $0.projected(onto: window, calendar: calendar) }
+            unit == .month
+                ? stored.filter { $0.applies(to: window, calendar: calendar) }
+                : stored.compactMap { $0.projected(onto: window, calendar: calendar) }
         } ?? stored
         world = ((try? store.listProjects(includeArchived: true)) ?? [],
                  (try? store.listTaskProjects()) ?? [],
