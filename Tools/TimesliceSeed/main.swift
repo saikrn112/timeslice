@@ -18,6 +18,19 @@ func value(for flag: String) -> String? {
     return args[i + 1]
 }
 
+// `--colors --db <path>` prints each task's DISPLAY colour (its project's shade), so something that draws the
+// app outside the app — the product page — can use exactly the colours the app does. Read-only.
+if CommandLine.arguments.contains("--colors"), let path = value(for: "--db") {
+    let store = try IntervalStore(databaseURL: URL(fileURLWithPath: path))
+    try store.migrateIfNeeded()
+    let all = try store.listProjects(includeArchived: true)
+    let groups = try store.listTaskProjects()
+    for task in all {
+        print("\(task.name)\t\(Palette.displayColorHex(for: task, groups: groups, allTasks: all))")
+    }
+    exit(0)
+}
+
 let presetName = value(for: "--preset") ?? "rich"
 guard let preset = DemoSeed.Preset(rawValue: presetName) else {
     print("unknown preset '\(presetName)' — use screenshot | rich | showcase")
