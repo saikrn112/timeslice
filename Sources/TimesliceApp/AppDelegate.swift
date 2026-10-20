@@ -78,6 +78,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Sync stays inert unless a folder is configured — no account, no network by default.
         sync = SyncController(store: store, engine: engine, appState: appState,
                               settings: settings, auth: googleAuth)
+        // "Meetings started on iPhone — Design Review paused on this Mac at 4:12 PM." The pill in the menu
+        // bar turning orange on its own read like a bug; this says why, in the corner, and goes.
+        sync?.onTakeover = { [weak self] started, device, paused, at in
+            guard self != nil else { return }
+            let f = DateFormatter(); f.timeStyle = .short; f.dateStyle = .none
+            let title = started.map { "\($0) started on \(device)" } ?? "Timing moved to \(device)"
+            let body = paused.map { "\($0) paused on this Mac at \(f.string(from: at))." }
+                ?? "Paused on this Mac at \(f.string(from: at))."
+            _ = PromptPanel.toast(title: title, message: body)
+        }
+        // Capture hook: show the notice once at launch so it can be photographed.
+        if ProcessInfo.processInfo.environment["TIMESLICE_FORCE_TOAST"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                _ = PromptPanel.toast(title: "Meetings started on iPhone",
+                                      message: "Design Review paused on this Mac at 4:12 PM.", seconds: 30)
+            }
+        }
 
         statusBar = StatusBarController(appState: appState, engine: engine, privacy: privacy,
                                         autoPause: autoPause, sync: sync)

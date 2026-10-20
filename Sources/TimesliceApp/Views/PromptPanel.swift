@@ -28,12 +28,27 @@ final class PromptPanel {
     /// at a 30-minute interval, so the same behaviour would be unusable. Quiet mode floats over
     /// whatever you are doing, including another app's full-screen Space, and never takes focus or a
     /// keystroke.
+    /// A notice: the quiet form with no buttons at all. Nothing to answer — it says what happened and goes.
+    static func toast(title: String, message: String, seconds: TimeInterval = 6) -> PromptPanel {
+        let panel = PromptPanel(title: title, message: message, primary: "", secondary: nil,
+                                tertiary: nil, quiet: true, buttons: false) { _ in }
+        panel.present()
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { panel.close() }
+        return panel
+    }
+
+    convenience init(title: String, message: String, primary: String, secondary: String?,
+                     tertiary: String?, quiet: Bool, onChoice: @escaping (Choice) -> Void) {
+        self.init(title: title, message: message, primary: primary, secondary: secondary,
+                  tertiary: tertiary, quiet: quiet, buttons: true, onChoice: onChoice)
+    }
+
     init(title: String, message: String, primary: String, secondary: String?,
-         tertiary: String?, quiet: Bool, onChoice: @escaping (Choice) -> Void) {
+         tertiary: String?, quiet: Bool, buttons: Bool, onChoice: @escaping (Choice) -> Void) {
         self.onChoice = onChoice
         self.quiet = quiet
 
-        let size = NSSize(width: quiet ? 420 : 400, height: quiet ? 112 : 156)
+        let size = NSSize(width: quiet ? 420 : 400, height: !buttons ? 64 : (quiet ? 112 : 156))
         // Behave like a system prompt: when another app is full-screen, activating our app pulls
         // the user OUT of that full-screen Space back to the desktop, where this panel is waiting
         // (rather than overlaying the full-screen app). So this is an ACTIVATING, key panel tied
@@ -66,7 +81,7 @@ final class PromptPanel {
 
         let view = PromptView(
             title: title, message: message, primary: primary, secondary: secondary,
-            tertiary: tertiary, quiet: quiet, size: size,
+            tertiary: tertiary, quiet: quiet, buttons: buttons, size: size,
             onPrimary: { [weak self] in self?.finish(.primary) },
             onSecondary: { [weak self] in self?.finish(.secondary) },
             onTertiary: { [weak self] in self?.finish(.tertiary) }
@@ -125,6 +140,7 @@ private struct PromptView: View {
     let secondary: String?
     let tertiary: String?
     let quiet: Bool
+    let buttons: Bool
     let size: NSSize
     let onPrimary: () -> Void
     let onSecondary: () -> Void
@@ -135,6 +151,7 @@ private struct PromptView: View {
             Text(title).font(.headline).foregroundStyle(.white)
             Text(message).font(quiet ? .caption : .callout).foregroundStyle(.white.opacity(0.7))
                 .fixedSize(horizontal: false, vertical: true)
+            if buttons {
             Spacer(minLength: 0)
             HStack(spacing: 8) {
                 Spacer()
@@ -157,9 +174,12 @@ private struct PromptView: View {
                         .buttonStyle(.borderedProminent)
                 }
             }
+            }
         }
         .padding(quiet ? 16 : 20)
-        .frame(width: size.width, height: size.height)
+        // Leading, not the default centre: a notice with no buttons has nothing pushing its text to the
+        // edge, so it floated in the middle of the panel.
+        .frame(width: size.width, height: size.height, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 18)
                 .fill(Color.black.opacity(0.9))

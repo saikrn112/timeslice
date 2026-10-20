@@ -62,6 +62,25 @@ final class SyncController: ObservableObject {
 
     @Published private(set) var peers: [Peer] = []
 
+    /// Called when another device's timer has just stopped this one: (what started there, which device,
+    /// what was paused here, when). The menu bar already shows "↳ iPhone", but a pill that silently turns
+    /// orange reads like a bug; the AppDelegate turns this into a short corner notice saying what happened.
+    var onTakeover: ((_ started: String?, _ device: String, _ paused: String?, _ at: Date) -> Void)?
+
+    /// The names a takeover notice needs, resolved BEFORE pausing — once paused, the running task is gone.
+    private func describeTakeover(_ decision: TakeoverPolicy.Decision, markers: [RunningMarker]) {
+        let paused = engine.runningProjectID.flatMap { id in appState.projects.first { $0.id == id }?.name }
+        let marker = markers.filter { $0.deviceID == decision.byDeviceID }.max { $0.since < $1.since }
+        let started = marker.flatMap { m in
+            (try? store.localID(table: "projects", uid: m.taskUID)).flatMap { $0 }
+        }.flatMap { id in appState.projects.first { $0.id == id }?.name }
+        let device = peers.first { $0.id == decision.byDeviceID }?.displayName ?? decision.byDeviceID
+        pendingTakeoverNotice = { [weak self] in
+            self?.onTakeover?(started, device, paused, decision.pauseAt)
+        }
+    }
+    private var pendingTakeoverNotice: (() -> Void)?
+
     private let store: IntervalStore
     private let engine: TimerEngine
     private let appState: AppState
@@ -577,18 +596,20 @@ final class SyncController: ObservableObject {
         if let decision = TakeoverPolicy.decide(localRunningSince: engine.runningSince,
                                                markers: markers, now: now,
                                                observedAt: observedAt) {
+            describeTakeover(decision, markers: markers)
             engine.pause(at: decision.pauseAt)
             // Prefer the device's own published label over its raw id.
             let label = peers.first { $0.id == decision.byDeviceID }?.displayName
             takenOverBy = label ?? decision.byDeviceID
             appState.reload()
+            pendingTakeoverNotice?(); pendingTakeoverNotice = nil
         }
     }
 
     /// Resolve running markers to task NAMES (markers carry uids, which mean nothing to a human)
     /// and put this device at the top of the list.
-    /// Stop our timer if another device started one later. Silent by design — you're already
-    /// working on the other machine, so a dialog here interrupts nothing.
+    /// Stop our timer if another device started one later. No dialog — you're already working on the
+    /// other machine — just a corner notice that never takes focus (see `onTakeover`).
     private func applyTakeover(_ transport: SyncTransport) throws {
         // Same freshness rule as the polling path: an abandoned marker outranks any earlier timer,
         // so without this a crashed device would pause this one on every check.
@@ -607,8 +628,10 @@ final class SyncController: ObservableObject {
         guard let decision = TakeoverPolicy.decide(
             localRunningSince: engine.runningSince, markers: markers, now: now,
             observedAt: observedAt) else { return }
+        describeTakeover(decision, markers: markers)
         engine.pause(at: decision.pauseAt)
         appState.reload()
+        pendingTakeoverNotice?(); pendingTakeoverNotice = nil
     }
 
     /// Publish after a local change. Network transports go off-actor; a folder can be written
