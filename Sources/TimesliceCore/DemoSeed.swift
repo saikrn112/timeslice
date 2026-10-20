@@ -102,6 +102,8 @@ public enum DemoSeed {
         ("Writing", "13:20", "13:40", "mac"), ("Design Review", "13:40:30", "14:36", "mac"),
         ("Design Review", "14:48", "16:12", "mac"), ("Meetings", "16:12", "16:58", "phone"),
         ("Planning", "17:05", "18:30", "mac"),
+        // Home, on the personal laptop: the third device, so the page's multi-device chapter has a real lane.
+        ("Learning", "20:10", "21:00", "air"),
     ]
 
     private static func seedShowcase(_ store: IntervalStore, now: Date) throws {
@@ -142,8 +144,9 @@ public enum DemoSeed {
         }
 
         try store.rememberDevice(id: "macbook-pro", label: "MacBook Pro")
+        try store.rememberDevice(id: "macbook-air", label: "MacBook Air")
         try store.rememberDevice(id: "iphone", label: "iPhone")
-        let device = ["mac": "macbook-pro", "phone": "iphone"]
+        let device = ["mac": "macbook-pro", "air": "macbook-air", "phone": "iphone"]
 
         func at(_ day: Date, _ hms: String) -> Date {
             let parts = hms.split(separator: ":").compactMap { Double($0) }
@@ -171,10 +174,10 @@ public enum DemoSeed {
              ("Meetings", "15:15", "16:00", "phone"), ("Release notes", "16:05", "16:50", "mac")],
             [("Planning", "9:15", "9:45", "mac"), ("Deep Work", "9:45", "12:10", "mac"),
              ("Email & Slack", "13:00", "13:25", "mac"), ("Design Review", "13:25", "15:00", "mac"),
-             ("Writing", "15:05", "16:20", "mac"), ("Learning", "20:30", "21:15", "phone")],
+             ("Writing", "15:05", "16:20", "mac"), ("Learning", "20:30", "21:15", "air")],
         ]
         let weekendShape: [(String, String, String, String)] = [
-            ("Learning", "10:30", "11:30", "phone"), ("Gym", "17:00", "18:00", "phone"),
+            ("Learning", "10:30", "11:30", "air"), ("Gym", "17:00", "18:00", "phone"),
         ]
         for back in 0..<36 {
             guard let day = cal.date(byAdding: .day, value: -back, to: today) else { continue }
