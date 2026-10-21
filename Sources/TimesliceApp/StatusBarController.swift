@@ -15,6 +15,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private var cancellables: Set<AnyCancellable> = []
+    /// Ticks the title while ANOTHER device is timing — `engine.clock` only runs while this Mac is.
+    private var elsewhereTicker: Timer?
 
     /// `sync` is optional-by-nature: nil-safe so the menu bar works identically with sync off.
     private let sync: SyncController?
@@ -48,6 +50,18 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         .store(in: &cancellables)
         // Redraw when another device starts/stops timing, so the "↳ device" hint appears and
         // clears without waiting for the next tick.
+        appState.$liveElsewhere
+            .receive(on: RunLoop.main)
+            .sink { [weak self] live in
+                guard let self else { return }
+                self.elsewhereTicker?.invalidate()
+                self.elsewhereTicker = live == nil ? nil
+                    : Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                        MainActor.assumeIsolated { self?.updateTitle() }
+                    }
+                self.lastRenderedTitle = nil
+                self.updateTitle()
+            }.store(in: &cancellables)
         sync?.$takenOverBy
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
@@ -117,14 +131,17 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
         // Red pill whenever the current task is PAUSED — however it paused (manual, auto-pause
         // checkpoint, or sleep). Visible even in privacy mode via the tinted icon.
-        let paused = engine.isPaused
+        // Another device timing while this Mac isn't: show THAT, live, rather than an orange "paused"
+        // pill for a task you left hours ago. Nothing here is paused — the work moved.
+        let elsewhere = appState.activeElsewhere
+        let paused = engine.isPaused && elsewhere == nil
         applyAwaitingStyle(paused, to: button)
 
         // Privacy = icon-only: show just the clock icon (no text).
         // Idle (no current task): fall back to the TOP task so the bar isn't empty.
         let displayID: Int64?
         if privacy.level == .full {
-            displayID = engine.currentProjectID ?? appState.visibleTotals.first?.project.id
+            displayID = elsewhere?.projectID ?? engine.currentProjectID ?? appState.visibleTotals.first?.project.id
         } else {
             displayID = nil
         }
@@ -140,14 +157,16 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         // Today's total for the task (committed today + live session while running). Seconds
         // resolution only — ms in the menu bar is visually noisy (the popover/list keep ms).
         let todayBase = appState.todayTotals.first { $0.project.id == displayID }?.seconds ?? 0
-        let live = todayBase + engine.elapsed
+        let live = todayBase + engine.elapsed + appState.elsewhereSeconds(projectID: displayID)
         let time = Format.duration(live)
         let name = taskName(displayID)
         var text = name.isEmpty ? time : "\(name) · \(time)"
         // When another device is timing, say so — otherwise a silently-paused pill looks like a
         // bug rather than a takeover.
         // Only after an actual takeover — and using the device's friendly name, not its raw id.
-        if paused, let other = sync?.takenOverBy {
+        if let elsewhere, elsewhere.projectID == displayID {
+            text += " ↳ \(appState.liveElsewhereDevice ?? "another device")"
+        } else if paused, let other = sync?.takenOverBy {
             text += " ↳ \(other)"
         }
         // Skip redundant redraws: the clock ticks ~10x/sec but the title only shows whole

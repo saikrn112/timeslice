@@ -63,6 +63,21 @@ final class AppState: ObservableObject {
     @Published var archivedTotals: [ProjectTotal] = []
     @Published var scope: TimeScope = .today
 
+    /// Another device's timer, running now and not yet in its synced rows. Set by `SyncController` on
+    /// every poll; see `LiveElsewhere`. Without it a phone timing for an hour was invisible here — no
+    /// row lit, no time — so there was nothing to see, or switch away from.
+    @Published var liveElsewhere: LiveElsewhere?
+    /// That device's own name, for "on iPhone".
+    @Published var liveElsewhereDevice: String?
+    /// Only while this Mac isn't timing. Starting here is a takeover, and the other device yields on its
+    /// next sync — showing both as live in the meantime would count the same minutes twice.
+    var activeElsewhere: LiveElsewhere? { engine.runningSince == nil ? liveElsewhere : nil }
+    /// Today's share of the other device's unpublished time for `projectID`, 0 for any other task.
+    func elsewhereSeconds(projectID: Int64, now: Date = Date()) -> TimeInterval {
+        guard let live = activeElsewhere, live.projectID == projectID else { return 0 }
+        return live.seconds(now: now, notBefore: Calendar.current.startOfDay(for: now))
+    }
+
     /// How the task list is arranged: grouped under projects, or one flat list most-recently-worked first.
     ///
     /// Recent is the switcher's own order, so the window and the revolver agree about what "the task I was
@@ -87,7 +102,8 @@ final class AppState: ObservableObject {
     /// `visibleTotals`, most recently worked first: the running task, then by last activity, then tasks
     /// never tracked, newest first. Finished tasks sink to the bottom, as in the popover.
     var recentVisibleTotals: [ProjectTotal] {
-        let running = engine.runningProjectID
+        // A task timing on another device is the one you're on, wherever it's running.
+        let running = engine.runningProjectID ?? activeElsewhere?.projectID
         return visibleTotals.sorted { a, b in
             if a.project.finished != b.project.finished { return !a.project.finished }
             if (a.project.id == running) != (b.project.id == running) { return a.project.id == running }
@@ -293,7 +309,7 @@ final class AppState: ObservableObject {
     /// Live displayed seconds for a total row: the committed (closed) base plus the running
     /// task's elapsed if this row is the one currently timing.
     func liveSeconds(base: TimeInterval, projectID: Int64) -> TimeInterval {
-        guard engine.runningProjectID == projectID else { return base }
+        guard engine.runningProjectID == projectID else { return base + elsewhereSeconds(projectID: projectID) }
         return base + engine.elapsed
     }
 
@@ -596,7 +612,9 @@ final class AppState: ObservableObject {
         TaskOrdering.recencyOrdered(
             display: selectableProjects,
             lastActivity: (try? store.lastActivityByProject()) ?? [:],
-            current: engine.runningProjectID ?? engine.currentProjectID)
+            // Pinned first even when it's the PHONE that's timing it, so the first tap of the
+            // switcher moves off what's actually running rather than off what this Mac last paused.
+            current: engine.runningProjectID ?? activeElsewhere?.projectID ?? engine.currentProjectID)
     }
 
     /// Freeze the switcher's order and return it, so the HUD and the cycling agree.

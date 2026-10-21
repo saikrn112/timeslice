@@ -501,6 +501,7 @@ final class SyncController: ObservableObject {
             let moved = await transferAttachments(engineSync: engineSync)
             combined.attachmentsApplied += moved
 
+            let markersSeen = markers, observedTimes = observedAt
             let report = combined      // ditto: snapshot before crossing the actor boundary
             let peersSeen = discovered
             let skippedCount = skipped
@@ -514,7 +515,7 @@ final class SyncController: ObservableObject {
                 // auto-pause timer is armed from `Settings`, so a value sitting unread in the
                 // database would change nothing about when this device actually pauses.
                 if report.settingsApplied > 0 { self.settings.adoptSyncedSettings() }
-                self.applyMarkers(markers, discovered: peersSeen)
+                self.applyMarkers(markersSeen, discovered: peersSeen, observedAt: observedTimes)
                 self.lastSyncedAt = Date()
                 // Only mention skipped files; a clean sync should say nothing.
                 self.lastError = skippedCount > 0
@@ -592,6 +593,7 @@ final class SyncController: ObservableObject {
             .filter { $0.claimsTimer && $0.isFresh(now: now, cutoff: TakeoverPolicy.livenessCutoff,
                                                    observedAt: observedAt[$0.deviceID]) }
             .max(by: { $0.since < $1.since })?.deviceID
+        updateLiveElsewhere(markers, now: now, observedAt: observedAt)
 
         if let decision = TakeoverPolicy.decide(localRunningSince: engine.runningSince,
                                                markers: markers, now: now,
@@ -604,6 +606,21 @@ final class SyncController: ObservableObject {
             appState.reload()
             pendingTakeoverNotice?(); pendingTakeoverNotice = nil
         }
+    }
+
+    /// Show another device's running timer here — lit row, ticking time, a block on the day timeline.
+    /// Redraws only when what's shown changes, not on every poll.
+    private func updateLiveElsewhere(_ markers: [RunningMarker], now: Date, observedAt: [String: Date]) {
+        let recent = (try? store.intervals(from: now.addingTimeInterval(-86_400))) ?? []
+        let live = LiveElsewhere.resolve(
+            markers: markers, now: now, observedAt: observedAt,
+            localTaskID: { [store] uid in (try? store.localID(table: "projects", uid: uid)) ?? nil },
+            intervals: recent)
+        let device = live.map { l in peers.first { $0.id == l.deviceID }?.displayName ?? l.deviceID }
+        guard live != appState.liveElsewhere || device != appState.liveElsewhereDevice else { return }
+        appState.liveElsewhere = live
+        appState.liveElsewhereDevice = device
+        NotificationCenter.default.post(name: TimesliceNotifications.dataDidChange, object: nil)
     }
 
     /// Resolve running markers to task NAMES (markers carry uids, which mean nothing to a human)
@@ -625,6 +642,7 @@ final class SyncController: ObservableObject {
             .filter { $0.claimsTimer && $0.isFresh(now: now, cutoff: TakeoverPolicy.livenessCutoff,
                                                    observedAt: observedAt[$0.deviceID]) }
             .max(by: { $0.since < $1.since })?.deviceID
+        updateLiveElsewhere(markers, now: now, observedAt: observedAt)
         guard let decision = TakeoverPolicy.decide(
             localRunningSince: engine.runningSince, markers: markers, now: now,
             observedAt: observedAt) else { return }

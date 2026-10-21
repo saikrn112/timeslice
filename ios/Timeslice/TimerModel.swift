@@ -477,7 +477,7 @@ final class TimerModel: ObservableObject {
     /// unanswered one threw away real time; chunking never interrupts and never loses any. Correcting an
     /// over-record is then two swipes in the sessions list.
     ///
-    /// Called on foreground and after each sync rather than on a timer: elapsed time is derived from the
+    /// Called on foreground and before each sync publishes, rather than on a timer: elapsed time is derived from the
     /// persisted start, and `rollOpenInterval` loops, so however long the phone was suspended one call
     /// catches all of it up.
     func rollChunks() {

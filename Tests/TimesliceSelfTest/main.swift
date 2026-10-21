@@ -5302,6 +5302,46 @@ func testMergeTask() throws {
     }
 }
 
+func testLiveElsewhere() {
+    print("Live elsewhere:")
+    let since = date(2026, 10, 20, 21, 52)
+    let now = since.addingTimeInterval(41 * 60)
+    func marker(_ dev: String, _ uid: String, _ at: Date, running: Bool = true, written: Date? = nil) -> RunningMarker {
+        RunningMarker(deviceID: dev, taskUID: uid, since: at.timeIntervalSince1970, isRunning: running,
+                      writtenAt: (written ?? now).timeIntervalSince1970)
+    }
+    let ids = ["MED": Int64(199), "GYM": 112]
+    // Nothing published yet: the whole run is live.
+    let live = LiveElsewhere.resolve(markers: [marker("iphone", "MED", since)], now: now, observedAt: [:],
+                                     localTaskID: { ids[$0] }, intervals: [])
+    check(live?.projectID == 199 && live?.liveFrom == since, "unpublished run counts from the marker's start")
+    check(live?.seconds(now: now) == 41 * 60, "41 minutes live")
+    check(live?.interval.end == nil && (live?.interval.id ?? 0) < 0, "drawn as an open, never-stored interval")
+    // A rolled 20-minute block has arrived: only the part after it is live, so nothing counts twice.
+    let chunk = Interval(id: 9, projectID: 199, start: since, end: since.addingTimeInterval(1200), deviceID: "iphone")
+    let older = Interval(id: 8, projectID: 199, start: since.addingTimeInterval(-7200),
+                         end: since.addingTimeInterval(-3600), deviceID: "iphone")
+    let after = LiveElsewhere(deviceID: "iphone", projectID: 199, since: since, intervals: [older, chunk])
+    check(after.liveFrom == chunk.end, "live part starts where the published block ends")
+    check(after.seconds(now: now) == 21 * 60, "21 minutes still live")
+    check(after.seconds(now: now, notBefore: now.addingTimeInterval(-600)) == 600, "clipped to a day boundary")
+    // Paused, stale, or unknown task: nothing to show.
+    check(LiveElsewhere.resolve(markers: [marker("iphone", "MED", since, running: false)], now: now,
+                                observedAt: [:], localTaskID: { ids[$0] }, intervals: []) == nil,
+          "a paused device isn't live")
+    check(LiveElsewhere.resolve(markers: [marker("iphone", "MED", since, written: now.addingTimeInterval(-900))],
+                                now: now, observedAt: [:], localTaskID: { ids[$0] }, intervals: []) == nil,
+          "a stale marker isn't live")
+    check(LiveElsewhere.resolve(markers: [marker("iphone", "NEW", since)], now: now, observedAt: [:],
+                                localTaskID: { ids[$0] }, intervals: []) == nil,
+          "a task not merged yet isn't shown")
+    // Two claims: the later start is the one timing.
+    let two = LiveElsewhere.resolve(markers: [marker("air", "GYM", since.addingTimeInterval(-60)),
+                                              marker("iphone", "MED", since)],
+                                    now: now, observedAt: [:], localTaskID: { ids[$0] }, intervals: [])
+    check(two?.deviceID == "iphone", "latest claim wins")
+}
+
 func testOverlapSessions() {
     print("Overlap by session:")
     func at(_ h: Int, _ m: Int, _ s: Int = 0) -> Date {
@@ -7206,6 +7246,7 @@ do {
     testPerDayPlan()
     testPrimaryOwner()
     testHeavyOverlap()
+    testLiveElsewhere()
 } catch {
     print("  ✘ threw: \(error)")
     failures += 1

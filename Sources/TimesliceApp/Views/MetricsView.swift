@@ -268,6 +268,10 @@ struct MetricsView: View {
             clearSelection(); recompute()
         }
         .onReceive(NotificationCenter.default.publisher(for: TimesliceNotifications.dataDidChange)) { _ in recompute() }
+        // Keep another device's live block growing. A minute is the timeline's resolution anyway.
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
+            if appState.activeElsewhere != nil { recompute() }
+        }
         .onReceive(settings.objectWillChange) { _ in DispatchQueue.main.async { recompute() } }
         // The app can run for days; re-anchor to the real "today" on wake so the range never
         // silently points at a stale date.
@@ -1097,7 +1101,8 @@ struct MetricsView: View {
                                 .frame(width: 74, alignment: .trailing)
                                 .help(deviceName(seg.deviceID))
                         }
-                        deleteControl(for: seg)
+                        // Not for another device's live block (negative id): it isn't a stored row yet.
+                        if seg.id >= 0 { deleteControl(for: seg) }
                     }
                     .opacity(activeFocuses.isEmpty || !focusMatchesAnything || matchesFocus(seg)
                              ? 1 : settings.highlightDimOpacity)
@@ -2323,7 +2328,9 @@ struct MetricsView: View {
     private func recompute() {
         let store = appState.storeForEditing
         earliest = try? store.earliestIntervalStart()
-        let all = (try? store.intervals()) ?? []
+        // Plus another device's live timer: its rows only sync once a block closes, so without this a
+        // phone timing all evening left today's numbers and timeline blank until it stopped.
+        let all = ((try? store.intervals()) ?? []) + (appState.activeElsewhere.map { [$0.interval] } ?? [])
         let allProjects = (try? store.listProjects(includeArchived: true)) ?? []
         projectLookup = Dictionary(uniqueKeysWithValues: allProjects.map { ($0.id, $0) })
         deviceLabels = (try? store.deviceLabels()) ?? [:]

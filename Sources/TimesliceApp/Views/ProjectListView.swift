@@ -503,6 +503,9 @@ struct ProjectListView: View {
         let project = total.project
         let isSelected = appState.selectedProjectID == project.id
         let isRunning = engine.runningProjectID == project.id
+        // Timing on another device right now. Lit like the running row, so what you're actually on is
+        // visible here — and pressing play takes it over.
+        let isElsewhere = !isRunning && appState.activeElsewhere?.projectID == project.id
         let isFinished = project.finished
         let isTicked = ticked.contains(project.id)
         return HStack(spacing: 9) {
@@ -546,7 +549,7 @@ struct ProjectListView: View {
                 HStack(spacing: 4) {
                     Text(project.name)
                         .font(.callout)
-                        .fontWeight(isRunning ? .semibold : .regular)
+                        .fontWeight(isRunning || isElsewhere ? .semibold : .regular)
                         .strikethrough(isFinished, color: .secondary)
                         .foregroundStyle(isFinished || isDormant ? .secondary : .primary)
                         .lineLimit(1)
@@ -589,7 +592,13 @@ struct ProjectListView: View {
             // When it was last worked on, so a Today list padded with things untouched for weeks says so
             // at a glance. Nothing for the running row or one already worked today — the time beside it
             // already answers that.
-            if !isRunning, let label = lastWorkedLabel(project) {
+            if isElsewhere {
+                Text("on \(appState.liveElsewhereDevice ?? "another device")")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.green.opacity(0.14)))
+            } else if !isRunning, let label = lastWorkedLabel(project) {
                 Text(label)
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
@@ -599,9 +608,20 @@ struct ProjectListView: View {
 
             // Live ms only for the running row; others show a static value. LiveTimeText
             // observes the clock so only this label re-renders at tick rate.
-            LiveTimeText(clock: engine.clock, base: total.seconds, isRunning: isRunning, showMs: isRunning,
-                         color: isRunning ? .green : (isFinished ? .secondary : .primary))
+            if isElsewhere {
+                // Ticks once a second off the wall clock: this Mac's own clock only runs while IT is timing.
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(Format.duration(total.seconds
+                                         + appState.elsewhereSeconds(projectID: project.id, now: context.date)))
+                        .monospacedDigit()
+                        .foregroundStyle(.green)
+                }
                 .font(.system(.callout, design: .monospaced))
+            } else {
+                LiveTimeText(clock: engine.clock, base: total.seconds, isRunning: isRunning, showMs: isRunning,
+                             color: isRunning ? .green : (isFinished ? .secondary : .primary))
+                    .font(.system(.callout, design: .monospaced))
+            }
 
             // Inline actions, in order: play/pause · reset · finish · archive.
             if !isFinished {
@@ -625,7 +645,7 @@ struct ProjectListView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(rowBackground(isSelected: isSelected, isRunning: isRunning))
+        .background(rowBackground(isSelected: isSelected, isRunning: isRunning || isElsewhere))
         .background(
             RoundedRectangle(cornerRadius: 7)
                 .fill(dropTargetID == (project.taskProjectID ?? -1)

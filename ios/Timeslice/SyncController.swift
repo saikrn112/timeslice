@@ -172,6 +172,10 @@ final class SyncController {
             // 1. Publish our payload. Building it reads the store, so it happens on the main actor;
             //    only the upload leaves it.
             let (deviceID, encoded) = try await MainActor.run { () -> (String, Data) in
+                // Close any focus-length block that has finished first, so it goes out in THIS payload.
+                // Rolling only on foreground meant a session started with the app open never published
+                // a row while it stayed open, and every other device showed nothing for it.
+                TimerModel.shared.rollChunks()
                 let store = try Self.requireStore()
                 let id = store.localDeviceID ?? TimeslicePaths.deviceID()
                 // The label travels WITH the payload — that's how a peer shows "MacBook Air" rather
