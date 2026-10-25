@@ -531,6 +531,11 @@ final class AutoPauseController: ObservableObject {
             // Recorded whichever way you answered: the question has been asked about this stretch of
             // work, and the bridged pause must not let it be asked again a second later.
             self.checkpointAnsweredAt = Date()
+            // One question per moment. "Still on it?" and the break reminder default to the same 30
+            // minutes, so the second one queued up behind the first and asked again seconds later.
+            // Either answer settles it: "Keep going" just declined a break, and "Keep it paused" is one.
+            // Snoozed, not reset — the break comes back after half the interval, as for any decline.
+            self.breakSnoozedAt = Date()
             if keepGoing, self.appState.selectableProjects.contains(where: { $0.id == projectID }) {
                 self.engine.switchTo(projectID: projectID)   // resume timing → re-arms checkpoint
             }

@@ -56,7 +56,10 @@ final class PromptPanel {
         // full-screen Space and never yank focus back).
         let panel = KeyPanel(
             contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.borderless],
+            // Quiet panels are also NON-ACTIVATING: without it, clicking "Keep going" on the break
+            // reminder activated the app, and activation brings every Timeslice window forward — so
+            // answering a nudge that exists not to interrupt you threw the main window over your work.
+            styleMask: quiet ? [.borderless, .nonactivatingPanel] : [.borderless],
             backing: .buffered,
             defer: false
         )
