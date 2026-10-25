@@ -137,7 +137,7 @@ private struct SwitcherList: View {
 
     private func liveSeconds(for id: Int64) -> TimeInterval {
         let base = todaySeconds[id] ?? 0
-        return id == runningID ? base + clock.elapsed : base
+        return id == runningID ? base + clock.unrecordedToday : base
     }
 
     /// A window of tasks centered on the selection (clamped at the ends), plus how many are

@@ -186,6 +186,8 @@ struct MetricsView: View {
     @State private var tags: [Tag] = []
     @State private var tagIDsByTask: [Int64: Set<Int64>] = [:]
     @State private var rangeIntervals: [Interval] = []
+    /// When `recompute` last read the store — see `liveExtra`.
+    @State private var computedAt = Date()
     @State private var targets: [Target] = []
     @State private var showTargetsSheet = false
     /// Budget row under the pointer, purely so the row shows it can be clicked.
@@ -372,8 +374,12 @@ struct MetricsView: View {
     }
 
     /// Live seconds for a running task, but only when the range covers now.
+    ///
+    /// Only the time since the last recompute: `summary` already includes the open row up to then.
+    /// Adding the session clock instead counted the open row twice and every rolled block a third time.
     private var liveExtra: TimeInterval {
-        range.isCurrent() ? engine.clock.elapsed : 0
+        guard range.isCurrent(), engine.isRunning else { return 0 }
+        return max(0, Date().timeIntervalSince(max(computedAt, range.start)))
     }
 
     private func tile(_ label: String, value: String, caption: String, tint: Color) -> some View {
@@ -2326,6 +2332,7 @@ struct MetricsView: View {
     // MARK: - Recompute
 
     private func recompute() {
+        computedAt = Date()
         let store = appState.storeForEditing
         earliest = try? store.earliestIntervalStart()
         // Plus another device's live timer: its rows only sync once a block closes, so without this a

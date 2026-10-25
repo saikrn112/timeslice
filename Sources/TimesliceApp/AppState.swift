@@ -145,6 +145,13 @@ final class AppState: ObservableObject {
         NotificationCenter.default.publisher(for: TimesliceNotifications.dataDidChange)
             .sink { [weak self] _ in self?.reload() }
             .store(in: &cancellables)
+        // Today has to turn over AT midnight. It was only ever rebuilt on a reload, so the rows sat on
+        // yesterday's numbers until something unrelated happened — the next 20-minute roll, say —
+        // and then all reset at once, minutes later.
+        NotificationCenter.default.publisher(for: .NSCalendarDayChanged)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.reload() }
+            .store(in: &cancellables)
     }
 
     /// The active-task totals to display for the current scope.
@@ -310,7 +317,7 @@ final class AppState: ObservableObject {
     /// task's elapsed if this row is the one currently timing.
     func liveSeconds(base: TimeInterval, projectID: Int64) -> TimeInterval {
         guard engine.runningProjectID == projectID else { return base + elsewhereSeconds(projectID: projectID) }
-        return base + engine.elapsed
+        return base + engine.unrecordedToday
     }
 
     // MARK: - Task lifecycle

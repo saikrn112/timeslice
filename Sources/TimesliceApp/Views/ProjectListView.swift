@@ -618,7 +618,8 @@ struct ProjectListView: View {
                 }
                 .font(.system(.callout, design: .monospaced))
             } else {
-                LiveTimeText(clock: engine.clock, base: total.seconds, isRunning: isRunning, showMs: isRunning,
+                LiveTimeText(clock: engine.clock, base: total.seconds, isRunning: isRunning,
+                             live: appState.scope == .today ? .today : .unrecorded, showMs: isRunning,
                              color: isRunning ? .green : (isFinished ? .secondary : .primary))
                     .font(.system(.callout, design: .monospaced))
             }

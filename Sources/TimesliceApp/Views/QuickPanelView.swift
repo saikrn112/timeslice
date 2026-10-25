@@ -39,7 +39,7 @@ struct QuickPanelView: View {
             Text("Timeslice").font(.headline)
             Spacer()
             if engine.isRunning {
-                LiveTimeText(clock: engine.clock, base: 0, isRunning: true, showMs: true, color: .green)
+                LiveTimeText(clock: engine.clock, base: 0, isRunning: true, live: .session, showMs: true, color: .green)
                     .font(.system(.body, design: .monospaced))
             }
         }
@@ -65,7 +65,7 @@ struct QuickPanelView: View {
             Circle().fill(Color(hex: total.project.colorHex)).frame(width: 9, height: 9)
             Text(total.project.name).lineLimit(1)
             Spacer()
-            LiveTimeText(clock: engine.clock, base: total.seconds, isRunning: isRunning, showMs: isRunning,
+            LiveTimeText(clock: engine.clock, base: total.seconds, isRunning: isRunning, live: .today, showMs: isRunning,
                          color: isRunning ? .green : .secondary)
                 .font(.system(.body, design: .monospaced))
             Image(systemName: isRunning ? "pause.circle.fill" : "play.circle")

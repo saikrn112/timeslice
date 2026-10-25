@@ -17,7 +17,20 @@ import TimesliceCore
 /// what keeps CPU low and stops the metrics legend from oscillating.
 @MainActor
 final class TickClock: ObservableObject {
+    /// The whole session: since you started this task, across every block it has been rolled into.
+    /// For "how long have I been at this" — NOT for totals.
     @Published var elapsed: TimeInterval = 0
+    /// Only the open row, the part no stored total includes yet. Totals are closed rows plus THIS.
+    ///
+    /// Adding `elapsed` instead counted every rolled block of the session twice: once as a closed row
+    /// in the total, again inside the session clock. A 36-minute session that had rolled once read as
+    /// 56 minutes; the data was always right, only the live display was wrong.
+    @Published var unrecorded: TimeInterval = 0
+    /// `unrecorded`, from midnight on — for Today, which must not absorb the minutes before midnight
+    /// of a row that straddles it.
+    @Published var unrecordedToday: TimeInterval = 0
+
+    func reset() { elapsed = 0; unrecorded = 0; unrecordedToday = 0 }
 }
 
 @MainActor
@@ -40,6 +53,10 @@ final class TimerEngine: ObservableObject {
     /// Live elapsed seconds of the current running interval; 0 while paused. Non-reactive read;
     /// for reactive UI, observe `clock`.
     var elapsed: TimeInterval { clock.elapsed }
+    /// Seconds not yet in any stored total, from midnight on — what a Today figure adds live.
+    var unrecordedToday: TimeInterval { clock.unrecordedToday }
+    /// Start of the OPEN row — after a roll, the latest block boundary, not the session start.
+    private(set) var openRowStart: Date?
 
     private var ticker: AnyCancellable?
     /// Keeps macOS from throttling our timers (App Nap / timer coalescing) while a timer runs —
@@ -70,6 +87,7 @@ final class TimerEngine: ObservableObject {
             runningProjectID = open.projectID
             currentProjectID = open.projectID
             runningSince = open.start
+            openRowStart = open.start
             pausedSince = nil
             startTicking()
         }
@@ -94,8 +112,9 @@ final class TimerEngine: ObservableObject {
             runningProjectID = projectID
             currentProjectID = projectID
             runningSince = now
+            openRowStart = now
             pausedSince = nil          // running again — nothing to nudge about
-            clock.elapsed = 0
+            clock.reset()
             startTicking()
             notifyChanged()
         } catch {
@@ -118,8 +137,9 @@ final class TimerEngine: ObservableObject {
             try store.stopOpenInterval(at: end)
             runningProjectID = nil
             runningSince = nil
+            openRowStart = nil
             pausedSince = end
-            clock.elapsed = 0
+            clock.reset()
             stopTicking()
             notifyChanged()
         } catch {
@@ -138,8 +158,9 @@ final class TimerEngine: ObservableObject {
         runningProjectID = nil
         currentProjectID = nil
         runningSince = nil
+        openRowStart = nil
         pausedSince = nil              // idle, not paused — nothing to resume
-        clock.elapsed = 0
+        clock.reset()
         stopTicking()
         notifyChanged()
     }
@@ -175,8 +196,12 @@ final class TimerEngine: ObservableObject {
 
     private func tick() {
         guard let since = runningSince else { return }
-        clock.elapsed = Date().timeIntervalSince(since)
         rollChunksIfDue()
+        let now = Date()
+        let open = openRowStart ?? since
+        clock.elapsed = now.timeIntervalSince(since)
+        clock.unrecorded = max(0, now.timeIntervalSince(open))
+        clock.unrecordedToday = max(0, now.timeIntervalSince(max(open, Calendar.current.startOfDay(for: now))))
     }
 
     /// When the running interval is next due to be split into a new focus-length block.
@@ -205,8 +230,12 @@ final class TimerEngine: ObservableObject {
         let rolled = (try? store.rollOpenInterval(chunkSeconds: chunk)) ?? 0
         // Re-read the start: after a roll the open row begins at the boundary, so the next one is a
         // full chunk from there rather than from the original start.
-        nextChunkRoll = (try? store.openInterval())?.start.addingTimeInterval(chunk)
-        if rolled > 0 { notifyChanged() }
+        let openStart = (try? store.openInterval())?.start
+        nextChunkRoll = openStart?.addingTimeInterval(chunk)
+        if rolled > 0 {
+            openRowStart = openStart
+            notifyChanged()
+        }
     }
 
     private func notifyChanged() {

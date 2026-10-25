@@ -157,7 +157,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         // Today's total for the task (committed today + live session while running). Seconds
         // resolution only — ms in the menu bar is visually noisy (the popover/list keep ms).
         let todayBase = appState.todayTotals.first { $0.project.id == displayID }?.seconds ?? 0
-        let live = todayBase + engine.elapsed + appState.elsewhereSeconds(projectID: displayID)
+        let live = todayBase + engine.unrecordedToday + appState.elsewhereSeconds(projectID: displayID)
         let time = Format.duration(live)
         let name = taskName(displayID)
         var text = name.isEmpty ? time : "\(name) · \(time)"
