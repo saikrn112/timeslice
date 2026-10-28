@@ -6940,6 +6940,29 @@ func testWindowTotals() throws {
 /// The invariant that matters most is that this changes NOTHING about totals — it's a storage shape, not
 /// a measurement. If rolling could lose or duplicate a second, it would silently corrupt every
 /// aggregation, which is far worse than the prompt it replaces.
+func testSessionNormalizedClaims() {
+    print("\nPeer claims judged by session:")
+    let t0 = date(2026, 10, 27, 21, 0)
+    // An old-build phone, three blocks into a session that began at 21:00, claims its newest block.
+    let rows = [
+        Interval(id: 1, projectID: 7, start: t0, end: t0.addingTimeInterval(1200), deviceID: "iphone"),
+        Interval(id: 2, projectID: 7, start: t0.addingTimeInterval(1200), end: t0.addingTimeInterval(2400), deviceID: "iphone"),
+        Interval(id: 3, projectID: 9, start: t0.addingTimeInterval(-600), end: t0, deviceID: "iphone"),
+    ]
+    let claim = RunningMarker(deviceID: "iphone", taskUID: "P", since: t0.addingTimeInterval(2400).timeIntervalSince1970,
+                              isRunning: true, writtenAt: t0.addingTimeInterval(2500).timeIntervalSince1970)
+    let fixed = TakeoverPolicy.sessionNormalized([claim], intervals: rows, localTaskID: { $0 == "P" ? 7 : nil })
+    check(fixed.first?.since == t0.timeIntervalSince1970, "walked back to 21:00, stopping at another task")
+    // The Mac switched at 21:30: the phone's real session (21:00) is older, so the Mac keeps the timer.
+    let macSince = t0.addingTimeInterval(1800)
+    check(TakeoverPolicy.decide(localRunningSince: macSince, markers: [claim],
+                                now: t0.addingTimeInterval(2500)) != nil,
+          "the raw block claim WOULD have taken the timer (the bug)")
+    check(TakeoverPolicy.decide(localRunningSince: macSince, markers: fixed,
+                                now: t0.addingTimeInterval(2500)) == nil,
+          "the session claim does not")
+}
+
 func testOpenSessionStart() throws {
     print("\nSession start of the open row:")
     let (store, url) = try makeStore()
@@ -7251,6 +7274,7 @@ do {
     try testMergeResolvesClosedOverlaps()
     try testRollOpenInterval()
     try testOpenSessionStart()
+    testSessionNormalizedClaims()
     try testFeedback()
     try testAllocationOrdering()
     try testDuplicateNameIsProjectScoped()

@@ -552,9 +552,10 @@ final class SyncController: ObservableObject {
     }
 
     /// Peer list + takeover, given already-fetched markers.
-    private func applyMarkers(_ markers: [RunningMarker], discovered: [Peer],
+    private func applyMarkers(_ rawMarkers: [RunningMarker], discovered: [Peer],
                               observedAt: [String: Date] = [:]) {
         let now = Date()
+        let markers = sessionNormalized(rawMarkers, now: now)
         var taskByDevice: [String: (name: String, running: Bool, live: Bool)] = [:]
         for m in markers {
             let name: String
@@ -608,6 +609,14 @@ final class SyncController: ObservableObject {
         }
     }
 
+    /// Judge every peer's claim by its SESSION start — see `TakeoverPolicy.sessionNormalized`.
+    private func sessionNormalized(_ markers: [RunningMarker], now: Date) -> [RunningMarker] {
+        let recent = (try? store.intervals(from: now.addingTimeInterval(-86_400))) ?? []
+        return TakeoverPolicy.sessionNormalized(
+            markers, intervals: recent,
+            localTaskID: { [store] uid in (try? store.localID(table: "projects", uid: uid)) ?? nil })
+    }
+
     /// Show another device's running timer here — lit row, ticking time, a block on the day timeline.
     /// Redraws only when what's shown changes, not on every poll.
     private func updateLiveElsewhere(_ markers: [RunningMarker], now: Date, observedAt: [String: Date]) {
@@ -638,6 +647,7 @@ final class SyncController: ObservableObject {
             markers.append(m)
             if let modified { observedAt[m.deviceID] = modified }
         }
+        markers = sessionNormalized(markers, now: now)
         runningElsewhere = markers
             .filter { $0.claimsTimer && $0.isFresh(now: now, cutoff: TakeoverPolicy.livenessCutoff,
                                                    observedAt: observedAt[$0.deviceID]) }

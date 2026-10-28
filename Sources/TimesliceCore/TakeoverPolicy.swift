@@ -59,4 +59,30 @@ public enum TakeoverPolicy {
         let cutoff = min(max(remoteSince, localSince), now)
         return Decision(pauseAt: cutoff, byDeviceID: latest.deviceID)
     }
+
+    /// Rewrite each claim's `since` to the start of the SESSION it belongs to, using that device's own
+    /// synced rows: walk back from `since` through closed blocks of the same task on the same device
+    /// that abut within a second.
+    ///
+    /// Defence against peers on builds that claimed their open ROW's start. That start jumps forward
+    /// at every 20-minute roll, so such a phone outranked a Mac you had switched to after it — and
+    /// took the timer back. A phone can't be updated remotely; the Mac can judge its claim correctly
+    /// regardless. Idempotent for a peer that already claims its session start.
+    public static func sessionNormalized(_ markers: [RunningMarker], intervals: [Interval],
+                                         localTaskID: (String) -> Int64?) -> [RunningMarker] {
+        markers.map { m in
+            guard m.claimsTimer, let task = localTaskID(m.taskUID) else { return m }
+            let rows = intervals.filter { $0.deviceID == m.deviceID && $0.projectID == task && $0.end != nil }
+            var start = m.since
+            for _ in 0..<500 {
+                guard let prev = rows.first(where: { abs($0.end!.timeIntervalSince1970 - start) <= 1
+                                                     && $0.start.timeIntervalSince1970 < start })
+                else { break }
+                start = prev.start.timeIntervalSince1970
+            }
+            var out = m
+            out.since = start
+            return out
+        }
+    }
 }
