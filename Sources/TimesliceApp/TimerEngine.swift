@@ -86,7 +86,9 @@ final class TimerEngine: ObservableObject {
         if let open = try? store.openInterval() {
             runningProjectID = open.projectID
             currentProjectID = open.projectID
-            runningSince = open.start
+            // The session, not the row: after a relaunch the open row is just the latest 20-minute
+            // block, and claiming that start in a takeover would outrank a device switched to later.
+            runningSince = (try? store.openSessionStart()) ?? open.start
             openRowStart = open.start
             pausedSince = nil
             startTicking()

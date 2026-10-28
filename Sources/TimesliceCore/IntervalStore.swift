@@ -1106,6 +1106,37 @@ public final class IntervalStore {
         )
     }
 
+    /// When the running SESSION began: the open row's start, walked back through the closed blocks it
+    /// was rolled out of — same task, same device, abutting within a second, `OverlapResolver`'s rule.
+    ///
+    /// This, not the open row's start, is what a device must claim and compare in a takeover. The row
+    /// start jumps forward at every 20-minute roll, so a phone that rolled a block looked as if it had
+    /// started AFTER the Mac you'd just switched to, and took the timer back from it.
+    public func openSessionStart() throws -> Date? {
+        guard let open = try openInterval() else { return nil }
+        let stmt = try prepare("""
+            SELECT start_utc FROM intervals
+            WHERE running = 0 AND project_id = ? AND end_utc BETWEEN ? AND ?
+              AND COALESCE(device_id, '') = (SELECT COALESCE(device_id, '') FROM intervals WHERE id = ?)
+            ORDER BY end_utc DESC LIMIT 1
+            """)
+        defer { sqlite3_finalize(stmt) }
+        var start = open.start
+        // Bounded like `rollOpenInterval`: a session is never thousands of blocks long.
+        for _ in 0..<500 {
+            sqlite3_reset(stmt)
+            sqlite3_bind_int64(stmt, 1, open.projectID)
+            sqlite3_bind_double(stmt, 2, start.timeIntervalSince1970 - 1)
+            sqlite3_bind_double(stmt, 3, start.timeIntervalSince1970 + 1)
+            sqlite3_bind_int64(stmt, 4, open.id)
+            guard sqlite3_step(stmt) == SQLITE_ROW else { break }
+            let earlier = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 0))
+            guard earlier < start else { break }
+            start = earlier
+        }
+        return start
+    }
+
     /// Close any open interval and open a new one for `projectID`, atomically. This is the
     /// single "context switch" operation; the DB unique index guarantees only one open row.
     public func switchTo(projectID: Int64, at now: Date = Date()) throws {
@@ -1367,7 +1398,10 @@ public final class IntervalStore {
     }
 
     private func closeOpenIntervalLocked(at now: Date) throws {
-        let stmt = try prepare("UPDATE intervals SET end_utc = ?, running = 0 WHERE running = 1")
+        // Never before the row's own start. A takeover back-dates to the other device's SESSION start,
+        // which can fall inside an earlier rolled block; closing the open row there would make it
+        // negative. The earlier blocks' overlap is the merge's to settle (`OverlapResolver`).
+        let stmt = try prepare("UPDATE intervals SET end_utc = MAX(?, start_utc), running = 0 WHERE running = 1")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_double(stmt, 1, now.timeIntervalSince1970)
         try step(stmt)

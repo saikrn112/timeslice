@@ -6940,6 +6940,24 @@ func testWindowTotals() throws {
 /// The invariant that matters most is that this changes NOTHING about totals — it's a storage shape, not
 /// a measurement. If rolling could lose or duplicate a second, it would silently corrupt every
 /// aggregation, which is far worse than the prompt it replaces.
+func testOpenSessionStart() throws {
+    print("\nSession start of the open row:")
+    let (store, url) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let a = try store.createProject(name: "alpha", colorHex: "#4E79A7")
+    let b = try store.createProject(name: "beta", colorHex: "#F28E2B")
+    let t0 = date(2026, 10, 27, 19, 0)
+    check(try store.openSessionStart() == nil, "nothing running, no session")
+    try store.switchTo(projectID: b, at: t0)
+    try store.switchTo(projectID: a, at: t0.addingTimeInterval(600))      // b abuts a, different task
+    _ = try store.rollOpenInterval(chunkSeconds: 1200, now: t0.addingTimeInterval(600 + 2500))
+    check(try store.openSessionStart() == t0.addingTimeInterval(600),
+          "walks back through a's own blocks and stops at the task switch")
+    try store.stopOpenInterval(at: t0.addingTimeInterval(3200))
+    try store.switchTo(projectID: a, at: t0.addingTimeInterval(3260))     // a real pause, however short
+    check(try store.openSessionStart() == t0.addingTimeInterval(3260), "a pause starts a new session")
+}
+
 func testRollOpenInterval() throws {
     print("\nChunked intervals:")
     let (store, url) = try makeStore()
@@ -6980,6 +6998,8 @@ func testRollOpenInterval() throws {
             if let end = prev.end, abs(end.timeIntervalSince(next.start)) > 0.001 { abut = false }
         }
         check(abut, "each chunk ends exactly where the next begins")
+        // A takeover compares SESSIONS. The rolled row's start (09:90) is not when this began.
+        check(try store.openSessionStart() == start, "the session start survives three rolls")
     }
 
     do { // idempotent: calling again at the same instant must not roll a zero-length block
@@ -7230,6 +7250,7 @@ do {
     try testCrossDeviceTakeover()
     try testMergeResolvesClosedOverlaps()
     try testRollOpenInterval()
+    try testOpenSessionStart()
     try testFeedback()
     try testAllocationOrdering()
     try testDuplicateNameIsProjectScoped()

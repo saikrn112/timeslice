@@ -312,7 +312,8 @@ final class SyncController {
         let labels = (try? await MainActor.run { try Self.requireStore().deviceLabels() }) ?? [:]
         await MainActor.run { TimerModel.shared.applyPeerRunning(markers, labels: labels) }
 
-        let localSince = try await MainActor.run { try Self.requireStore().openInterval()?.start }
+        // The SESSION start, not the open row's: see `IntervalStore.openSessionStart`.
+        let localSince = try await MainActor.run { try Self.requireStore().openSessionStart() }
         guard let decision = TakeoverPolicy.decide(localRunningSince: localSince,
                                                    markers: markers,
                                                    observedAt: observedAt) else { return }
@@ -336,11 +337,13 @@ final class SyncController {
                                            deviceID: String) async throws {
         let snapshot = try await MainActor.run { () -> (start: Date, uid: String)? in
             let store = try Self.requireStore()
-            guard let open = try store.openInterval(),
+            // Claimed from when the SESSION began. The open row's start moves forward at every roll,
+            // and a claim that moves forward outranks a device you switched to after it.
+            guard let open = try store.openInterval(), let session = try store.openSessionStart(),
                   // The task travels as its **uid**, never its row id — `subject_id = 8` is a
                   // different task on the other machine.
                   let uid = try store.uid(table: "projects", id: open.projectID) else { return nil }
-            return (open.start, uid)
+            return (session, uid)
         }
         guard let snapshot else {
             // No open interval: clear the claim rather than leaving a stale one that would pause
